@@ -1,0 +1,129 @@
+# Azure OpenAI 多语言配置
+# 支持多语言代码库 (Go, Rust, JavaScript, TypeScript, C++, Java 等)
+# 注意：使用 run-batch 时，需要通过 CLI 参数设置 deployment:
+# --instances.deployment.python_standalone_dir ""
+
+agent:
+  type: default
+  templates:
+    system_template: |-
+      You are a helpful assistant that can interact with a computer to solve tasks.
+
+      Available tools:
+      {{command_docs}}
+
+      Output format (REQUIRED):
+      DISCUSSION
+      <short reasoning>
+
+      ```
+      <single tool command>
+      ```
+
+      - Always follow the exact format above.
+      - Use exactly one command in the code block.
+      - The command MUST start with "bash " and be a single-line bash command.
+      - Do NOT use heredocs (<<) or multi-line bash commands.
+      - For multi-line scripts, use python -c with explicit \\n, or create a file via printf.
+      - Do not include extra text outside the DISCUSSION and code block.
+    instance_template: |-
+      <uploaded_files>
+      {{working_dir}}
+      </uploaded_files>
+      I've uploaded a code repository in the directory {{working_dir}}. Consider the following PR description:
+
+      <pr_description>
+      {{problem_statement}}
+      </pr_description>
+
+      Can you help me implement the necessary changes to the repository so that the requirements specified in the <pr_description> are met?
+      I've already taken care of all changes to any of the test files described in the <pr_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
+      Your task is to make the minimal changes to non-tests files in the {{working_dir}} directory to ensure the <pr_description> is satisfied.
+      Follow these steps to resolve the issue:
+      1. As a first step, it might be a good idea to explore the repository structure and find code relevant to the <pr_description>
+      2. Create a script to reproduce the error and execute it using the bash tool, to confirm the error
+      3. Edit the sourcecode of the repo to resolve the issue
+      4. Rerun your reproduce script and confirm that the error is fixed!
+      5. Think about edgecases and make sure your fix handles them as well
+      Your thinking should be thorough and so it's fine if it's very long.
+    next_step_template: |-
+      OBSERVATION:
+      {{observation}}
+    next_step_no_output_template: |-
+      Your command ran successfully and did not produce any output.
+  model:
+    name: openai/gpt-5
+    api_base: 
+    api_key: 
+    per_instance_cost_limit: 0.0
+    total_cost_limit: 0.0
+    temperature: 1.0
+    top_p: null
+    # 增加超时和重试配置以适应较慢的 API 端点
+    retry:
+      retries: 10  # 重试次数（默认 20，减少以避免过长等待）
+      min_wait: 5  # 最小等待时间（秒，默认 10）
+      max_wait: 60  # 最大等待时间（秒，默认 120）
+    completion_kwargs:
+      timeout: 120  # API 调用超时时间（秒），根据测试最大响应时间约 25 秒，设置 120 秒以留有余地
+  tools:
+    execution_timeout: 300
+    env_variables:
+      PAGER: cat
+      MANPAGER: cat
+      LESS: -R
+      GIT_PAGER: cat
+    bundles:
+      - path: tools/registry
+      - path: tools/edit_anthropic
+      - path: tools/review_on_submit_m
+    registry_variables:
+      USE_FILEMAP: 'true'
+      SUBMIT_REVIEW_MESSAGES:
+        - |
+          **STOP! BEFORE SUBMITTING:** You MUST provide the CODE CONTEXT you used to generate this patch.
+
+          **REQUIRED FORMAT:**
+          In your NEXT response, you MUST:
+          1. Output a <PATCH_CONTEXT> block listing ALL source files and line ranges you examined
+          2. Then call `submit` again
+
+          **Format for <PATCH_CONTEXT>:**
+          <PATCH_CONTEXT>
+          File: /testbed/path/to/file1.ext
+          Lines: 10-50
+
+          File: /testbed/path/to/file2.ext
+          Lines: 100-150
+          </PATCH_CONTEXT>
+
+          **Rules:**
+          - List ONLY source files you viewed/edited (not test files)
+          - Include the EXACT line ranges you examined
+          - Do NOT include code snippets, explanations, or commentary
+          - Do NOT skip this step - the <PATCH_CONTEXT> block is MANDATORY
+
+          **YOUR NEXT RESPONSE MUST CONTAIN:**
+          1. The <PATCH_CONTEXT> block (not inside a code fence)
+          2. A call to `submit`
+        - |
+          Thank you for your work on this issue. Please carefully follow the steps below to help review your changes.
+
+          1. If you made any changes to your code after running the reproduction script, please run the reproduction script again.
+            If the reproduction script is failing, please revisit your changes and make sure they are correct.
+            If you have already removed your reproduction script, please ignore this step.
+          2. Remove your reproduction script (if you haven't done so already).
+          3. If you have modified any TEST files, please revert them to the state they had before you started fixing the issue.
+            You can do this with `git checkout -- /path/to/test/file`. Use below <diff> to find the files you need to revert.
+          4. Run the submit command again to confirm.
+
+          Here is a list of all of your changes:
+
+          <diff>
+          {{diff}}
+          </diff>
+    enable_bash_tool: true
+    parse_function:
+      type: thought_action
+  history_processors: []
+
