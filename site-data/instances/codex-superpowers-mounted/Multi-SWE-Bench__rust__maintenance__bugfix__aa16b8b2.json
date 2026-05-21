@@ -1,0 +1,2005 @@
+{
+  "comparisonId": "codex-superpowers-mounted",
+  "instanceId": "Multi-SWE-Bench__rust__maintenance__bugfix__aa16b8b2",
+  "originalInstanceId": "tokio-rs__tracing-2897",
+  "bench": "Multi",
+  "language": "rust",
+  "repoUrl": "https://github.com/tokio-rs/tracing.git",
+  "commit": "908cc432a5994f6e17c8f36e13c217dc40085704",
+  "variants": [
+    {
+      "name": "Baseline",
+      "model": "gpt-5.4",
+      "effort": "High",
+      "status": "completed",
+      "evaluationStatus": "valid",
+      "resolutionStatus": "resolved",
+      "startedAt": "2026-05-19T00:13:01Z",
+      "completedAt": "2026-05-19T00:16:38Z",
+      "durationMs": 216776,
+      "tokenUsage": {
+        "source": "codex.turn.completed",
+        "input_tokens": 781286,
+        "output_tokens": 9805,
+        "cached_input_tokens": 688768,
+        "total_tokens": 791091,
+        "cache_read_input_tokens": 688768
+      },
+      "modelPatch": "diff --git a/tracing-attributes/src/expand.rs b/tracing-attributes/src/expand.rs\nindex a92ef58..270dd4f 100644\n--- a/tracing-attributes/src/expand.rs\n+++ b/tracing-attributes/src/expand.rs\n@@ -350,11 +350,21 @@ fn gen_block<B: ToTokens>(\n         }\n     );\n \n+    // Force the generated closure to consume a non-`Copy` capture when called,\n+    // so it is inferred as `FnOnce` and can return references to captures.\n+    let force_fn_once = quote!(\n+        let __tracing_attr_force_fn_once: [&mut (); 0] = [];\n+    );\n+\n     match (err_event, ret_event) {\n         (Some(err_event), Some(ret_event)) => quote_spanned! {block.span()=>\n             #span\n+            #force_fn_once\n             #[allow(clippy::redundant_closure_call)]\n-            match (move || #block)() {\n+            match (move || {\n+                let _tracing_attr_force_fn_once = __tracing_attr_force_fn_once;\n+                #block\n+            })() {\n                 #[allow(clippy::unit_arg)]\n                 Ok(x) => {\n                     #ret_event;\n@@ -368,8 +378,12 @@ fn gen_block<B: ToTokens>(\n         },\n         (Some(err_event), None) => quote_spanned!(block.span()=>\n             #span\n+            #force_fn_once\n             #[allow(clippy::redundant_closure_call)]\n-            match (move || #block)() {\n+            match (move || {\n+                let _tracing_attr_force_fn_once = __tracing_attr_force_fn_once;\n+                #block\n+            })() {\n                 #[allow(clippy::unit_arg)]\n                 Ok(x) => Ok(x),\n                 Err(e) => {\n@@ -380,8 +394,12 @@ fn gen_block<B: ToTokens>(\n         ),\n         (None, Some(ret_event)) => quote_spanned!(block.span()=>\n             #span\n+            #force_fn_once\n             #[allow(clippy::redundant_closure_call)]\n-            let x = (move || #block)();\n+            let x = (move || {\n+                let _tracing_attr_force_fn_once = __tracing_attr_force_fn_once;\n+                #block\n+            })();\n             #ret_event;\n             x\n         ),\ndiff --git a/tracing-attributes/tests/ret.rs b/tracing-attributes/tests/ret.rs\nindex 19d01c9..d10d15f 100644\n--- a/tracing-attributes/tests/ret.rs\n+++ b/tracing-attributes/tests/ret.rs\n@@ -97,6 +97,16 @@ fn ret_mut(a: &mut i32) -> i32 {\n     *a\n }\n \n+#[instrument(ret)]\n+fn ret_ref(x: &mut ()) -> &() {\n+    x\n+}\n+\n+#[instrument(ret)]\n+fn ret_mut_ref(x: &mut ()) -> &mut () {\n+    x\n+}\n+\n #[test]\n fn test_mut() {\n     let span = expect::span().named(\"ret_mut\");\n@@ -122,6 +132,51 @@ fn test_mut() {\n     handle.assert_finished();\n }\n \n+#[test]\n+fn test_ref() {\n+    let span = expect::span().named(\"ret_ref\");\n+    let (collector, handle) = collector::mock()\n+        .new_span(span.clone())\n+        .enter(span.clone())\n+        .event(\n+            expect::event()\n+                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(())))\n+                .at_level(Level::INFO),\n+        )\n+        .exit(span.clone())\n+        .drop_span(span)\n+        .only()\n+        .run_with_handle();\n+\n+    let mut x = ();\n+    let returned = with_default(collector, || ret_ref(&mut x));\n+    assert!(std::ptr::eq(returned, &x));\n+    handle.assert_finished();\n+}\n+\n+#[test]\n+fn test_mut_ref() {\n+    let span = expect::span().named(\"ret_mut_ref\");\n+    let (collector, handle) = collector::mock()\n+        .new_span(span.clone())\n+        .enter(span.clone())\n+        .event(\n+            expect::event()\n+                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(())))\n+                .at_level(Level::INFO),\n+        )\n+        .exit(span.clone())\n+        .drop_span(span)\n+        .only()\n+        .run_with_handle();\n+\n+    let mut x = ();\n+    let x_ptr = &mut x as *mut ();\n+    let returned = with_default(collector, || ret_mut_ref(&mut x));\n+    assert_eq!(returned as *mut (), x_ptr);\n+    handle.assert_finished();\n+}\n+\n #[instrument(ret)]\n async fn ret_async() -> i32 {\n     42\n",
+      "finalOutput": {
+        "status": "completed",
+        "finalAnswer": "Implemented the `tracing-attributes` fix by forcing the generated synchronous `#[instrument(ret)]`/`#[instrument(err)]` closure wrapper to consume a non-`Copy` zero-sized capture (`[&mut (); 0]`) on invocation, which makes the closure no more than `FnOnce` and allows references to captured `&mut` arguments to be returned. Added regression coverage in `tracing-attributes/tests/ret.rs` for both `#[instrument(ret)] fn ret_ref(&mut ()) -> &()` and `#[instrument(ret)] fn ret_mut_ref(&mut ()) -> &mut ()`, including runtime expectations for the `return` event. Verification was limited to static diff inspection and `git diff --check`, which passed; `cargo`, `rustc`, and `rustfmt` are not installed in this environment, so I could not run crate tests or formatting.",
+        "notes": "Offline verification available here was limited. `git diff --check` succeeded, but no Rust toolchain binaries were present (`cargo`, `rustc`, and `rustfmt` were all unavailable), so compile/test execution could not be performed.",
+        "retrievedContextFiles": [
+          "tracing-attributes/src/expand.rs",
+          "tracing-attributes/tests/ret.rs"
+        ],
+        "retrievedContextSpans": [
+          {
+            "file": "tracing-attributes/src/expand.rs",
+            "start": 353,
+            "end": 405
+          },
+          {
+            "file": "tracing-attributes/tests/ret.rs",
+            "start": 93,
+            "end": 178
+          }
+        ],
+        "retrievedContextSymbols": [
+          {
+            "file": "tracing-attributes/src/expand.rs",
+            "name": "gen_block"
+          }
+        ]
+      },
+      "predTrajectory": {
+        "predSteps": [
+          {
+            "files": [
+              "tracing-attributes/src/expand.rs",
+              "tracing-attributes/src/lib.rs",
+              "tracing-attributes/tests/fields.rs",
+              "tracing-attributes/tests/ret.rs",
+              "tracing/benches/shared.rs",
+              "tracing/src/collect.rs",
+              "tracing/src/span.rs"
+            ],
+            "spans": {
+              "tracing-attributes/src/lib.rs": [
+                {
+                  "start": 85,
+                  "end": 85
+                },
+                {
+                  "start": 228,
+                  "end": 228
+                },
+                {
+                  "start": 379,
+                  "end": 379
+                },
+                {
+                  "start": 396,
+                  "end": 396
+                },
+                {
+                  "start": 412,
+                  "end": 412
+                },
+                {
+                  "start": 423,
+                  "end": 423
+                },
+                {
+                  "start": 426,
+                  "end": 426
+                },
+                {
+                  "start": 434,
+                  "end": 434
+                },
+                {
+                  "start": 446,
+                  "end": 446
+                },
+                {
+                  "start": 447,
+                  "end": 447
+                },
+                {
+                  "start": 448,
+                  "end": 448
+                },
+                {
+                  "start": 465,
+                  "end": 465
+                },
+                {
+                  "start": 467,
+                  "end": 467
+                },
+                {
+                  "start": 472,
+                  "end": 472
+                },
+                {
+                  "start": 487,
+                  "end": 487
+                }
+              ],
+              "tracing-attributes/src/expand.rs": [
+                {
+                  "start": 8,
+                  "end": 8
+                },
+                {
+                  "start": 14,
+                  "end": 14
+                },
+                {
+                  "start": 24,
+                  "end": 24
+                },
+                {
+                  "start": 26,
+                  "end": 26
+                },
+                {
+                  "start": 506,
+                  "end": 506
+                },
+                {
+                  "start": 521,
+                  "end": 521
+                },
+                {
+                  "start": 550,
+                  "end": 550
+                },
+                {
+                  "start": 560,
+                  "end": 560
+                },
+                {
+                  "start": 702,
+                  "end": 702
+                }
+              ],
+              "tracing-attributes/tests/ret.rs": [
+                {
+                  "start": 11,
+                  "end": 11
+                },
+                {
+                  "start": 93,
+                  "end": 93
+                },
+                {
+                  "start": 125,
+                  "end": 125
+                },
+                {
+                  "start": 152,
+                  "end": 152
+                }
+              ],
+              "tracing-attributes/tests/fields.rs": [
+                {
+                  "start": 149,
+                  "end": 149
+                }
+              ],
+              "tracing/src/collect.rs": [
+                {
+                  "start": 18,
+                  "end": 18
+                }
+              ],
+              "tracing/benches/shared.rs": [
+                {
+                  "start": 13,
+                  "end": 13
+                },
+                {
+                  "start": 38,
+                  "end": 38
+                }
+              ],
+              "tracing/src/span.rs": [
+                {
+                  "start": 1101,
+                  "end": 1101
+                },
+                {
+                  "start": 1361,
+                  "end": 1361
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tracing-attributes/src/expand.rs"
+            ],
+            "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tracing-attributes/tests/ret.rs"
+            ],
+            "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tracing-attributes/Cargo.toml",
+              "tracing-attributes/src/attr.rs",
+              "tracing-attributes/src/lib.rs",
+              "tracing-attributes/tests/fields.rs",
+              "tracing-attributes/tests/ret.rs",
+              "tracing-attributes/tests/ui.rs",
+              "tracing-attributes/tests/ui/async_instrument.stderr",
+              "tracing-attributes/tests/ui/const_instrument.stderr"
+            ],
+            "spans": {
+              "tracing-attributes/src/attr.rs": [
+                {
+                  "start": 131,
+                  "end": 131
+                },
+                {
+                  "start": 437,
+                  "end": 437
+                }
+              ],
+              "tracing-attributes/src/lib.rs": [
+                {
+                  "start": 228,
+                  "end": 228
+                },
+                {
+                  "start": 307,
+                  "end": 307
+                },
+                {
+                  "start": 350,
+                  "end": 350
+                }
+              ],
+              "tracing-attributes/Cargo.toml": [
+                {
+                  "start": 58,
+                  "end": 58
+                }
+              ],
+              "tracing-attributes/tests/ret.rs": [
+                {
+                  "start": 11,
+                  "end": 11
+                },
+                {
+                  "start": 16,
+                  "end": 16
+                },
+                {
+                  "start": 37,
+                  "end": 37
+                },
+                {
+                  "start": 68,
+                  "end": 68
+                },
+                {
+                  "start": 93,
+                  "end": 93
+                },
+                {
+                  "start": 125,
+                  "end": 125
+                },
+                {
+                  "start": 152,
+                  "end": 152
+                },
+                {
+                  "start": 202,
+                  "end": 202
+                },
+                {
+                  "start": 231,
+                  "end": 231
+                }
+              ],
+              "tracing-attributes/tests/fields.rs": [
+                {
+                  "start": 149,
+                  "end": 149
+                }
+              ],
+              "tracing-attributes/tests/ui.rs": [
+                {
+                  "start": 5,
+                  "end": 5
+                },
+                {
+                  "start": 6,
+                  "end": 6
+                },
+                {
+                  "start": 12,
+                  "end": 12
+                },
+                {
+                  "start": 13,
+                  "end": 13
+                }
+              ],
+              "tracing-attributes/tests/ui/async_instrument.stderr": [
+                {
+                  "start": 2,
+                  "end": 2
+                },
+                {
+                  "start": 8,
+                  "end": 8
+                },
+                {
+                  "start": 14,
+                  "end": 14
+                },
+                {
+                  "start": 22,
+                  "end": 22
+                },
+                {
+                  "start": 28,
+                  "end": 28
+                },
+                {
+                  "start": 38,
+                  "end": 38
+                },
+                {
+                  "start": 47,
+                  "end": 47
+                },
+                {
+                  "start": 55,
+                  "end": 55
+                },
+                {
+                  "start": 65,
+                  "end": 65
+                },
+                {
+                  "start": 71,
+                  "end": 71
+                },
+                {
+                  "start": 77,
+                  "end": 77
+                },
+                {
+                  "start": 85,
+                  "end": 85
+                },
+                {
+                  "start": 91,
+                  "end": 91
+                }
+              ],
+              "tracing-attributes/tests/ui/const_instrument.stderr": [
+                {
+                  "start": 2,
+                  "end": 2
+                },
+                {
+                  "start": 10,
+                  "end": 10
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "2>/dev/null"
+            ],
+            "spans": {},
+            "symbols": {}
+          }
+        ],
+        "predFiles": [
+          "2>/dev/null",
+          "tracing-attributes/Cargo.toml",
+          "tracing-attributes/src/attr.rs",
+          "tracing-attributes/src/expand.rs",
+          "tracing-attributes/src/lib.rs",
+          "tracing-attributes/tests/fields.rs",
+          "tracing-attributes/tests/ret.rs",
+          "tracing-attributes/tests/ui.rs",
+          "tracing-attributes/tests/ui/async_instrument.stderr",
+          "tracing-attributes/tests/ui/const_instrument.stderr",
+          "tracing/benches/shared.rs",
+          "tracing/src/collect.rs",
+          "tracing/src/span.rs"
+        ],
+        "predSpans": {
+          "tracing-attributes/src/lib.rs": [
+            {
+              "start": 85,
+              "end": 85
+            },
+            {
+              "start": 228,
+              "end": 228
+            },
+            {
+              "start": 307,
+              "end": 307
+            },
+            {
+              "start": 350,
+              "end": 350
+            },
+            {
+              "start": 379,
+              "end": 379
+            },
+            {
+              "start": 396,
+              "end": 396
+            },
+            {
+              "start": 412,
+              "end": 412
+            },
+            {
+              "start": 423,
+              "end": 423
+            },
+            {
+              "start": 426,
+              "end": 426
+            },
+            {
+              "start": 434,
+              "end": 434
+            },
+            {
+              "start": 446,
+              "end": 446
+            },
+            {
+              "start": 447,
+              "end": 447
+            },
+            {
+              "start": 448,
+              "end": 448
+            },
+            {
+              "start": 465,
+              "end": 465
+            },
+            {
+              "start": 467,
+              "end": 467
+            },
+            {
+              "start": 472,
+              "end": 472
+            },
+            {
+              "start": 487,
+              "end": 487
+            }
+          ],
+          "tracing-attributes/src/expand.rs": [
+            {
+              "start": 8,
+              "end": 8
+            },
+            {
+              "start": 14,
+              "end": 14
+            },
+            {
+              "start": 24,
+              "end": 24
+            },
+            {
+              "start": 26,
+              "end": 26
+            },
+            {
+              "start": 353,
+              "end": 405
+            },
+            {
+              "start": 506,
+              "end": 506
+            },
+            {
+              "start": 521,
+              "end": 521
+            },
+            {
+              "start": 550,
+              "end": 550
+            },
+            {
+              "start": 560,
+              "end": 560
+            },
+            {
+              "start": 702,
+              "end": 702
+            }
+          ],
+          "tracing-attributes/tests/ret.rs": [
+            {
+              "start": 11,
+              "end": 11
+            },
+            {
+              "start": 16,
+              "end": 16
+            },
+            {
+              "start": 37,
+              "end": 37
+            },
+            {
+              "start": 68,
+              "end": 68
+            },
+            {
+              "start": 93,
+              "end": 93
+            },
+            {
+              "start": 93,
+              "end": 178
+            },
+            {
+              "start": 125,
+              "end": 125
+            },
+            {
+              "start": 152,
+              "end": 152
+            },
+            {
+              "start": 202,
+              "end": 202
+            },
+            {
+              "start": 231,
+              "end": 231
+            }
+          ],
+          "tracing-attributes/tests/fields.rs": [
+            {
+              "start": 149,
+              "end": 149
+            }
+          ],
+          "tracing/src/collect.rs": [
+            {
+              "start": 18,
+              "end": 18
+            }
+          ],
+          "tracing/benches/shared.rs": [
+            {
+              "start": 13,
+              "end": 13
+            },
+            {
+              "start": 38,
+              "end": 38
+            }
+          ],
+          "tracing/src/span.rs": [
+            {
+              "start": 1101,
+              "end": 1101
+            },
+            {
+              "start": 1361,
+              "end": 1361
+            }
+          ],
+          "tracing-attributes/src/attr.rs": [
+            {
+              "start": 131,
+              "end": 131
+            },
+            {
+              "start": 437,
+              "end": 437
+            }
+          ],
+          "tracing-attributes/Cargo.toml": [
+            {
+              "start": 58,
+              "end": 58
+            }
+          ],
+          "tracing-attributes/tests/ui.rs": [
+            {
+              "start": 5,
+              "end": 5
+            },
+            {
+              "start": 6,
+              "end": 6
+            },
+            {
+              "start": 12,
+              "end": 12
+            },
+            {
+              "start": 13,
+              "end": 13
+            }
+          ],
+          "tracing-attributes/tests/ui/async_instrument.stderr": [
+            {
+              "start": 2,
+              "end": 2
+            },
+            {
+              "start": 8,
+              "end": 8
+            },
+            {
+              "start": 14,
+              "end": 14
+            },
+            {
+              "start": 22,
+              "end": 22
+            },
+            {
+              "start": 28,
+              "end": 28
+            },
+            {
+              "start": 38,
+              "end": 38
+            },
+            {
+              "start": 47,
+              "end": 47
+            },
+            {
+              "start": 55,
+              "end": 55
+            },
+            {
+              "start": 65,
+              "end": 65
+            },
+            {
+              "start": 71,
+              "end": 71
+            },
+            {
+              "start": 77,
+              "end": 77
+            },
+            {
+              "start": 85,
+              "end": 85
+            },
+            {
+              "start": 91,
+              "end": 91
+            }
+          ],
+          "tracing-attributes/tests/ui/const_instrument.stderr": [
+            {
+              "start": 2,
+              "end": 2
+            },
+            {
+              "start": 10,
+              "end": 10
+            }
+          ]
+        },
+        "predSymbols": {
+          "tracing-attributes/src/expand.rs": [
+            "gen_block"
+          ]
+        }
+      },
+      "evaluatedTrajectory": {
+        "steps": [
+          {
+            "step": 1,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 2,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 3,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 4,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 5,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.0,
+              "line": 0.0
+            }
+          }
+        ],
+        "aucCoverage": {
+          "file": 1.0,
+          "symbol": 0.5,
+          "span": 0.0,
+          "line": 0.0
+        },
+        "redundancy": {
+          "file": 0.2941176470588235,
+          "symbol": 0.040000000000000036,
+          "span": 0.05635319454414933,
+          "line": 0.08695652173913049
+        }
+      },
+      "fixOverlap": {
+        "vsGold": {
+          "status": "available",
+          "reason": null,
+          "recall": 0.2727272727272727,
+          "precision": 0.3333333333333333,
+          "f1": 0.3,
+          "intersection": 3,
+          "goldSize": 11,
+          "predSize": 9
+        }
+      },
+      "traceEntries": [
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"pwd && rg -n \\\"instrument\\\\(ret\\\\)|FnOnce|FnMut|Fn\\\\b|non-copy|\\\\[&mut \\\\(\\\\), 0\\\\]\\\" tracing-attributes tracing -S\"",
+          "output": "<worktree>\ntracing-attributes/src/lib.rs:85:use syn::{Attribute, ItemFn, Signature, Visibility};\ntracing-attributes/src/lib.rs:228:/// #[instrument(ret)]\ntracing-attributes/src/lib.rs:379:    let input = syn::parse_macro_input!(item as MaybeItemFn);\ntracing-attributes/src/lib.rs:396:    let input = syn::parse::<ItemFn>(item)?;\ntracing-attributes/src/lib.rs:412:    let input = MaybeItemFn::from(input);\ntracing-attributes/src/lib.rs:423:/// This is a more flexible/imprecise `ItemFn` type,\ntracing-attributes/src/lib.rs:426:struct MaybeItemFn {\ntracing-attributes/src/lib.rs:434:impl MaybeItemFn {\ntracing-attributes/src/lib.rs:446:/// This parses a `TokenStream` into a `MaybeItemFn`\ntracing-attributes/src/lib.rs:447:/// (just like `ItemFn`, but skips parsing the body).\ntracing-attributes/src/lib.rs:448:impl Parse for MaybeItemFn {\ntracing-attributes/src/lib.rs:465:impl From<ItemFn> for MaybeItemFn {\ntracing-attributes/src/lib.rs:467:        ItemFn {\ntracing-attributes/src/lib.rs:472:        }: ItemFn,\ntracing-attributes/src/lib.rs:487:/// A generic reference type for `MaybeItemFn`,\ntracing-attributes/src/expand.rs:8:    Ident, Item, ItemFn, Pat, PatIdent, PatReference, PatStruct, PatTuple, PatTupleStruct, PatType,\ntracing-attributes/src/expand.rs:14:    MaybeItemFn, MaybeItemFnRef,\ntracing-attributes/src/expand.rs:24:    // these are needed ahead of time, as ItemFn contains the function body _and_\ntracing-attributes/src/expand.rs:26:    // (Syn's ToTokens isn't implemented for ItemFn)\ntracing-attributes/src/expand.rs:506:    Function(&'a ItemFn),\ntracing-attributes/src/expand.rs:521:    input: &'block ItemFn,\ntracing-attributes/src/expand.rs:550:    pub(crate) fn from_fn(input: &'block ItemFn) -> Option<Self> {\ntracing-attributes/src/expand.rs:560:            if let Stmt::Item(Item::Fn(fun)) = &stmt {\ntracing-attributes/src/expand.rs:702:                    let fun = MaybeItemFn::from(fun.clone());\ntracing-attributes/tests/ret.rs:11:#[instrument(ret)]\ntracing-attributes/tests/ret.rs:93:#[instrument(ret)]\ntracing-attributes/tests/ret.rs:125:#[instrument(ret)]\ntracing-attributes/tests/ret.rs:152:#[instrument(ret)]\ntracing-attributes/tests/fields.rs:149:fn run_test<F: FnOnce() -> T, T>(span: NewSpan, fun: F) {\ntracing/src/collect.rs:18:pub fn with_default<T, C>(collector: C, f: impl FnOnce() -> T) -> T\ntracing/benches/shared.rs:13:    mut iter: impl FnMut(&mut Bencher<'_, WallTime>),\ntracing/benches/shared.rs:38:    mut iter: impl FnMut(&mut Bencher<'_, WallTime>),\ntracing/src/span.rs:1101:    pub fn in_scope<F: FnOnce() -> T, T>(&self, f: F) -> T {\ntracing/src/span.rs:1361:    pub fn with_collector<T>(&self, f: impl FnOnce((&Id, &Dispatch)) -> T) -> Option<T> {\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '1,240p' tracing-attributes/src/expand.rs\"",
+          "output": "use std::iter;\n\nuse proc_macro2::TokenStream;\nuse quote::{quote, quote_spanned, ToTokens};\nuse syn::visit_mut::VisitMut;\nuse syn::{\n    punctuated::Punctuated, spanned::Spanned, Block, Expr, ExprAsync, ExprCall, FieldPat, FnArg,\n    Ident, Item, ItemFn, Pat, PatIdent, PatReference, PatStruct, PatTuple, PatTupleStruct, PatType,\n    Path, ReturnType, Signature, Stmt, Token, Type, TypePath,\n};\n\nuse crate::{\n    attr::{Field, Fields, FormatMode, InstrumentArgs, Level},\n    MaybeItemFn, MaybeItemFnRef,\n};\n\n/// Given an existing function, generate an instrumented version of that function\npub(crate) fn gen_function<'a, B: ToTokens + 'a>(\n    input: MaybeItemFnRef<'a, B>,\n    args: InstrumentArgs,\n    instrumented_function_name: &str,\n    self_type: Option<&TypePath>,\n) -> proc_macro2::TokenStream {\n    // these are needed ahead of time, as ItemFn contains the function body _and_\n    // isn't representable inside a quote!/quote_spanned! macro\n    // (Syn's ToTokens isn't implemented for ItemFn)\n    let MaybeItemFnRef {\n        outer_attrs,\n        inner_attrs,\n        vis,\n        sig,\n        block,\n    } = input;\n\n    let Signature {\n        output,\n        inputs: params,\n        unsafety,\n        asyncness,\n        constness,\n        abi,\n        ident,\n        generics:\n            syn::Generics {\n                params: gen_params,\n                where_clause,\n                ..\n            },\n        ..\n    } = sig;\n\n    let warnings = args.warnings();\n\n    let (return_type, return_span) = if let ReturnType::Type(_, return_type) = &output {\n        (erase_impl_trait(return_type), return_type.span())\n    } else {\n        // Point at function name if we don't have an explicit return type\n        (syn::parse_quote! { () }, ident.span())\n    };\n    // Install a fake return statement as the first thing in the function\n    // body, so that we eagerly infer that the return type is what we\n    // declared in the async fn signature.\n    // The `#[allow(..)]` is given because the return statement is\n    // unreachable, but does affect inference, so it needs to be written\n    // exactly that way for it to do its magic.\n    let fake_return_edge = quote_spanned! {return_span=>\n        #[allow(\n            unknown_lints, unreachable_code, clippy::diverging_sub_expression,\n            clippy::let_unit_value, clippy::unreachable, clippy::let_with_type_underscore,\n            clippy::empty_loop\n        )]\n        if false {\n            let __tracing_attr_fake_return: #return_type = loop {};\n            return __tracing_attr_fake_return;\n        }\n    };\n    let block = quote! {\n        {\n            #fake_return_edge\n            #block\n        }\n    };\n\n    let body = gen_block(\n        &block,\n        params,\n        asyncness.is_some(),\n        args,\n        instrumented_function_name,\n        self_type,\n    );\n\n    quote!(\n        #(#outer_attrs) *\n        #vis #constness #unsafety #asyncness #abi fn #ident<#gen_params>(#params) #output\n        #where_clause\n        {\n            #(#inner_attrs) *\n            #warnings\n            #body\n        }\n    )\n}\n\n/// Instrument a block\nfn gen_block<B: ToTokens>(\n    block: &B,\n    params: &Punctuated<FnArg, Token![,]>,\n    async_context: bool,\n    mut args: InstrumentArgs,\n    instrumented_function_name: &str,\n    self_type: Option<&TypePath>,\n) -> proc_macro2::TokenStream {\n    // generate the span's name\n    let span_name = args\n        // did the user override the span's name?\n        .name\n        .as_ref()\n        .map(|name| quote!(#name))\n        .unwrap_or_else(|| quote!(#instrumented_function_name));\n\n    let args_level = args.level();\n    let level = args_level.clone();\n\n    let follows_from = args.follows_from.iter();\n    let follows_from = quote! {\n        #(for cause in #follows_from {\n            __tracing_attr_span.follows_from(cause);\n        })*\n    };\n\n    // generate this inside a closure, so we can return early on errors.\n    let span = (|| {\n        // Pull out the arguments-to\u2026",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '1,260p' tracing-attributes/tests/ret.rs\"",
+          "output": "use std::convert::TryFrom;\nuse std::num::TryFromIntError;\n\nuse tracing::{collect::with_default, Level};\nuse tracing_attributes::instrument;\nuse tracing_mock::{collector, expect};\nuse tracing_subscriber::subscribe::CollectExt;\nuse tracing_subscriber::EnvFilter;\nuse tracing_test::block_on_future;\n\n#[instrument(ret)]\nfn ret() -> i32 {\n    42\n}\n\n#[instrument(target = \"my_target\", ret)]\nfn ret_with_target() -> i32 {\n    42\n}\n\n#[test]\nfn test() {\n    let span = expect::span().named(\"ret\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, ret);\n    handle.assert_finished();\n}\n\n#[test]\nfn test_custom_target() {\n    let filter: EnvFilter = \"my_target=info\".parse().expect(\"filter should parse\");\n    let span = expect::span()\n        .named(\"ret_with_target\")\n        .with_target(\"my_target\");\n\n    let (subscriber, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::INFO)\n                .with_target(\"my_target\"),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    let subscriber = subscriber.with(filter);\n\n    with_default(subscriber, ret_with_target);\n    handle.assert_finished();\n}\n\n#[instrument(level = \"warn\", ret)]\nfn ret_warn() -> i32 {\n    42\n}\n\n#[test]\nfn test_warn() {\n    let span = expect::span().named(\"ret_warn\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::WARN),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, ret_warn);\n    handle.assert_finished();\n}\n\n#[instrument(ret)]\nfn ret_mut(a: &mut i32) -> i32 {\n    *a *= 2;\n    tracing::info!(?a);\n    *a\n}\n\n#[test]\nfn test_mut() {\n    let span = expect::span().named(\"ret_mut\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"a\").with_value(&tracing::field::display(2)))\n                .at_level(Level::INFO),\n        )\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(2)))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, || ret_mut(&mut 1));\n    handle.assert_finished();\n}\n\n#[instrument(ret)]\nasync fn ret_async() -> i32 {\n    42\n}\n\n#[test]\nfn test_async() {\n    let span = expect::span().named(\"ret_async\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .enter(span.clone())\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, || block_on_future(async { ret_async().await }));\n    handle.assert_finished();\n}\n\n#[instrument(ret)]\nfn ret_impl_type() -> impl Copy {\n    42\n}\n\n#[test]\nfn test_impl_type() {\n    let span = expect::span().named(\"ret_\u2026",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '240,520p' tracing-attributes/src/expand.rs\"",
+          "output": "        Some(event_args) => {\n            let level_tokens = event_args.level(Level::Error);\n            match event_args.mode {\n                FormatMode::Default | FormatMode::Display => Some(quote!(\n                    tracing::event!(target: #target, #level_tokens, error = %e)\n                )),\n                FormatMode::Debug => Some(quote!(\n                    tracing::event!(target: #target, #level_tokens, error = ?e)\n                )),\n            }\n        }\n        _ => None,\n    };\n\n    let ret_event = match args.ret_args {\n        Some(event_args) => {\n            let level_tokens = event_args.level(args_level);\n            match event_args.mode {\n                FormatMode::Display => Some(quote!(\n                    tracing::event!(target: #target, #level_tokens, return = %x)\n                )),\n                FormatMode::Default | FormatMode::Debug => Some(quote!(\n                    tracing::event!(target: #target, #level_tokens, return = ?x)\n                )),\n            }\n        }\n        _ => None,\n    };\n\n    // Generate the instrumented function body.\n    // If the function is an `async fn`, this will wrap it in an async block,\n    // which is `instrument`ed using `tracing-futures`. Otherwise, this will\n    // enter the span and then perform the rest of the body.\n    // If `err` is in args, instrument any resulting `Err`s.\n    // If `ret` is in args, instrument any resulting `Ok`s when the function\n    // returns `Result`s, otherwise instrument any resulting values.\n    if async_context {\n        let mk_fut = match (err_event, ret_event) {\n            (Some(err_event), Some(ret_event)) => quote_spanned!(block.span()=>\n                async move {\n                    match async move #block.await {\n                        #[allow(clippy::unit_arg)]\n                        Ok(x) => {\n                            #ret_event;\n                            Ok(x)\n                        },\n                        Err(e) => {\n                            #err_event;\n                            Err(e)\n                        }\n                    }\n                }\n            ),\n            (Some(err_event), None) => quote_spanned!(block.span()=>\n                async move {\n                    match async move #block.await {\n                        #[allow(clippy::unit_arg)]\n                        Ok(x) => Ok(x),\n                        Err(e) => {\n                            #err_event;\n                            Err(e)\n                        }\n                    }\n                }\n            ),\n            (None, Some(ret_event)) => quote_spanned!(block.span()=>\n                async move {\n                    let x = async move #block.await;\n                    #ret_event;\n                    x\n                }\n            ),\n            (None, None) => quote_spanned!(block.span()=>\n                async move #block\n            ),\n        };\n\n        return quote!(\n            let __tracing_attr_span = #span;\n            let __tracing_instrument_future = #mk_fut;\n            if !__tracing_attr_span.is_disabled() {\n                #follows_from\n                tracing::Instrument::instrument(\n                    __tracing_instrument_future,\n                    __tracing_attr_span\n                )\n                .await\n            } else {\n                __tracing_instrument_future.await\n            }\n        );\n    }\n\n    let span = quote!(\n        // These variables are left uninitialized and initialized only\n        // if the tracing level is statically enabled at this point.\n        // While the tracing level is also checked at span creation\n        // time, that will still create a dummy span, and a dummy guard\n        // and drop the dummy guard later. By lazily initializing these\n        // variables, Rust will generate a drop flag for them and thus\n        // only drop the guard if it was created. This creates code that\n        // is very straightforward for LLVM to optimize out if the t\u2026",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '260,520p' tracing-attributes/tests/ret.rs\"",
+          "output": "#[instrument(level = \"warn\", ret(level = \"info\"))]\nfn ret_warn_info() -> i32 {\n    42\n}\n\n#[test]\nfn test_warn_info() {\n    let span = expect::span().named(\"ret_warn_info\").at_level(Level::WARN);\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, ret_warn_info);\n    handle.assert_finished();\n}\n\n#[instrument(ret(level = \"warn\", Debug))]\nfn ret_dbg_warn() -> i32 {\n    42\n}\n\n#[test]\nfn test_dbg_warn() {\n    let span = expect::span().named(\"ret_dbg_warn\").at_level(Level::INFO);\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::WARN),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, ret_dbg_warn);\n    handle.assert_finished();\n}\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc 'ls -R tracing-attributes/tests'",
+          "output": "tracing-attributes/tests:\nasync_fn.rs\ndestructuring.rs\nerr.rs\nfields.rs\nfollows_from.rs\ninstrument.rs\nlevels.rs\nnames.rs\nparents.rs\nret.rs\ntargets.rs\nui\nui.rs\n\ntracing-attributes/tests/ui:\nasync_instrument.rs\nasync_instrument.stderr\nconst_instrument.rs\nconst_instrument.stderr\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"rg -n \\\"trybuild|compile_fail|ui/|FnMut|FnOnce|ret\\\\)\\\" tracing-attributes -S\"",
+          "output": "tracing-attributes/src/attr.rs:131:            } else if lookahead.peek(kw::ret) {\ntracing-attributes/src/attr.rs:437:    syn::custom_keyword!(ret);\ntracing-attributes/src/lib.rs:228:/// #[instrument(ret)]\ntracing-attributes/src/lib.rs:307:/// #[instrument(err, ret)]\ntracing-attributes/src/lib.rs:350:/// ```compile_fail\ntracing-attributes/Cargo.toml:58:trybuild = \"1.0.64\"\ntracing-attributes/tests/ret.rs:11:#[instrument(ret)]\ntracing-attributes/tests/ret.rs:16:#[instrument(target = \"my_target\", ret)]\ntracing-attributes/tests/ret.rs:37:    with_default(collector, ret);\ntracing-attributes/tests/ret.rs:68:#[instrument(level = \"warn\", ret)]\ntracing-attributes/tests/ret.rs:93:#[instrument(ret)]\ntracing-attributes/tests/ret.rs:125:#[instrument(ret)]\ntracing-attributes/tests/ret.rs:152:#[instrument(ret)]\ntracing-attributes/tests/ret.rs:202:#[instrument(err, ret)]\ntracing-attributes/tests/ret.rs:231:#[instrument(err, ret)]\ntracing-attributes/tests/fields.rs:149:fn run_test<F: FnOnce() -> T, T>(span: NewSpan, fun: F) {\ntracing-attributes/tests/ui.rs:5:    let t = trybuild::TestCases::new();\ntracing-attributes/tests/ui.rs:6:    t.compile_fail(\"tests/ui/async_instrument.rs\");\ntracing-attributes/tests/ui.rs:12:    let t = trybuild::TestCases::new();\ntracing-attributes/tests/ui.rs:13:    t.compile_fail(\"tests/ui/const_instrument.rs\");\ntracing-attributes/tests/ui/async_instrument.stderr:2: --> tests/ui/async_instrument.rs:5:5\ntracing-attributes/tests/ui/async_instrument.stderr:8: --> tests/ui/async_instrument.rs:4:10\ntracing-attributes/tests/ui/async_instrument.stderr:14:  --> tests/ui/async_instrument.rs:10:5\ntracing-attributes/tests/ui/async_instrument.stderr:22:  --> tests/ui/async_instrument.rs:9:31\ntracing-attributes/tests/ui/async_instrument.stderr:28:  --> tests/ui/async_instrument.rs:14:1\ntracing-attributes/tests/ui/async_instrument.stderr:38:  --> tests/ui/async_instrument.rs:15:34\ntracing-attributes/tests/ui/async_instrument.stderr:47:  --> tests/ui/async_instrument.rs:23:5\ntracing-attributes/tests/ui/async_instrument.stderr:55:  --> tests/ui/async_instrument.rs:22:36\ntracing-attributes/tests/ui/async_instrument.stderr:65:  --> tests/ui/async_instrument.rs:29:16\ntracing-attributes/tests/ui/async_instrument.stderr:71:  --> tests/ui/async_instrument.rs:27:10\ntracing-attributes/tests/ui/async_instrument.stderr:77:  --> tests/ui/async_instrument.rs:36:16\ntracing-attributes/tests/ui/async_instrument.stderr:85:  --> tests/ui/async_instrument.rs:34:28\ntracing-attributes/tests/ui/async_instrument.stderr:91:  --> tests/ui/async_instrument.rs:42:35\ntracing-attributes/tests/ui/const_instrument.stderr:2: --> tests/ui/const_instrument.rs:3:1\ntracing-attributes/tests/ui/const_instrument.stderr:10: --> tests/ui/const_instrument.rs:3:1\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "failed",
+          "command": "/bin/bash -lc 'cargo test -p tracing-attributes ret --tests'",
+          "output": "/bin/bash: line 1: cargo: command not found\n",
+          "exitCode": 127
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc 'which cargo rustc rustup || true && ls ~/.cargo/bin 2>/dev/null | head'",
+          "output": "",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"git status --short && git rev-parse --show-toplevel && rg -n \\\"ret_event|move \\\\|\\\\| #block|async move #block|fake_return_edge\\\" tracing-attributes/src/expand.rs\"",
+          "output": "<worktree>\n66:    let fake_return_edge = quote_spanned! {return_span=>\n79:            #fake_return_edge\n254:    let ret_event = match args.ret_args {\n277:        let mk_fut = match (err_event, ret_event) {\n278:            (Some(err_event), Some(ret_event)) => quote_spanned!(block.span()=>\n280:                    match async move #block.await {\n283:                            #ret_event;\n295:                    match async move #block.await {\n305:            (None, Some(ret_event)) => quote_spanned!(block.span()=>\n307:                    let x = async move #block.await;\n308:                    #ret_event;\n313:                async move #block\n353:    match (err_event, ret_event) {\n354:        (Some(err_event), Some(ret_event)) => quote_spanned! {block.span()=>\n357:            match (move || #block)() {\n360:                    #ret_event;\n372:            match (move || #block)() {\n381:        (None, Some(ret_event)) => quote_spanned!(block.span()=>\n384:            let x = (move || #block)();\n385:            #ret_event;\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "todo_list",
+          "status": null,
+          "payload": {
+            "items": [
+              {
+                "text": "Inspect `tracing-attributes` expansion and existing `ret` tests",
+                "completed": true
+              },
+              {
+                "text": "Patch macro expansion to force instrumented bodies to be `FnOnce`",
+                "completed": false
+              },
+              {
+                "text": "Add regression tests covering `Fn`/`FnMut` with `#[instrument(ret)]`",
+                "completed": false
+              },
+              {
+                "text": "Run targeted formatting/tests/checks",
+                "completed": false
+              }
+            ]
+          }
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '330,410p' tracing-attributes/src/expand.rs\"",
+          "output": "        );\n    }\n\n    let span = quote!(\n        // These variables are left uninitialized and initialized only\n        // if the tracing level is statically enabled at this point.\n        // While the tracing level is also checked at span creation\n        // time, that will still create a dummy span, and a dummy guard\n        // and drop the dummy guard later. By lazily initializing these\n        // variables, Rust will generate a drop flag for them and thus\n        // only drop the guard if it was created. This creates code that\n        // is very straightforward for LLVM to optimize out if the tracing\n        // level is statically disabled, while not causing any performance\n        // regression in case the level is enabled.\n        let __tracing_attr_span;\n        let __tracing_attr_guard;\n        if tracing::level_enabled!(#level) || tracing::if_log_enabled!(#level, {true} else {false}) {\n            __tracing_attr_span = #span;\n            #follows_from\n            __tracing_attr_guard = __tracing_attr_span.enter();\n        }\n    );\n\n    match (err_event, ret_event) {\n        (Some(err_event), Some(ret_event)) => quote_spanned! {block.span()=>\n            #span\n            #[allow(clippy::redundant_closure_call)]\n            match (move || #block)() {\n                #[allow(clippy::unit_arg)]\n                Ok(x) => {\n                    #ret_event;\n                    Ok(x)\n                },\n                Err(e) => {\n                    #err_event;\n                    Err(e)\n                }\n            }\n        },\n        (Some(err_event), None) => quote_spanned!(block.span()=>\n            #span\n            #[allow(clippy::redundant_closure_call)]\n            match (move || #block)() {\n                #[allow(clippy::unit_arg)]\n                Ok(x) => Ok(x),\n                Err(e) => {\n                    #err_event;\n                    Err(e)\n                }\n            }\n        ),\n        (None, Some(ret_event)) => quote_spanned!(block.span()=>\n            #span\n            #[allow(clippy::redundant_closure_call)]\n            let x = (move || #block)();\n            #ret_event;\n            x\n        ),\n        (None, None) => quote_spanned!(block.span() =>\n            // Because `quote` produces a stream of tokens _without_ whitespace, the\n            // `if` and the block will appear directly next to each other. This\n            // generates a clippy lint about suspicious `if/else` formatting.\n            // Therefore, suppress the lint inside the generated code...\n            #[allow(clippy::suspicious_else_formatting)]\n            {\n                #span\n                // ...but turn the lint back on inside the function body.\n                #[warn(clippy::suspicious_else_formatting)]\n                #block\n            }\n        ),\n    }\n}\n\n/// Indicates whether a field should be recorded as `Value` or `Debug`.\nenum RecordType {\n    /// The field should be recorded using its `Value` implementation.\n    Value,\n    /// The field should be recorded using `tracing::field::debug()`.\n    Debug,\n}\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "file_change",
+          "status": "completed",
+          "payload": {}
+        },
+        {
+          "kind": "file_change",
+          "status": "completed",
+          "payload": {}
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '80,180p' tracing-attributes/tests/ret.rs\"",
+          "output": "            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::WARN),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, ret_warn);\n    handle.assert_finished();\n}\n\n#[instrument(ret)]\nfn ret_mut(a: &mut i32) -> i32 {\n    *a *= 2;\n    tracing::info!(?a);\n    *a\n}\n\n#[instrument(ret)]\nfn ret_ref(x: &mut ()) -> &() {\n    x\n}\n\n#[instrument(ret)]\nfn ret_mut_ref(x: &mut ()) -> &mut () {\n    x\n}\n\n#[test]\nfn test_mut() {\n    let span = expect::span().named(\"ret_mut\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"a\").with_value(&tracing::field::display(2)))\n                .at_level(Level::INFO),\n        )\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(2)))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, || ret_mut(&mut 1));\n    handle.assert_finished();\n}\n\n#[test]\nfn test_ref() {\n    let span = expect::span().named(\"ret_ref\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(())))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    let mut x = ();\n    let returned = with_default(collector, || ret_ref(&mut x));\n    assert!(std::ptr::eq(returned, &x));\n    handle.assert_finished();\n}\n\n#[test]\nfn test_mut_ref() {\n    let span = expect::span().named(\"ret_mut_ref\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(())))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    let mut x = ();\n    let returned = with_default(collector, || ret_mut_ref(&mut x));\n    assert!(std::ptr::eq(returned, &x));\n    handle.assert_finished();\n}\n\n#[instrument(ret)]\nasync fn ret_async() -> i32 {\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "file_change",
+          "status": "completed",
+          "payload": {}
+        },
+        {
+          "kind": "todo_list",
+          "status": null,
+          "payload": {
+            "items": [
+              {
+                "text": "Inspect `tracing-attributes` expansion and existing `ret` tests",
+                "completed": true
+              },
+              {
+                "text": "Patch macro expansion to force instrumented bodies to be `FnOnce`",
+                "completed": true
+              },
+              {
+                "text": "Add regression tests covering `Fn`/`FnMut` with `#[instrument(ret)]`",
+                "completed": true
+              },
+              {
+                "text": "Run targeted formatting/tests/checks",
+                "completed": false
+              }
+            ]
+          }
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc 'find / -name cargo -type f 2>/dev/null | head -20'",
+          "output": "",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc 'which rustfmt rustc cargo fmt || true && find / -name rustfmt -type f 2>/dev/null | head -20'",
+          "output": "",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '345,400p' tracing-attributes/src/expand.rs\"",
+          "output": "        let __tracing_attr_guard;\n        if tracing::level_enabled!(#level) || tracing::if_log_enabled!(#level, {true} else {false}) {\n            __tracing_attr_span = #span;\n            #follows_from\n            __tracing_attr_guard = __tracing_attr_span.enter();\n        }\n    );\n\n    let force_fn_once = quote!(\n        let __tracing_attr_force_fn_once: [&mut (); 0] = [];\n    );\n\n    match (err_event, ret_event) {\n        (Some(err_event), Some(ret_event)) => quote_spanned! {block.span()=>\n            #span\n            #force_fn_once\n            #[allow(clippy::redundant_closure_call)]\n            match (move || {\n                let _tracing_attr_force_fn_once = __tracing_attr_force_fn_once;\n                #block\n            })() {\n                #[allow(clippy::unit_arg)]\n                Ok(x) => {\n                    #ret_event;\n                    Ok(x)\n                },\n                Err(e) => {\n                    #err_event;\n                    Err(e)\n                }\n            }\n        },\n        (Some(err_event), None) => quote_spanned!(block.span()=>\n            #span\n            #force_fn_once\n            #[allow(clippy::redundant_closure_call)]\n            match (move || {\n                let _tracing_attr_force_fn_once = __tracing_attr_force_fn_once;\n                #block\n            })() {\n                #[allow(clippy::unit_arg)]\n                Ok(x) => Ok(x),\n                Err(e) => {\n                    #err_event;\n                    Err(e)\n                }\n            }\n        ),\n        (None, Some(ret_event)) => quote_spanned!(block.span()=>\n            #span\n            #force_fn_once\n            #[allow(clippy::redundant_closure_call)]\n            let x = (move || {\n                let _tracing_attr_force_fn_once = __tracing_attr_force_fn_once;\n                #block\n            })();\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '90,175p' tracing-attributes/tests/ret.rs\"",
+          "output": "    handle.assert_finished();\n}\n\n#[instrument(ret)]\nfn ret_mut(a: &mut i32) -> i32 {\n    *a *= 2;\n    tracing::info!(?a);\n    *a\n}\n\n#[instrument(ret)]\nfn ret_ref(x: &mut ()) -> &() {\n    x\n}\n\n#[instrument(ret)]\nfn ret_mut_ref(x: &mut ()) -> &mut () {\n    x\n}\n\n#[test]\nfn test_mut() {\n    let span = expect::span().named(\"ret_mut\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"a\").with_value(&tracing::field::display(2)))\n                .at_level(Level::INFO),\n        )\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(2)))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, || ret_mut(&mut 1));\n    handle.assert_finished();\n}\n\n#[test]\nfn test_ref() {\n    let span = expect::span().named(\"ret_ref\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(())))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    let mut x = ();\n    let returned = with_default(collector, || ret_ref(&mut x));\n    assert!(std::ptr::eq(returned, &x));\n    handle.assert_finished();\n}\n\n#[test]\nfn test_mut_ref() {\n    let span = expect::span().named(\"ret_mut_ref\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(())))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    let mut x = ();\n    let x_ptr = &mut x as *mut ();\n    let returned = with_default(collector, || ret_mut_ref(&mut x));\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc 'git diff --check'",
+          "output": "",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc 'git diff -- tracing-attributes/src/expand.rs tracing-attributes/tests/ret.rs'",
+          "output": "diff --git a/tracing-attributes/src/expand.rs b/tracing-attributes/src/expand.rs\nindex a92ef58..f57d059 100644\n--- a/tracing-attributes/src/expand.rs\n+++ b/tracing-attributes/src/expand.rs\n@@ -350,11 +350,19 @@ fn gen_block<B: ToTokens>(\n         }\n     );\n \n+    let force_fn_once = quote!(\n+        let __tracing_attr_force_fn_once: [&mut (); 0] = [];\n+    );\n+\n     match (err_event, ret_event) {\n         (Some(err_event), Some(ret_event)) => quote_spanned! {block.span()=>\n             #span\n+            #force_fn_once\n             #[allow(clippy::redundant_closure_call)]\n-            match (move || #block)() {\n+            match (move || {\n+                let _tracing_attr_force_fn_once = __tracing_attr_force_fn_once;\n+                #block\n+            })() {\n                 #[allow(clippy::unit_arg)]\n                 Ok(x) => {\n                     #ret_event;\n@@ -368,8 +376,12 @@ fn gen_block<B: ToTokens>(\n         },\n         (Some(err_event), None) => quote_spanned!(block.span()=>\n             #span\n+            #force_fn_once\n             #[allow(clippy::redundant_closure_call)]\n-            match (move || #block)() {\n+            match (move || {\n+                let _tracing_attr_force_fn_once = __tracing_attr_force_fn_once;\n+                #block\n+            })() {\n                 #[allow(clippy::unit_arg)]\n                 Ok(x) => Ok(x),\n                 Err(e) => {\n@@ -380,8 +392,12 @@ fn gen_block<B: ToTokens>(\n         ),\n         (None, Some(ret_event)) => quote_spanned!(block.span()=>\n             #span\n+            #force_fn_once\n             #[allow(clippy::redundant_closure_call)]\n-            let x = (move || #block)();\n+            let x = (move || {\n+                let _tracing_attr_force_fn_once = __tracing_attr_force_fn_once;\n+                #block\n+            })();\n             #ret_event;\n             x\n         ),\ndiff --git a/tracing-attributes/tests/ret.rs b/tracing-attributes/tests/ret.rs\nindex 19d01c9..d10d15f 100644\n--- a/tracing-attributes/tests/ret.rs\n+++ b/tracing-attributes/tests/ret.rs\n@@ -97,6 +97,16 @@ fn ret_mut(a: &mut i32) -> i32 {\n     *a\n }\n \n+#[instrument(ret)]\n+fn ret_ref(x: &mut ()) -> &() {\n+    x\n+}\n+\n+#[instrument(ret)]\n+fn ret_mut_ref(x: &mut ()) -> &mut () {\n+    x\n+}\n+\n #[test]\n fn test_mut() {\n     let span = expect::span().named(\"ret_mut\");\n@@ -122,6 +132,51 @@ fn test_mut() {\n     handle.assert_finished();\n }\n \n+#[test]\n+fn test_ref() {\n+    let span = expect::span().named(\"ret_ref\");\n+    let (collector, handle) = collector::mock()\n+        .new_span(span.clone())\n+        .enter(span.clone())\n+        .event(\n+            expect::event()\n+                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(())))\n+                .at_level(Level::INFO),\n+        )\n+        .exit(span.clone())\n+        .drop_span(span)\n+        .only()\n+        .run_with_handle();\n+\n+    let mut x = ();\n+    let returned = with_default(collector, || ret_ref(&mut x));\n+    assert!(std::ptr::eq(returned, &x));\n+    handle.assert_finished();\n+}\n+\n+#[test]\n+fn test_mut_ref() {\n+    let span = expect::span().named(\"ret_mut_ref\");\n+    let (collector, handle) = collector::mock()\n+        .new_span(span.clone())\n+        .enter(span.clone())\n+        .event(\n+            expect::event()\n+                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(())))\n+                .at_level(Level::INFO),\n+        )\n+        .exit(span.clone())\n+        .drop_span(span)\n+        .only()\n+        .run_with_handle();\n+\n+    let mut x = ();\n+    let x_ptr = &mut x as *mut ();\n+    let returned = with_default(collector, || ret_mut_ref(&mut x));\n+    assert_eq!(returned as *mut (), x_ptr);\n+    handle.assert_finished();\n+}\n+\n #[instrument(ret)]\n async fn ret_async() -> i32 {\n     42\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '175,210p' tracing-attributes/tests/ret.rs\"",
+          "output": "    let returned = with_default(collector, || ret_mut_ref(&mut x));\n    assert_eq!(returned as *mut (), x_ptr);\n    handle.assert_finished();\n}\n\n#[instrument(ret)]\nasync fn ret_async() -> i32 {\n    42\n}\n\n#[test]\nfn test_async() {\n    let span = expect::span().named(\"ret_async\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .enter(span.clone())\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, || block_on_future(async { ret_async().await }));\n    handle.assert_finished();\n}\n\n#[instrument(ret)]\nfn ret_impl_type() -> impl Copy {\n    42\n}\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "file_change",
+          "status": "completed",
+          "payload": {}
+        },
+        {
+          "kind": "todo_list",
+          "status": null,
+          "payload": {
+            "items": [
+              {
+                "text": "Inspect `tracing-attributes` expansion and existing `ret` tests",
+                "completed": true
+              },
+              {
+                "text": "Patch macro expansion to force instrumented bodies to be `FnOnce`",
+                "completed": true
+              },
+              {
+                "text": "Add regression tests covering `Fn`/`FnMut` with `#[instrument(ret)]`",
+                "completed": true
+              },
+              {
+                "text": "Run targeted formatting/tests/checks",
+                "completed": true
+              }
+            ]
+          }
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"nl -ba tracing-attributes/src/expand.rs | sed -n '348,405p'\"",
+          "output": "   348\t            #follows_from\n   349\t            __tracing_attr_guard = __tracing_attr_span.enter();\n   350\t        }\n   351\t    );\n   352\t\n   353\t    // Force the generated closure to consume a non-`Copy` capture when called,\n   354\t    // so it is inferred as `FnOnce` and can return references to captures.\n   355\t    let force_fn_once = quote!(\n   356\t        let __tracing_attr_force_fn_once: [&mut (); 0] = [];\n   357\t    );\n   358\t\n   359\t    match (err_event, ret_event) {\n   360\t        (Some(err_event), Some(ret_event)) => quote_spanned! {block.span()=>\n   361\t            #span\n   362\t            #force_fn_once\n   363\t            #[allow(clippy::redundant_closure_call)]\n   364\t            match (move || {\n   365\t                let _tracing_attr_force_fn_once = __tracing_attr_force_fn_once;\n   366\t                #block\n   367\t            })() {\n   368\t                #[allow(clippy::unit_arg)]\n   369\t                Ok(x) => {\n   370\t                    #ret_event;\n   371\t                    Ok(x)\n   372\t                },\n   373\t                Err(e) => {\n   374\t                    #err_event;\n   375\t                    Err(e)\n   376\t                }\n   377\t            }\n   378\t        },\n   379\t        (Some(err_event), None) => quote_spanned!(block.span()=>\n   380\t            #span\n   381\t            #force_fn_once\n   382\t            #[allow(clippy::redundant_closure_call)]\n   383\t            match (move || {\n   384\t                let _tracing_attr_force_fn_once = __tracing_attr_force_fn_once;\n   385\t                #block\n   386\t            })() {\n   387\t                #[allow(clippy::unit_arg)]\n   388\t                Ok(x) => Ok(x),\n   389\t                Err(e) => {\n   390\t                    #err_event;\n   391\t                    Err(e)\n   392\t                }\n   393\t            }\n   394\t        ),\n   395\t        (None, Some(ret_event)) => quote_spanned!(block.span()=>\n   396\t            #span\n   397\t            #force_fn_once\n   398\t            #[allow(clippy::redundant_closure_call)]\n   399\t            let x = (move || {\n   400\t                let _tracing_attr_force_fn_once = __tracing_attr_force_fn_once;\n   401\t                #block\n   402\t            })();\n   403\t            #ret_event;\n   404\t            x\n   405\t        ),\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"nl -ba tracing-attributes/tests/ret.rs | sed -n '92,178p'\"",
+          "output": "    92\t\n    93\t#[instrument(ret)]\n    94\tfn ret_mut(a: &mut i32) -> i32 {\n    95\t    *a *= 2;\n    96\t    tracing::info!(?a);\n    97\t    *a\n    98\t}\n    99\t\n   100\t#[instrument(ret)]\n   101\tfn ret_ref(x: &mut ()) -> &() {\n   102\t    x\n   103\t}\n   104\t\n   105\t#[instrument(ret)]\n   106\tfn ret_mut_ref(x: &mut ()) -> &mut () {\n   107\t    x\n   108\t}\n   109\t\n   110\t#[test]\n   111\tfn test_mut() {\n   112\t    let span = expect::span().named(\"ret_mut\");\n   113\t    let (collector, handle) = collector::mock()\n   114\t        .new_span(span.clone())\n   115\t        .enter(span.clone())\n   116\t        .event(\n   117\t            expect::event()\n   118\t                .with_fields(expect::field(\"a\").with_value(&tracing::field::display(2)))\n   119\t                .at_level(Level::INFO),\n   120\t        )\n   121\t        .event(\n   122\t            expect::event()\n   123\t                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(2)))\n   124\t                .at_level(Level::INFO),\n   125\t        )\n   126\t        .exit(span.clone())\n   127\t        .drop_span(span)\n   128\t        .only()\n   129\t        .run_with_handle();\n   130\t\n   131\t    with_default(collector, || ret_mut(&mut 1));\n   132\t    handle.assert_finished();\n   133\t}\n   134\t\n   135\t#[test]\n   136\tfn test_ref() {\n   137\t    let span = expect::span().named(\"ret_ref\");\n   138\t    let (collector, handle) = collector::mock()\n   139\t        .new_span(span.clone())\n   140\t        .enter(span.clone())\n   141\t        .event(\n   142\t            expect::event()\n   143\t                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(())))\n   144\t                .at_level(Level::INFO),\n   145\t        )\n   146\t        .exit(span.clone())\n   147\t        .drop_span(span)\n   148\t        .only()\n   149\t        .run_with_handle();\n   150\t\n   151\t    let mut x = ();\n   152\t    let returned = with_default(collector, || ret_ref(&mut x));\n   153\t    assert!(std::ptr::eq(returned, &x));\n   154\t    handle.assert_finished();\n   155\t}\n   156\t\n   157\t#[test]\n   158\tfn test_mut_ref() {\n   159\t    let span = expect::span().named(\"ret_mut_ref\");\n   160\t    let (collector, handle) = collector::mock()\n   161\t        .new_span(span.clone())\n   162\t        .enter(span.clone())\n   163\t        .event(\n   164\t            expect::event()\n   165\t                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(())))\n   166\t                .at_level(Level::INFO),\n   167\t        )\n   168\t        .exit(span.clone())\n   169\t        .drop_span(span)\n   170\t        .only()\n   171\t        .run_with_handle();\n   172\t\n   173\t    let mut x = ();\n   174\t    let x_ptr = &mut x as *mut ();\n   175\t    let returned = with_default(collector, || ret_mut_ref(&mut x));\n   176\t    assert_eq!(returned as *mut (), x_ptr);\n   177\t    handle.assert_finished();\n   178\t}\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc 'git status --short'",
+          "output": " M tracing-attributes/src/expand.rs\n M tracing-attributes/tests/ret.rs\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "assistant_message",
+          "text": "{\"status\":\"completed\",\"final_answer\":\"Implemented the `tracing-attributes` fix by forcing the generated synchronous `#[instrument(ret)]`/`#[instrument(err)]` closure wrapper to consume a non-`Copy` zero-sized capture (`[&mut (); 0]`) on invocation, which makes the closure no more than `FnOnce` and allows references to captured `&mut` arguments to be returned. Added regression coverage in `tracing-attributes/tests/ret.rs` for both `#[instrument(ret)] fn ret_ref(&mut ()) -> &()` and `#[instrument(ret)] fn ret_mut_ref(&mut ()) -> &mut ()`, including runtime expectations for the `return` event. Verification was limited to static diff inspection and `git diff --check`, which passed; `cargo`, `rustc`, and `rustfmt` are not installed in this environment, so I could not run crate tests or formatting.\",\"retrieved_context_files\":[\"tracing-attributes/src/expand.rs\",\"tracing-attributes/tests/ret.rs\"],\"retrieved_context_spans\":[{\"file\":\"tracing-attributes/src/expand.rs\",\"start\":353,\"end\":405},{\"file\":\"tracing-attributes/tests/ret.rs\",\"start\":93,\"end\":178}],\"retrieved_context_symbols\":[{\"file\":\"tracing-attributes/src/expand.rs\",\"name\":\"gen_block\"}],\"notes\":\"Offline verification available here was limited. `git diff --check` succeeded, but no Rust toolchain binaries were present (`cargo`, `rustc`, and `rustfmt` were all unavailable), so compile/test execution could not be performed.\"}"
+        },
+        {
+          "kind": "todo_list",
+          "status": null,
+          "payload": {
+            "items": [
+              {
+                "text": "Inspect `tracing-attributes` expansion and existing `ret` tests",
+                "completed": true
+              },
+              {
+                "text": "Patch macro expansion to force instrumented bodies to be `FnOnce`",
+                "completed": true
+              },
+              {
+                "text": "Add regression tests covering `Fn`/`FnMut` with `#[instrument(ret)]`",
+                "completed": true
+              },
+              {
+                "text": "Run targeted formatting/tests/checks",
+                "completed": true
+              }
+            ]
+          }
+        }
+      ],
+      "label": "A"
+    },
+    {
+      "name": "With Superpowers Mounted",
+      "model": "gpt-5.4",
+      "effort": "High",
+      "status": "completed",
+      "evaluationStatus": "valid",
+      "resolutionStatus": "unresolved",
+      "startedAt": "2026-05-19T00:13:03Z",
+      "completedAt": "2026-05-19T00:16:41Z",
+      "durationMs": 218663,
+      "tokenUsage": {
+        "source": "codex.turn.completed",
+        "input_tokens": 781973,
+        "output_tokens": 10149,
+        "cached_input_tokens": 656896,
+        "total_tokens": 792122,
+        "cache_read_input_tokens": 656896
+      },
+      "modelPatch": "diff --git a/tracing-attributes/src/expand.rs b/tracing-attributes/src/expand.rs\nindex a92ef58..73689eb 100644\n--- a/tracing-attributes/src/expand.rs\n+++ b/tracing-attributes/src/expand.rs\n@@ -349,12 +349,21 @@ fn gen_block<B: ToTokens>(\n             __tracing_attr_guard = __tracing_attr_span.enter();\n         }\n     );\n+    let force_fn_once = quote!(\n+        // Moving a non-`Copy` ZST into the closure body forces the generated\n+        // closure to be `FnOnce`, so returned borrows may escape it.\n+        let __tracing_attr_force_fn_once: [&mut (); 0] = [];\n+    );\n \n     match (err_event, ret_event) {\n         (Some(err_event), Some(ret_event)) => quote_spanned! {block.span()=>\n             #span\n+            #force_fn_once\n             #[allow(clippy::redundant_closure_call)]\n-            match (move || #block)() {\n+            match (move || {\n+                let _ = __tracing_attr_force_fn_once;\n+                #block\n+            })() {\n                 #[allow(clippy::unit_arg)]\n                 Ok(x) => {\n                     #ret_event;\n@@ -368,8 +377,12 @@ fn gen_block<B: ToTokens>(\n         },\n         (Some(err_event), None) => quote_spanned!(block.span()=>\n             #span\n+            #force_fn_once\n             #[allow(clippy::redundant_closure_call)]\n-            match (move || #block)() {\n+            match (move || {\n+                let _ = __tracing_attr_force_fn_once;\n+                #block\n+            })() {\n                 #[allow(clippy::unit_arg)]\n                 Ok(x) => Ok(x),\n                 Err(e) => {\n@@ -380,8 +393,12 @@ fn gen_block<B: ToTokens>(\n         ),\n         (None, Some(ret_event)) => quote_spanned!(block.span()=>\n             #span\n+            #force_fn_once\n             #[allow(clippy::redundant_closure_call)]\n-            let x = (move || #block)();\n+            let x = (move || {\n+                let _ = __tracing_attr_force_fn_once;\n+                #block\n+            })();\n             #ret_event;\n             x\n         ),\ndiff --git a/tracing-attributes/tests/ret.rs b/tracing-attributes/tests/ret.rs\nindex 19d01c9..98fb12a 100644\n--- a/tracing-attributes/tests/ret.rs\n+++ b/tracing-attributes/tests/ret.rs\n@@ -97,6 +97,16 @@ fn ret_mut(a: &mut i32) -> i32 {\n     *a\n }\n \n+#[instrument(ret)]\n+fn ret_ref(a: &mut i32) -> &i32 {\n+    a\n+}\n+\n+#[instrument(ret)]\n+fn ret_mut_ref(a: &mut i32) -> &mut i32 {\n+    a\n+}\n+\n #[test]\n fn test_mut() {\n     let span = expect::span().named(\"ret_mut\");\n@@ -122,6 +132,53 @@ fn test_mut() {\n     handle.assert_finished();\n }\n \n+#[test]\n+fn test_ref() {\n+    let span = expect::span().named(\"ret_ref\");\n+    let (collector, handle) = collector::mock()\n+        .new_span(span.clone())\n+        .enter(span.clone())\n+        .event(\n+            expect::event()\n+                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(1)))\n+                .at_level(Level::INFO),\n+        )\n+        .exit(span.clone())\n+        .drop_span(span)\n+        .only()\n+        .run_with_handle();\n+\n+    with_default(collector, || {\n+        let mut value = 1;\n+        assert_eq!(*ret_ref(&mut value), 1);\n+    });\n+    handle.assert_finished();\n+}\n+\n+#[test]\n+fn test_mut_ref() {\n+    let span = expect::span().named(\"ret_mut_ref\");\n+    let (collector, handle) = collector::mock()\n+        .new_span(span.clone())\n+        .enter(span.clone())\n+        .event(\n+            expect::event()\n+                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(1)))\n+                .at_level(Level::INFO),\n+        )\n+        .exit(span.clone())\n+        .drop_span(span)\n+        .only()\n+        .run_with_handle();\n+\n+    with_default(collector, || {\n+        let mut value = 1;\n+        *ret_mut_ref(&mut value) = 2;\n+        assert_eq!(value, 2);\n+    });\n+    handle.assert_finished();\n+}\n+\n #[instrument(ret)]\n async fn ret_async() -> i32 {\n     42\n",
+      "finalOutput": {
+        "status": "completed",
+        "finalAnswer": "Implemented the `#[instrument(ret)]` fix by forcing the generated non-async wrapper closures in `tracing-attributes` to be `FnOnce`. The macro now captures and consumes a non-`Copy` zero-sized value before executing the user block, which allows returned borrows from `&mut` arguments to escape correctly. I also added regression tests covering `#[instrument(ret)]` functions that return `&T` and `&mut T` from a `&mut` parameter.\n\nVerification: inspected the resulting diff and ran `git diff --check` successfully. Full Rust compilation/tests could not be run in this benchmark runtime because both `cargo` and `rustc` are unavailable.",
+        "notes": "Offline-safe verification was limited by the environment: `git diff --check` passed, but `cargo --version` and `rustc --version` both failed with command-not-found, so no compile/test execution was possible.",
+        "retrievedContextFiles": [
+          "<worktree>/tracing-attributes/src/expand.rs",
+          "<worktree>/tracing-attributes/tests/ret.rs"
+        ],
+        "retrievedContextSpans": [
+          {
+            "file": "<worktree>/tracing-attributes/src/expand.rs",
+            "start": 352,
+            "end": 404
+          },
+          {
+            "file": "<worktree>/tracing-attributes/tests/ret.rs",
+            "start": 93,
+            "end": 180
+          }
+        ],
+        "retrievedContextSymbols": [
+          {
+            "file": "<worktree>/tracing-attributes/src/expand.rs",
+            "name": "gen_block"
+          },
+          {
+            "file": "<worktree>/tracing-attributes/tests/ret.rs",
+            "name": "ret_mut_ref"
+          },
+          {
+            "file": "<worktree>/tracing-attributes/tests/ret.rs",
+            "name": "ret_ref"
+          }
+        ]
+      },
+      "predTrajectory": {
+        "predSteps": [
+          {
+            "files": [
+              "tracing-attributes/CHANGELOG.md",
+              "tracing-attributes/Cargo.toml",
+              "tracing-attributes/LICENSE",
+              "tracing-attributes/README.md",
+              "tracing-attributes/src/attr.rs",
+              "tracing-attributes/src/expand.rs",
+              "tracing-attributes/src/lib.rs",
+              "tracing-attributes/tests/async_fn.rs",
+              "tracing-attributes/tests/destructuring.rs",
+              "tracing-attributes/tests/err.rs",
+              "tracing-attributes/tests/fields.rs",
+              "tracing-attributes/tests/follows_from.rs",
+              "tracing-attributes/tests/instrument.rs",
+              "tracing-attributes/tests/levels.rs",
+              "tracing-attributes/tests/names.rs",
+              "tracing-attributes/tests/parents.rs",
+              "tracing-attributes/tests/ret.rs",
+              "tracing-attributes/tests/targets.rs",
+              "tracing-attributes/tests/ui.rs",
+              "tracing-attributes/tests/ui/async_instrument.rs",
+              "tracing-attributes/tests/ui/async_instrument.stderr",
+              "tracing-attributes/tests/ui/const_instrument.rs",
+              "tracing-attributes/tests/ui/const_instrument.stderr"
+            ],
+            "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tracing-attributes/src/expand.rs",
+              "tracing-attributes/src/lib.rs",
+              "tracing-attributes/tests/fields.rs",
+              "tracing-attributes/tests/ret.rs"
+            ],
+            "spans": {
+              "tracing-attributes/tests/ret.rs": [
+                {
+                  "start": 11,
+                  "end": 11
+                },
+                {
+                  "start": 93,
+                  "end": 93
+                },
+                {
+                  "start": 125,
+                  "end": 125
+                },
+                {
+                  "start": 152,
+                  "end": 152
+                }
+              ],
+              "tracing-attributes/tests/fields.rs": [
+                {
+                  "start": 149,
+                  "end": 149
+                }
+              ],
+              "tracing-attributes/src/lib.rs": [
+                {
+                  "start": 85,
+                  "end": 85
+                },
+                {
+                  "start": 228,
+                  "end": 228
+                },
+                {
+                  "start": 379,
+                  "end": 379
+                },
+                {
+                  "start": 396,
+                  "end": 396
+                },
+                {
+                  "start": 412,
+                  "end": 412
+                },
+                {
+                  "start": 423,
+                  "end": 423
+                },
+                {
+                  "start": 426,
+                  "end": 426
+                },
+                {
+                  "start": 434,
+                  "end": 434
+                },
+                {
+                  "start": 446,
+                  "end": 446
+                },
+                {
+                  "start": 447,
+                  "end": 447
+                },
+                {
+                  "start": 448,
+                  "end": 448
+                },
+                {
+                  "start": 465,
+                  "end": 465
+                },
+                {
+                  "start": 467,
+                  "end": 467
+                },
+                {
+                  "start": 472,
+                  "end": 472
+                },
+                {
+                  "start": 487,
+                  "end": 487
+                }
+              ],
+              "tracing-attributes/src/expand.rs": [
+                {
+                  "start": 8,
+                  "end": 8
+                },
+                {
+                  "start": 14,
+                  "end": 14
+                },
+                {
+                  "start": 24,
+                  "end": 24
+                },
+                {
+                  "start": 26,
+                  "end": 26
+                },
+                {
+                  "start": 506,
+                  "end": 506
+                },
+                {
+                  "start": 521,
+                  "end": 521
+                },
+                {
+                  "start": 550,
+                  "end": 550
+                },
+                {
+                  "start": 560,
+                  "end": 560
+                },
+                {
+                  "start": 702,
+                  "end": 702
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tracing-attributes/tests/ret.rs"
+            ],
+            "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tracing-attributes/src/expand.rs"
+            ],
+            "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tracing-attributes/tests/ui.rs"
+            ],
+            "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tracing-attributes/Cargo.toml"
+            ],
+            "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tracing-attributes/src/expand.rs",
+              "tracing-attributes/tests/ret.rs"
+            ],
+            "spans": {
+              "tracing-attributes/tests/ret.rs": [
+                {
+                  "start": 101,
+                  "end": 101
+                },
+                {
+                  "start": 106,
+                  "end": 106
+                },
+                {
+                  "start": 137,
+                  "end": 137
+                },
+                {
+                  "start": 153,
+                  "end": 153
+                },
+                {
+                  "start": 160,
+                  "end": 160
+                },
+                {
+                  "start": 176,
+                  "end": 176
+                }
+              ],
+              "tracing-attributes/src/expand.rs": [
+                {
+                  "start": 355,
+                  "end": 355
+                },
+                {
+                  "start": 364,
+                  "end": 364
+                },
+                {
+                  "start": 383,
+                  "end": 383
+                },
+                {
+                  "start": 399,
+                  "end": 399
+                }
+              ]
+            },
+            "symbols": {}
+          }
+        ],
+        "predFiles": [
+          "<worktree>/tracing-attributes/src/expand.rs",
+          "<worktree>/tracing-attributes/tests/ret.rs",
+          "tracing-attributes/CHANGELOG.md",
+          "tracing-attributes/Cargo.toml",
+          "tracing-attributes/LICENSE",
+          "tracing-attributes/README.md",
+          "tracing-attributes/src/attr.rs",
+          "tracing-attributes/src/expand.rs",
+          "tracing-attributes/src/lib.rs",
+          "tracing-attributes/tests/async_fn.rs",
+          "tracing-attributes/tests/destructuring.rs",
+          "tracing-attributes/tests/err.rs",
+          "tracing-attributes/tests/fields.rs",
+          "tracing-attributes/tests/follows_from.rs",
+          "tracing-attributes/tests/instrument.rs",
+          "tracing-attributes/tests/levels.rs",
+          "tracing-attributes/tests/names.rs",
+          "tracing-attributes/tests/parents.rs",
+          "tracing-attributes/tests/ret.rs",
+          "tracing-attributes/tests/targets.rs",
+          "tracing-attributes/tests/ui.rs",
+          "tracing-attributes/tests/ui/async_instrument.rs",
+          "tracing-attributes/tests/ui/async_instrument.stderr",
+          "tracing-attributes/tests/ui/const_instrument.rs",
+          "tracing-attributes/tests/ui/const_instrument.stderr"
+        ],
+        "predSpans": {
+          "tracing-attributes/tests/ret.rs": [
+            {
+              "start": 11,
+              "end": 11
+            },
+            {
+              "start": 93,
+              "end": 93
+            },
+            {
+              "start": 101,
+              "end": 101
+            },
+            {
+              "start": 106,
+              "end": 106
+            },
+            {
+              "start": 125,
+              "end": 125
+            },
+            {
+              "start": 137,
+              "end": 137
+            },
+            {
+              "start": 152,
+              "end": 152
+            },
+            {
+              "start": 153,
+              "end": 153
+            },
+            {
+              "start": 160,
+              "end": 160
+            },
+            {
+              "start": 176,
+              "end": 176
+            }
+          ],
+          "tracing-attributes/tests/fields.rs": [
+            {
+              "start": 149,
+              "end": 149
+            }
+          ],
+          "tracing-attributes/src/lib.rs": [
+            {
+              "start": 85,
+              "end": 85
+            },
+            {
+              "start": 228,
+              "end": 228
+            },
+            {
+              "start": 379,
+              "end": 379
+            },
+            {
+              "start": 396,
+              "end": 396
+            },
+            {
+              "start": 412,
+              "end": 412
+            },
+            {
+              "start": 423,
+              "end": 423
+            },
+            {
+              "start": 426,
+              "end": 426
+            },
+            {
+              "start": 434,
+              "end": 434
+            },
+            {
+              "start": 446,
+              "end": 446
+            },
+            {
+              "start": 447,
+              "end": 447
+            },
+            {
+              "start": 448,
+              "end": 448
+            },
+            {
+              "start": 465,
+              "end": 465
+            },
+            {
+              "start": 467,
+              "end": 467
+            },
+            {
+              "start": 472,
+              "end": 472
+            },
+            {
+              "start": 487,
+              "end": 487
+            }
+          ],
+          "tracing-attributes/src/expand.rs": [
+            {
+              "start": 8,
+              "end": 8
+            },
+            {
+              "start": 14,
+              "end": 14
+            },
+            {
+              "start": 24,
+              "end": 24
+            },
+            {
+              "start": 26,
+              "end": 26
+            },
+            {
+              "start": 355,
+              "end": 355
+            },
+            {
+              "start": 364,
+              "end": 364
+            },
+            {
+              "start": 383,
+              "end": 383
+            },
+            {
+              "start": 399,
+              "end": 399
+            },
+            {
+              "start": 506,
+              "end": 506
+            },
+            {
+              "start": 521,
+              "end": 521
+            },
+            {
+              "start": 550,
+              "end": 550
+            },
+            {
+              "start": 560,
+              "end": 560
+            },
+            {
+              "start": 702,
+              "end": 702
+            }
+          ],
+          "<worktree>/tracing-attributes/src/expand.rs": [
+            {
+              "start": 352,
+              "end": 404
+            }
+          ],
+          "<worktree>/tracing-attributes/tests/ret.rs": [
+            {
+              "start": 93,
+              "end": 180
+            }
+          ]
+        },
+        "predSymbols": {
+          "<worktree>/tracing-attributes/src/expand.rs": [
+            "gen_block"
+          ],
+          "<worktree>/tracing-attributes/tests/ret.rs": [
+            "ret_mut_ref",
+            "ret_ref"
+          ]
+        }
+      },
+      "evaluatedTrajectory": {
+        "steps": [
+          {
+            "step": 1,
+            "coverage": {
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 2,
+            "coverage": {
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 3,
+            "coverage": {
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 4,
+            "coverage": {
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 5,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 6,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 7,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 8,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 9,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 10,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 11,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.026641651031894933,
+              "line": 0.029850746268656716
+            }
+          }
+        ],
+        "aucCoverage": {
+          "file": 0.6363636363636364,
+          "symbol": 0.3181818181818182,
+          "span": 0.002421968275626812,
+          "line": 0.0027137042062415195
+        },
+        "redundancy": {
+          "file": 0.303030303030303,
+          "symbol": 0.0,
+          "span": 0.0,
+          "line": 0.0
+        }
+      },
+      "fixOverlap": {
+        "vsGold": {
+          "status": "available",
+          "reason": null,
+          "recall": 0.2727272727272727,
+          "precision": 0.3333333333333333,
+          "f1": 0.3,
+          "intersection": 3,
+          "goldSize": 11,
+          "predSize": 9
+        }
+      },
+      "traceEntries": [
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/74678ed975a2396a7881/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/74678ed975a2396a7881/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/74678ed975a2396a7881/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/74678ed975a2396a7881/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"rg --files tracing-attributes | sed -n '1,200p'\"",
+          "output": "tracing-attributes/src/attr.rs\ntracing-attributes/src/expand.rs\ntracing-attributes/src/lib.rs\ntracing-attributes/README.md\ntracing-attributes/CHANGELOG.md\ntracing-attributes/LICENSE\ntracing-attributes/Cargo.toml\ntracing-attributes/tests/parents.rs\ntracing-attributes/tests/names.rs\ntracing-attributes/tests/instrument.rs\ntracing-attributes/tests/follows_from.rs\ntracing-attributes/tests/levels.rs\ntracing-attributes/tests/ret.rs\ntracing-attributes/tests/err.rs\ntracing-attributes/tests/destructuring.rs\ntracing-attributes/tests/fields.rs\ntracing-attributes/tests/targets.rs\ntracing-attributes/tests/async_fn.rs\ntracing-attributes/tests/ui.rs\ntracing-attributes/tests/ui/async_instrument.stderr\ntracing-attributes/tests/ui/const_instrument.rs\ntracing-attributes/tests/ui/const_instrument.stderr\ntracing-attributes/tests/ui/async_instrument.rs\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"pwd && rg -n \\\"instrument\\\\(ret\\\\)|FnOnce|FnMut|Fn\\\\b|ret\\\\]\\\" tracing-attributes -g '*.rs'\"",
+          "output": "<worktree>\ntracing-attributes/tests/ret.rs:11:#[instrument(ret)]\ntracing-attributes/tests/ret.rs:93:#[instrument(ret)]\ntracing-attributes/tests/ret.rs:125:#[instrument(ret)]\ntracing-attributes/tests/ret.rs:152:#[instrument(ret)]\ntracing-attributes/tests/fields.rs:149:fn run_test<F: FnOnce() -> T, T>(span: NewSpan, fun: F) {\ntracing-attributes/src/lib.rs:85:use syn::{Attribute, ItemFn, Signature, Visibility};\ntracing-attributes/src/lib.rs:228:/// #[instrument(ret)]\ntracing-attributes/src/lib.rs:379:    let input = syn::parse_macro_input!(item as MaybeItemFn);\ntracing-attributes/src/lib.rs:396:    let input = syn::parse::<ItemFn>(item)?;\ntracing-attributes/src/lib.rs:412:    let input = MaybeItemFn::from(input);\ntracing-attributes/src/lib.rs:423:/// This is a more flexible/imprecise `ItemFn` type,\ntracing-attributes/src/lib.rs:426:struct MaybeItemFn {\ntracing-attributes/src/lib.rs:434:impl MaybeItemFn {\ntracing-attributes/src/lib.rs:446:/// This parses a `TokenStream` into a `MaybeItemFn`\ntracing-attributes/src/lib.rs:447:/// (just like `ItemFn`, but skips parsing the body).\ntracing-attributes/src/lib.rs:448:impl Parse for MaybeItemFn {\ntracing-attributes/src/lib.rs:465:impl From<ItemFn> for MaybeItemFn {\ntracing-attributes/src/lib.rs:467:        ItemFn {\ntracing-attributes/src/lib.rs:472:        }: ItemFn,\ntracing-attributes/src/lib.rs:487:/// A generic reference type for `MaybeItemFn`,\ntracing-attributes/src/expand.rs:8:    Ident, Item, ItemFn, Pat, PatIdent, PatReference, PatStruct, PatTuple, PatTupleStruct, PatType,\ntracing-attributes/src/expand.rs:14:    MaybeItemFn, MaybeItemFnRef,\ntracing-attributes/src/expand.rs:24:    // these are needed ahead of time, as ItemFn contains the function body _and_\ntracing-attributes/src/expand.rs:26:    // (Syn's ToTokens isn't implemented for ItemFn)\ntracing-attributes/src/expand.rs:506:    Function(&'a ItemFn),\ntracing-attributes/src/expand.rs:521:    input: &'block ItemFn,\ntracing-attributes/src/expand.rs:550:    pub(crate) fn from_fn(input: &'block ItemFn) -> Option<Self> {\ntracing-attributes/src/expand.rs:560:            if let Stmt::Item(Item::Fn(fun)) = &stmt {\ntracing-attributes/src/expand.rs:702:                    let fun = MaybeItemFn::from(fun.clone());\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc 'git status --short'",
+          "output": "",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '1,260p' tracing-attributes/tests/ret.rs\"",
+          "output": "use std::convert::TryFrom;\nuse std::num::TryFromIntError;\n\nuse tracing::{collect::with_default, Level};\nuse tracing_attributes::instrument;\nuse tracing_mock::{collector, expect};\nuse tracing_subscriber::subscribe::CollectExt;\nuse tracing_subscriber::EnvFilter;\nuse tracing_test::block_on_future;\n\n#[instrument(ret)]\nfn ret() -> i32 {\n    42\n}\n\n#[instrument(target = \"my_target\", ret)]\nfn ret_with_target() -> i32 {\n    42\n}\n\n#[test]\nfn test() {\n    let span = expect::span().named(\"ret\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, ret);\n    handle.assert_finished();\n}\n\n#[test]\nfn test_custom_target() {\n    let filter: EnvFilter = \"my_target=info\".parse().expect(\"filter should parse\");\n    let span = expect::span()\n        .named(\"ret_with_target\")\n        .with_target(\"my_target\");\n\n    let (subscriber, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::INFO)\n                .with_target(\"my_target\"),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    let subscriber = subscriber.with(filter);\n\n    with_default(subscriber, ret_with_target);\n    handle.assert_finished();\n}\n\n#[instrument(level = \"warn\", ret)]\nfn ret_warn() -> i32 {\n    42\n}\n\n#[test]\nfn test_warn() {\n    let span = expect::span().named(\"ret_warn\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::WARN),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, ret_warn);\n    handle.assert_finished();\n}\n\n#[instrument(ret)]\nfn ret_mut(a: &mut i32) -> i32 {\n    *a *= 2;\n    tracing::info!(?a);\n    *a\n}\n\n#[test]\nfn test_mut() {\n    let span = expect::span().named(\"ret_mut\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"a\").with_value(&tracing::field::display(2)))\n                .at_level(Level::INFO),\n        )\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(2)))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, || ret_mut(&mut 1));\n    handle.assert_finished();\n}\n\n#[instrument(ret)]\nasync fn ret_async() -> i32 {\n    42\n}\n\n#[test]\nfn test_async() {\n    let span = expect::span().named(\"ret_async\");\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .enter(span.clone())\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, || block_on_future(async { ret_async().await }));\n    handle.assert_finished();\n}\n\n#[instrument(ret)]\nfn ret_impl_type() -> impl Copy {\n    42\n}\n\n#[test]\nfn test_impl_type() {\n    let span = expect::span().named(\"ret_\u2026",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"rg -n \\\"ret_event|ret\\\\)|quote\"'!|move '\"\\\\|\\\\||FnOnce|FnMut|return value|entered.*ret|ret_enabled\\\" tracing-attributes/src/expand.rs\"",
+          "output": "25:    // isn't representable inside a quote!/quote_spanned! macro\n58:        (syn::parse_quote! { () }, ident.span())\n77:    let block = quote! {\n93:    quote!(\n119:        .map(|name| quote!(#name))\n120:        .unwrap_or_else(|| quote!(#instrumented_function_name));\n126:    let follows_from = quote! {\n201:                RecordType::Value => quote!(#user_name = #real_name),\n202:                RecordType::Debug => quote!(#user_name = tracing::field::debug(&#real_name)),\n226:        quote!(tracing::span!(\n243:                FormatMode::Default | FormatMode::Display => Some(quote!(\n246:                FormatMode::Debug => Some(quote!(\n254:    let ret_event = match args.ret_args {\n258:                FormatMode::Display => Some(quote!(\n261:                FormatMode::Default | FormatMode::Debug => Some(quote!(\n277:        let mk_fut = match (err_event, ret_event) {\n278:            (Some(err_event), Some(ret_event)) => quote_spanned!(block.span()=>\n283:                            #ret_event;\n305:            (None, Some(ret_event)) => quote_spanned!(block.span()=>\n308:                    #ret_event;\n317:        return quote!(\n333:    let span = quote!(\n353:    match (err_event, ret_event) {\n354:        (Some(err_event), Some(ret_event)) => quote_spanned! {block.span()=>\n357:            match (move || #block)() {\n360:                    #ret_event;\n372:            match (move || #block)() {\n381:        (None, Some(ret_event)) => quote_spanned!(block.span()=>\n384:            let x = (move || #block)();\n385:            #ret_event;\n569:        // last expression of the block: it determines the return value of the\n725:                        quote! {\n729:                        quote! {\n740:        Ok(quote!(\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '1,260p' tracing-attributes/src/expand.rs\"",
+          "output": "use std::iter;\n\nuse proc_macro2::TokenStream;\nuse quote::{quote, quote_spanned, ToTokens};\nuse syn::visit_mut::VisitMut;\nuse syn::{\n    punctuated::Punctuated, spanned::Spanned, Block, Expr, ExprAsync, ExprCall, FieldPat, FnArg,\n    Ident, Item, ItemFn, Pat, PatIdent, PatReference, PatStruct, PatTuple, PatTupleStruct, PatType,\n    Path, ReturnType, Signature, Stmt, Token, Type, TypePath,\n};\n\nuse crate::{\n    attr::{Field, Fields, FormatMode, InstrumentArgs, Level},\n    MaybeItemFn, MaybeItemFnRef,\n};\n\n/// Given an existing function, generate an instrumented version of that function\npub(crate) fn gen_function<'a, B: ToTokens + 'a>(\n    input: MaybeItemFnRef<'a, B>,\n    args: InstrumentArgs,\n    instrumented_function_name: &str,\n    self_type: Option<&TypePath>,\n) -> proc_macro2::TokenStream {\n    // these are needed ahead of time, as ItemFn contains the function body _and_\n    // isn't representable inside a quote!/quote_spanned! macro\n    // (Syn's ToTokens isn't implemented for ItemFn)\n    let MaybeItemFnRef {\n        outer_attrs,\n        inner_attrs,\n        vis,\n        sig,\n        block,\n    } = input;\n\n    let Signature {\n        output,\n        inputs: params,\n        unsafety,\n        asyncness,\n        constness,\n        abi,\n        ident,\n        generics:\n            syn::Generics {\n                params: gen_params,\n                where_clause,\n                ..\n            },\n        ..\n    } = sig;\n\n    let warnings = args.warnings();\n\n    let (return_type, return_span) = if let ReturnType::Type(_, return_type) = &output {\n        (erase_impl_trait(return_type), return_type.span())\n    } else {\n        // Point at function name if we don't have an explicit return type\n        (syn::parse_quote! { () }, ident.span())\n    };\n    // Install a fake return statement as the first thing in the function\n    // body, so that we eagerly infer that the return type is what we\n    // declared in the async fn signature.\n    // The `#[allow(..)]` is given because the return statement is\n    // unreachable, but does affect inference, so it needs to be written\n    // exactly that way for it to do its magic.\n    let fake_return_edge = quote_spanned! {return_span=>\n        #[allow(\n            unknown_lints, unreachable_code, clippy::diverging_sub_expression,\n            clippy::let_unit_value, clippy::unreachable, clippy::let_with_type_underscore,\n            clippy::empty_loop\n        )]\n        if false {\n            let __tracing_attr_fake_return: #return_type = loop {};\n            return __tracing_attr_fake_return;\n        }\n    };\n    let block = quote! {\n        {\n            #fake_return_edge\n            #block\n        }\n    };\n\n    let body = gen_block(\n        &block,\n        params,\n        asyncness.is_some(),\n        args,\n        instrumented_function_name,\n        self_type,\n    );\n\n    quote!(\n        #(#outer_attrs) *\n        #vis #constness #unsafety #asyncness #abi fn #ident<#gen_params>(#params) #output\n        #where_clause\n        {\n            #(#inner_attrs) *\n            #warnings\n            #body\n        }\n    )\n}\n\n/// Instrument a block\nfn gen_block<B: ToTokens>(\n    block: &B,\n    params: &Punctuated<FnArg, Token![,]>,\n    async_context: bool,\n    mut args: InstrumentArgs,\n    instrumented_function_name: &str,\n    self_type: Option<&TypePath>,\n) -> proc_macro2::TokenStream {\n    // generate the span's name\n    let span_name = args\n        // did the user override the span's name?\n        .name\n        .as_ref()\n        .map(|name| quote!(#name))\n        .unwrap_or_else(|| quote!(#instrumented_function_name));\n\n    let args_level = args.level();\n    let level = args_level.clone();\n\n    let follows_from = args.follows_from.iter();\n    let follows_from = quote! {\n        #(for cause in #follows_from {\n            __tracing_attr_span.follows_from(cause);\n        })*\n    };\n\n    // generate this inside a closure, so we can return early on errors.\n    let span = (|| {\n        // Pull out the arguments-to\u2026",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '260,430p' tracing-attributes/src/expand.rs\"",
+          "output": "                )),\n                FormatMode::Default | FormatMode::Debug => Some(quote!(\n                    tracing::event!(target: #target, #level_tokens, return = ?x)\n                )),\n            }\n        }\n        _ => None,\n    };\n\n    // Generate the instrumented function body.\n    // If the function is an `async fn`, this will wrap it in an async block,\n    // which is `instrument`ed using `tracing-futures`. Otherwise, this will\n    // enter the span and then perform the rest of the body.\n    // If `err` is in args, instrument any resulting `Err`s.\n    // If `ret` is in args, instrument any resulting `Ok`s when the function\n    // returns `Result`s, otherwise instrument any resulting values.\n    if async_context {\n        let mk_fut = match (err_event, ret_event) {\n            (Some(err_event), Some(ret_event)) => quote_spanned!(block.span()=>\n                async move {\n                    match async move #block.await {\n                        #[allow(clippy::unit_arg)]\n                        Ok(x) => {\n                            #ret_event;\n                            Ok(x)\n                        },\n                        Err(e) => {\n                            #err_event;\n                            Err(e)\n                        }\n                    }\n                }\n            ),\n            (Some(err_event), None) => quote_spanned!(block.span()=>\n                async move {\n                    match async move #block.await {\n                        #[allow(clippy::unit_arg)]\n                        Ok(x) => Ok(x),\n                        Err(e) => {\n                            #err_event;\n                            Err(e)\n                        }\n                    }\n                }\n            ),\n            (None, Some(ret_event)) => quote_spanned!(block.span()=>\n                async move {\n                    let x = async move #block.await;\n                    #ret_event;\n                    x\n                }\n            ),\n            (None, None) => quote_spanned!(block.span()=>\n                async move #block\n            ),\n        };\n\n        return quote!(\n            let __tracing_attr_span = #span;\n            let __tracing_instrument_future = #mk_fut;\n            if !__tracing_attr_span.is_disabled() {\n                #follows_from\n                tracing::Instrument::instrument(\n                    __tracing_instrument_future,\n                    __tracing_attr_span\n                )\n                .await\n            } else {\n                __tracing_instrument_future.await\n            }\n        );\n    }\n\n    let span = quote!(\n        // These variables are left uninitialized and initialized only\n        // if the tracing level is statically enabled at this point.\n        // While the tracing level is also checked at span creation\n        // time, that will still create a dummy span, and a dummy guard\n        // and drop the dummy guard later. By lazily initializing these\n        // variables, Rust will generate a drop flag for them and thus\n        // only drop the guard if it was created. This creates code that\n        // is very straightforward for LLVM to optimize out if the tracing\n        // level is statically disabled, while not causing any performance\n        // regression in case the level is enabled.\n        let __tracing_attr_span;\n        let __tracing_attr_guard;\n        if tracing::level_enabled!(#level) || tracing::if_log_enabled!(#level, {true} else {false}) {\n            __tracing_attr_span = #span;\n            #follows_from\n            __tracing_attr_guard = __tracing_attr_span.enter();\n        }\n    );\n\n    match (err_event, ret_event) {\n        (Some(err_event), Some(ret_event)) => quote_spanned! {block.span()=>\n            #span\n            #[allow(clippy::redundant_closure_call)]\n            match (move || #block)() {\n                #[allow(clippy::unit_arg)]\n                Ok(x) => {\n                    #ret_event;\n                    Ok(x)\n    \u2026",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "failed",
+          "command": "/bin/bash -lc 'cargo test -p tracing-attributes ret -- --nocapture'",
+          "output": "/bin/bash: line 1: cargo: command not found\n",
+          "exitCode": 127
+        },
+        {
+          "kind": "todo_list",
+          "status": null,
+          "payload": {
+            "items": [
+              {
+                "text": "Inspect the macro implementation and existing tests around `#[instrument(ret)]` closure generation",
+                "completed": true
+              },
+              {
+                "text": "Add a regression test that fails before the fix",
+                "completed": false
+              },
+              {
+                "text": "Patch the macro expansion to force instrumented functions to be `FnOnce`",
+                "completed": false
+              },
+              {
+                "text": "Run the strongest relevant local verification",
+                "completed": false
+              }
+            ]
+          }
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '1,240p' tracing-attributes/tests/ui.rs\"",
+          "output": "// Only test on nightly, since UI tests are bound to change over time\n#[rustversion::stable]\n#[test]\nfn async_instrument() {\n    let t = trybuild::TestCases::new();\n    t.compile_fail(\"tests/ui/async_instrument.rs\");\n}\n\n#[rustversion::stable]\n#[test]\nfn const_instrument() {\n    let t = trybuild::TestCases::new();\n    t.compile_fail(\"tests/ui/const_instrument.rs\");\n}\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '1,220p' tracing-attributes/Cargo.toml\"",
+          "output": "[package]\nname = \"tracing-attributes\"\n# When releasing to crates.io:\n# - Remove path dependencies\n# - Update html_root_url.\n# - Update doc url\n#   - Cargo.toml\n#   - README.md\n# - Update CHANGELOG.md.\n# - Create \"v0.2.x\" git tag.\nversion = \"0.2.0\"\nauthors = [\n    \"Tokio Contributors <team@tokio.rs>\",\n    \"Eliza Weisman <eliza@buoyant.io>\",\n    \"David Barsky <dbarsky@amazon.com>\",\n]\nrepository = \"https://github.com/tokio-rs/tracing\"\nhomepage = \"https://tokio.rs\"\ndescription = \"\"\"\nProcedural macro attributes for automatically instrumenting functions.\n\"\"\"\ncategories = [\n    \"development-tools::debugging\",\n    \"development-tools::profiling\",\n    \"asynchronous\",\n]\nkeywords = [\"logging\", \"tracing\", \"macro\", \"instrument\", \"log\"]\nlicense = \"MIT\"\nreadme = \"README.md\"\nedition = \"2018\"\nrust-version = \"1.63.0\"\n\n[lib]\nproc-macro = true\n\n[dependencies]\nproc-macro2 = \"1.0.60\"\nsyn = { version = \"2.0\", default-features = false, features = [\n    \"full\",\n    \"parsing\",\n    \"printing\",\n    \"visit-mut\",\n    \"clone-impls\",\n    \"extra-traits\",\n    \"proc-macro\",\n] }\nquote = \"1.0.20\"\n\n[dev-dependencies]\ntracing = { path = \"../tracing\", version = \"0.2\" }\ntracing-mock = { path = \"../tracing-mock\" }\ntokio-test = \"0.4.2\"\ntracing-subscriber = { path = \"../tracing-subscriber\", version = \"0.3\", features = [\n    \"env-filter\",\n] }\ntracing-test = { path = \"../tracing-test\" }\nasync-trait = \"0.1.67\"\ntrybuild = \"1.0.64\"\nrustversion = \"1.0.9\"\n\n[badges]\nmaintenance = { status = \"experimental\" }\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"sed -n '240,380p' tracing-attributes/tests/ret.rs\"",
+          "output": "        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(\n                    expect::field(\"return\")\n                        .with_value(&tracing::field::debug(u8::try_from(123).unwrap()))\n                        .only(),\n                )\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, || ret_and_ok().ok());\n    handle.assert_finished();\n}\n\n#[instrument(level = \"warn\", ret(level = \"info\"))]\nfn ret_warn_info() -> i32 {\n    42\n}\n\n#[test]\nfn test_warn_info() {\n    let span = expect::span().named(\"ret_warn_info\").at_level(Level::WARN);\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::INFO),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, ret_warn_info);\n    handle.assert_finished();\n}\n\n#[instrument(ret(level = \"warn\", Debug))]\nfn ret_dbg_warn() -> i32 {\n    42\n}\n\n#[test]\nfn test_dbg_warn() {\n    let span = expect::span().named(\"ret_dbg_warn\").at_level(Level::INFO);\n    let (collector, handle) = collector::mock()\n        .new_span(span.clone())\n        .enter(span.clone())\n        .event(\n            expect::event()\n                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(42)))\n                .at_level(Level::WARN),\n        )\n        .exit(span.clone())\n        .drop_span(span)\n        .only()\n        .run_with_handle();\n\n    with_default(collector, ret_dbg_warn);\n    handle.assert_finished();\n}\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"nl -ba tracing-attributes/src/expand.rs | sed -n '330,395p'\nnl -ba tracing-attributes/tests/ret.rs | sed -n '1,220p'\nnl -ba tracing-attributes/tests/ret.rs | sed -n '220,360p'\"",
+          "output": "   330\t        );\n   331\t    }\n   332\t\n   333\t    let span = quote!(\n   334\t        // These variables are left uninitialized and initialized only\n   335\t        // if the tracing level is statically enabled at this point.\n   336\t        // While the tracing level is also checked at span creation\n   337\t        // time, that will still create a dummy span, and a dummy guard\n   338\t        // and drop the dummy guard later. By lazily initializing these\n   339\t        // variables, Rust will generate a drop flag for them and thus\n   340\t        // only drop the guard if it was created. This creates code that\n   341\t        // is very straightforward for LLVM to optimize out if the tracing\n   342\t        // level is statically disabled, while not causing any performance\n   343\t        // regression in case the level is enabled.\n   344\t        let __tracing_attr_span;\n   345\t        let __tracing_attr_guard;\n   346\t        if tracing::level_enabled!(#level) || tracing::if_log_enabled!(#level, {true} else {false}) {\n   347\t            __tracing_attr_span = #span;\n   348\t            #follows_from\n   349\t            __tracing_attr_guard = __tracing_attr_span.enter();\n   350\t        }\n   351\t    );\n   352\t\n   353\t    match (err_event, ret_event) {\n   354\t        (Some(err_event), Some(ret_event)) => quote_spanned! {block.span()=>\n   355\t            #span\n   356\t            #[allow(clippy::redundant_closure_call)]\n   357\t            match (move || #block)() {\n   358\t                #[allow(clippy::unit_arg)]\n   359\t                Ok(x) => {\n   360\t                    #ret_event;\n   361\t                    Ok(x)\n   362\t                },\n   363\t                Err(e) => {\n   364\t                    #err_event;\n   365\t                    Err(e)\n   366\t                }\n   367\t            }\n   368\t        },\n   369\t        (Some(err_event), None) => quote_spanned!(block.span()=>\n   370\t            #span\n   371\t            #[allow(clippy::redundant_closure_call)]\n   372\t            match (move || #block)() {\n   373\t                #[allow(clippy::unit_arg)]\n   374\t                Ok(x) => Ok(x),\n   375\t                Err(e) => {\n   376\t                    #err_event;\n   377\t                    Err(e)\n   378\t                }\n   379\t            }\n   380\t        ),\n   381\t        (None, Some(ret_event)) => quote_spanned!(block.span()=>\n   382\t            #span\n   383\t            #[allow(clippy::redundant_closure_call)]\n   384\t            let x = (move || #block)();\n   385\t            #ret_event;\n   386\t            x\n   387\t        ),\n   388\t        (None, None) => quote_spanned!(block.span() =>\n   389\t            // Because `quote` produces a stream of tokens _without_ whitespace, the\n   390\t            // `if` and the block will appear directly next to each other. This\n   391\t            // generates a clippy lint about suspicious `if/else` formatting.\n   392\t            // Therefore, suppress the lint inside the generated code...\n   393\t            #[allow(clippy::suspicious_else_formatting)]\n   394\t            {\n   395\t                #span\n     1\tuse std::convert::TryFrom;\n     2\tuse std::num::TryFromIntError;\n     3\t\n     4\tuse tracing::{collect::with_default, Level};\n     5\tuse tracing_attributes::instrument;\n     6\tuse tracing_mock::{collector, expect};\n     7\tuse tracing_subscriber::subscribe::CollectExt;\n     8\tuse tracing_subscriber::EnvFilter;\n     9\tuse tracing_test::block_on_future;\n    10\t\n    11\t#[instrument(ret)]\n    12\tfn ret() -> i32 {\n    13\t    42\n    14\t}\n    15\t\n    16\t#[instrument(target = \"my_target\", ret)]\n    17\tfn ret_with_target() -> i32 {\n    18\t    42\n    19\t}\n    20\t\n    21\t#[test]\n    22\tfn test() {\n    23\t    let span = expect::span().named(\"ret\");\n    24\t    let (collector, handle) = collector::mock()\n    25\t        .new_span(span.clone())\n    26\t        .enter(span.clone())\n    27\t        .event(\n    28\t            expect::event()\n    29\t                .with_fields(expect::field(\"return\").with_value(&tra\u2026",
+          "exitCode": 0
+        },
+        {
+          "kind": "file_change",
+          "status": "completed",
+          "payload": {}
+        },
+        {
+          "kind": "file_change",
+          "status": "completed",
+          "payload": {}
+        },
+        {
+          "kind": "todo_list",
+          "status": null,
+          "payload": {
+            "items": [
+              {
+                "text": "Inspect the macro implementation and existing tests around `#[instrument(ret)]` closure generation",
+                "completed": true
+              },
+              {
+                "text": "Add a regression test that fails before the fix",
+                "completed": true
+              },
+              {
+                "text": "Patch the macro expansion to force instrumented functions to be `FnOnce`",
+                "completed": true
+              },
+              {
+                "text": "Run the strongest relevant local verification",
+                "completed": false
+              }
+            ]
+          }
+        },
+        {
+          "kind": "command_execution",
+          "status": "failed",
+          "command": "/bin/bash -lc 'rustc --version'",
+          "output": "/bin/bash: line 1: rustc: command not found\n",
+          "exitCode": 127
+        },
+        {
+          "kind": "command_execution",
+          "status": "failed",
+          "command": "/bin/bash -lc 'cargo --version'",
+          "output": "/bin/bash: line 1: cargo: command not found\n",
+          "exitCode": 127
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc 'git diff -- tracing-attributes/src/expand.rs tracing-attributes/tests/ret.rs'",
+          "output": "diff --git a/tracing-attributes/src/expand.rs b/tracing-attributes/src/expand.rs\nindex a92ef58..73689eb 100644\n--- a/tracing-attributes/src/expand.rs\n+++ b/tracing-attributes/src/expand.rs\n@@ -349,12 +349,21 @@ fn gen_block<B: ToTokens>(\n             __tracing_attr_guard = __tracing_attr_span.enter();\n         }\n     );\n+    let force_fn_once = quote!(\n+        // Moving a non-`Copy` ZST into the closure body forces the generated\n+        // closure to be `FnOnce`, so returned borrows may escape it.\n+        let __tracing_attr_force_fn_once: [&mut (); 0] = [];\n+    );\n \n     match (err_event, ret_event) {\n         (Some(err_event), Some(ret_event)) => quote_spanned! {block.span()=>\n             #span\n+            #force_fn_once\n             #[allow(clippy::redundant_closure_call)]\n-            match (move || #block)() {\n+            match (move || {\n+                let _ = __tracing_attr_force_fn_once;\n+                #block\n+            })() {\n                 #[allow(clippy::unit_arg)]\n                 Ok(x) => {\n                     #ret_event;\n@@ -368,8 +377,12 @@ fn gen_block<B: ToTokens>(\n         },\n         (Some(err_event), None) => quote_spanned!(block.span()=>\n             #span\n+            #force_fn_once\n             #[allow(clippy::redundant_closure_call)]\n-            match (move || #block)() {\n+            match (move || {\n+                let _ = __tracing_attr_force_fn_once;\n+                #block\n+            })() {\n                 #[allow(clippy::unit_arg)]\n                 Ok(x) => Ok(x),\n                 Err(e) => {\n@@ -380,8 +393,12 @@ fn gen_block<B: ToTokens>(\n         ),\n         (None, Some(ret_event)) => quote_spanned!(block.span()=>\n             #span\n+            #force_fn_once\n             #[allow(clippy::redundant_closure_call)]\n-            let x = (move || #block)();\n+            let x = (move || {\n+                let _ = __tracing_attr_force_fn_once;\n+                #block\n+            })();\n             #ret_event;\n             x\n         ),\ndiff --git a/tracing-attributes/tests/ret.rs b/tracing-attributes/tests/ret.rs\nindex 19d01c9..98fb12a 100644\n--- a/tracing-attributes/tests/ret.rs\n+++ b/tracing-attributes/tests/ret.rs\n@@ -97,6 +97,16 @@ fn ret_mut(a: &mut i32) -> i32 {\n     *a\n }\n \n+#[instrument(ret)]\n+fn ret_ref(a: &mut i32) -> &i32 {\n+    a\n+}\n+\n+#[instrument(ret)]\n+fn ret_mut_ref(a: &mut i32) -> &mut i32 {\n+    a\n+}\n+\n #[test]\n fn test_mut() {\n     let span = expect::span().named(\"ret_mut\");\n@@ -122,6 +132,53 @@ fn test_mut() {\n     handle.assert_finished();\n }\n \n+#[test]\n+fn test_ref() {\n+    let span = expect::span().named(\"ret_ref\");\n+    let (collector, handle) = collector::mock()\n+        .new_span(span.clone())\n+        .enter(span.clone())\n+        .event(\n+            expect::event()\n+                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(1)))\n+                .at_level(Level::INFO),\n+        )\n+        .exit(span.clone())\n+        .drop_span(span)\n+        .only()\n+        .run_with_handle();\n+\n+    with_default(collector, || {\n+        let mut value = 1;\n+        assert_eq!(*ret_ref(&mut value), 1);\n+    });\n+    handle.assert_finished();\n+}\n+\n+#[test]\n+fn test_mut_ref() {\n+    let span = expect::span().named(\"ret_mut_ref\");\n+    let (collector, handle) = collector::mock()\n+        .new_span(span.clone())\n+        .enter(span.clone())\n+        .event(\n+            expect::event()\n+                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(1)))\n+                .at_level(Level::INFO),\n+        )\n+        .exit(span.clone())\n+        .drop_span(span)\n+        .only()\n+        .run_with_handle();\n+\n+    with_default(collector, || {\n+        let mut value = 1;\n+        *ret_mut_ref(&mut value) = 2;\n+        assert_eq!(value, 2);\n+    });\n+    handle.assert_finished();\n+}\n+\n #[instrument(ret)]\n async fn ret_async() -> i32 {\n     42\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"rg -n \\\"move \\\\|\\\\| #block|__tracing_attr_force_fn_once|ret_ref|ret_mut_ref\\\" tracing-attributes/src/expand.rs tracing-attributes/tests/ret.rs\"",
+          "output": "tracing-attributes/tests/ret.rs:101:fn ret_ref(a: &mut i32) -> &i32 {\ntracing-attributes/tests/ret.rs:106:fn ret_mut_ref(a: &mut i32) -> &mut i32 {\ntracing-attributes/tests/ret.rs:137:    let span = expect::span().named(\"ret_ref\");\ntracing-attributes/tests/ret.rs:153:        assert_eq!(*ret_ref(&mut value), 1);\ntracing-attributes/tests/ret.rs:160:    let span = expect::span().named(\"ret_mut_ref\");\ntracing-attributes/tests/ret.rs:176:        *ret_mut_ref(&mut value) = 2;\ntracing-attributes/src/expand.rs:355:        let __tracing_attr_force_fn_once: [&mut (); 0] = [];\ntracing-attributes/src/expand.rs:364:                let _ = __tracing_attr_force_fn_once;\ntracing-attributes/src/expand.rs:383:                let _ = __tracing_attr_force_fn_once;\ntracing-attributes/src/expand.rs:399:                let _ = __tracing_attr_force_fn_once;\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"nl -ba tracing-attributes/tests/ret.rs | sed -n '90,185p'\"",
+          "output": "    90\t    handle.assert_finished();\n    91\t}\n    92\t\n    93\t#[instrument(ret)]\n    94\tfn ret_mut(a: &mut i32) -> i32 {\n    95\t    *a *= 2;\n    96\t    tracing::info!(?a);\n    97\t    *a\n    98\t}\n    99\t\n   100\t#[instrument(ret)]\n   101\tfn ret_ref(a: &mut i32) -> &i32 {\n   102\t    a\n   103\t}\n   104\t\n   105\t#[instrument(ret)]\n   106\tfn ret_mut_ref(a: &mut i32) -> &mut i32 {\n   107\t    a\n   108\t}\n   109\t\n   110\t#[test]\n   111\tfn test_mut() {\n   112\t    let span = expect::span().named(\"ret_mut\");\n   113\t    let (collector, handle) = collector::mock()\n   114\t        .new_span(span.clone())\n   115\t        .enter(span.clone())\n   116\t        .event(\n   117\t            expect::event()\n   118\t                .with_fields(expect::field(\"a\").with_value(&tracing::field::display(2)))\n   119\t                .at_level(Level::INFO),\n   120\t        )\n   121\t        .event(\n   122\t            expect::event()\n   123\t                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(2)))\n   124\t                .at_level(Level::INFO),\n   125\t        )\n   126\t        .exit(span.clone())\n   127\t        .drop_span(span)\n   128\t        .only()\n   129\t        .run_with_handle();\n   130\t\n   131\t    with_default(collector, || ret_mut(&mut 1));\n   132\t    handle.assert_finished();\n   133\t}\n   134\t\n   135\t#[test]\n   136\tfn test_ref() {\n   137\t    let span = expect::span().named(\"ret_ref\");\n   138\t    let (collector, handle) = collector::mock()\n   139\t        .new_span(span.clone())\n   140\t        .enter(span.clone())\n   141\t        .event(\n   142\t            expect::event()\n   143\t                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(1)))\n   144\t                .at_level(Level::INFO),\n   145\t        )\n   146\t        .exit(span.clone())\n   147\t        .drop_span(span)\n   148\t        .only()\n   149\t        .run_with_handle();\n   150\t\n   151\t    with_default(collector, || {\n   152\t        let mut value = 1;\n   153\t        assert_eq!(*ret_ref(&mut value), 1);\n   154\t    });\n   155\t    handle.assert_finished();\n   156\t}\n   157\t\n   158\t#[test]\n   159\tfn test_mut_ref() {\n   160\t    let span = expect::span().named(\"ret_mut_ref\");\n   161\t    let (collector, handle) = collector::mock()\n   162\t        .new_span(span.clone())\n   163\t        .enter(span.clone())\n   164\t        .event(\n   165\t            expect::event()\n   166\t                .with_fields(expect::field(\"return\").with_value(&tracing::field::debug(1)))\n   167\t                .at_level(Level::INFO),\n   168\t        )\n   169\t        .exit(span.clone())\n   170\t        .drop_span(span)\n   171\t        .only()\n   172\t        .run_with_handle();\n   173\t\n   174\t    with_default(collector, || {\n   175\t        let mut value = 1;\n   176\t        *ret_mut_ref(&mut value) = 2;\n   177\t        assert_eq!(value, 2);\n   178\t    });\n   179\t    handle.assert_finished();\n   180\t}\n   181\t\n   182\t#[instrument(ret)]\n   183\tasync fn ret_async() -> i32 {\n   184\t    42\n   185\t}\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc \"nl -ba tracing-attributes/src/expand.rs | sed -n '348,406p'\"",
+          "output": "   348\t            #follows_from\n   349\t            __tracing_attr_guard = __tracing_attr_span.enter();\n   350\t        }\n   351\t    );\n   352\t    let force_fn_once = quote!(\n   353\t        // Moving a non-`Copy` ZST into the closure body forces the generated\n   354\t        // closure to be `FnOnce`, so returned borrows may escape it.\n   355\t        let __tracing_attr_force_fn_once: [&mut (); 0] = [];\n   356\t    );\n   357\t\n   358\t    match (err_event, ret_event) {\n   359\t        (Some(err_event), Some(ret_event)) => quote_spanned! {block.span()=>\n   360\t            #span\n   361\t            #force_fn_once\n   362\t            #[allow(clippy::redundant_closure_call)]\n   363\t            match (move || {\n   364\t                let _ = __tracing_attr_force_fn_once;\n   365\t                #block\n   366\t            })() {\n   367\t                #[allow(clippy::unit_arg)]\n   368\t                Ok(x) => {\n   369\t                    #ret_event;\n   370\t                    Ok(x)\n   371\t                },\n   372\t                Err(e) => {\n   373\t                    #err_event;\n   374\t                    Err(e)\n   375\t                }\n   376\t            }\n   377\t        },\n   378\t        (Some(err_event), None) => quote_spanned!(block.span()=>\n   379\t            #span\n   380\t            #force_fn_once\n   381\t            #[allow(clippy::redundant_closure_call)]\n   382\t            match (move || {\n   383\t                let _ = __tracing_attr_force_fn_once;\n   384\t                #block\n   385\t            })() {\n   386\t                #[allow(clippy::unit_arg)]\n   387\t                Ok(x) => Ok(x),\n   388\t                Err(e) => {\n   389\t                    #err_event;\n   390\t                    Err(e)\n   391\t                }\n   392\t            }\n   393\t        ),\n   394\t        (None, Some(ret_event)) => quote_spanned!(block.span()=>\n   395\t            #span\n   396\t            #force_fn_once\n   397\t            #[allow(clippy::redundant_closure_call)]\n   398\t            let x = (move || {\n   399\t                let _ = __tracing_attr_force_fn_once;\n   400\t                #block\n   401\t            })();\n   402\t            #ret_event;\n   403\t            x\n   404\t        ),\n   405\t        (None, None) => quote_spanned!(block.span() =>\n   406\t            // Because `quote` produces a stream of tokens _without_ whitespace, the\n",
+          "exitCode": 0
+        },
+        {
+          "kind": "command_execution",
+          "status": "completed",
+          "command": "/bin/bash -lc 'git diff --check -- tracing-attributes/src/expand.rs tracing-attributes/tests/ret.rs'",
+          "output": "",
+          "exitCode": 0
+        },
+        {
+          "kind": "todo_list",
+          "status": null,
+          "payload": {
+            "items": [
+              {
+                "text": "Inspect the macro implementation and existing tests around `#[instrument(ret)]` closure generation",
+                "completed": true
+              },
+              {
+                "text": "Add a regression test that fails before the fix",
+                "completed": true
+              },
+              {
+                "text": "Patch the macro expansion to force instrumented functions to be `FnOnce`",
+                "completed": true
+              },
+              {
+                "text": "Run the strongest relevant local verification",
+                "completed": true
+              }
+            ]
+          }
+        },
+        {
+          "kind": "assistant_message",
+          "text": "{\"status\":\"completed\",\"final_answer\":\"Implemented the `#[instrument(ret)]` fix by forcing the generated non-async wrapper closures in `tracing-attributes` to be `FnOnce`. The macro now captures and consumes a non-`Copy` zero-sized value before executing the user block, which allows returned borrows from `&mut` arguments to escape correctly. I also added regression tests covering `#[instrument(ret)]` functions that return `&T` and `&mut T` from a `&mut` parameter.\\n\\nVerification: inspected the resulting diff and ran `git diff --check` successfully. Full Rust compilation/tests could not be run in this benchmark runtime because both `cargo` and `rustc` are unavailable.\",\"retrieved_context_files\":[\"<worktree>/tracing-attributes/src/expand.rs\",\"<worktree>/tracing-attributes/tests/ret.rs\"],\"retrieved_context_spans\":[{\"file\":\"<worktree>/tracing-attributes/src/expand.rs\",\"start\":352,\"end\":404},{\"file\":\"<worktree>/tracing-attributes/tests/ret.rs\",\"start\":93,\"end\":180}],\"retrieved_context_symbols\":[{\"file\":\"<worktree>/tracing-attributes/src/expand.rs\",\"name\":\"gen_block\"},{\"file\":\"<worktree>/tracing-attributes/tests/ret.rs\",\"name\":\"ret_ref\"},{\"file\":\"<worktree>/tracing-attributes/tests/ret.rs\",\"name\":\"ret_mut_ref\"}],\"notes\":\"Offline-safe verification was limited by the environment: `git diff --check` passed, but `cargo --version` and `rustc --version` both failed with command-not-found, so no compile/test execution was possible.\"}"
+        },
+        {
+          "kind": "todo_list",
+          "status": null,
+          "payload": {
+            "items": [
+              {
+                "text": "Inspect the macro implementation and existing tests around `#[instrument(ret)]` closure generation",
+                "completed": true
+              },
+              {
+                "text": "Add a regression test that fails before the fix",
+                "completed": true
+              },
+              {
+                "text": "Patch the macro expansion to force instrumented functions to be `FnOnce`",
+                "completed": true
+              },
+              {
+                "text": "Run the strongest relevant local verification",
+                "completed": true
+              }
+            ]
+          }
+        }
+      ],
+      "label": "B"
+    }
+  ],
+  "fixOverlapBetweenVariants": {
+    "status": "available",
+    "reason": null,
+    "leftLabel": "A",
+    "rightLabel": "B",
+    "leftCoveredByRight": 0.8888888888888888,
+    "rightCoveredByLeft": 0.8888888888888888,
+    "f1": 0.8888888888888888,
+    "intersection": 8,
+    "leftSize": 9,
+    "rightSize": 9
+  }
+}
