@@ -1,5 +1,6 @@
-# Fork note: Modified by Norbert Laszlo on 2026-03-22 from upstream ContextBench.
-# Summary of changes: support unscored setup prompts that run before the scored benchmark prompt.
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-05-20 from upstream ContextBench.
+# Summary of changes: support setup prompts and capture untracked files in benchmark patches.
 
 """Runtime helpers for Codex and Claude CLI execution."""
 
@@ -90,28 +91,75 @@ def git_tracked_diff(workspace_path: Path) -> str:
     return git_staged_diff(workspace_path) + git_diff(workspace_path)
 
 
-def git_untracked_files(workspace_path: Path) -> list[str]:
-    result = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
+def git_workspace_diff(workspace_path: Path) -> str:
+    tracked_diff = git_tracked_diff(workspace_path)
+    try:
+        untracked_files = git_untracked_files(workspace_path)
+    except RuntimeError:
+        if tracked_diff.strip():
+            return tracked_diff
+        raise
+    if not untracked_files:
+        return tracked_diff
+
+    add_result = subprocess.run(
+        ["git", "add", "--intent-to-add", "--", *untracked_files],
         cwd=str(workspace_path),
         check=False,
         capture_output=True,
         text=True,
     )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        message = f"git status failed while checking setup contamination in {workspace_path}"
+    if add_result.returncode != 0:
+        detail = (add_result.stderr or add_result.stdout or "").strip()
+        message = f"git add --intent-to-add failed while preparing workspace diff in {workspace_path}"
         if detail:
             message = f"{message}: {detail}"
         raise RuntimeError(message)
-    files: list[str] = []
-    for line in (result.stdout or "").splitlines():
-        if not line.startswith("?? "):
-            continue
-        path = line[3:].strip()
-        if path:
-            files.append(path)
-    return sorted(set(files))
+    diff_text = ""
+    try:
+        diff_text = git_tracked_diff(workspace_path)
+    finally:
+        reset_result = subprocess.run(
+            ["git", "reset", "--", *untracked_files],
+            cwd=str(workspace_path),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    if reset_result.returncode != 0:
+        detail = (reset_result.stderr or reset_result.stdout or "").strip()
+        message = f"git reset failed while restoring workspace diff state in {workspace_path}"
+        if detail:
+            message = f"{message}: {detail}"
+        raise RuntimeError(message)
+    return diff_text
+
+
+def git_untracked_files(workspace_path: Path) -> list[str]:
+    result = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=str(workspace_path),
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raw_detail = result.stderr or result.stdout or b""
+        detail = (
+            raw_detail.decode("utf-8", "replace")
+            if isinstance(raw_detail, bytes)
+            else str(raw_detail)
+        ).strip()
+        message = f"git ls-files failed while checking untracked files in {workspace_path}"
+        if detail:
+            message = f"{message}: {detail}"
+        raise RuntimeError(message)
+    return sorted(
+        {
+            path.decode("utf-8", "surrogateescape")
+            for path in (result.stdout or b"").split(b"\0")
+            if path
+        }
+    )
 
 
 def build_setup_contamination_record(
@@ -313,7 +361,7 @@ def run_coding_agent_task(
             if runtime_setup_failure.command_result["timeout"] and runtime_config.backend == "docker":
                 task_runtime.close(success=False)
                 runtime_closed = True
-            diff_text = git_tracked_diff(workspace_path)
+            diff_text = git_workspace_diff(workspace_path)
             diff_path: Path | None = None
             if diff_text.strip():
                 diff_path = task_dir / "workspace.diff"
@@ -375,7 +423,7 @@ def run_coding_agent_task(
                 if setup_result.command_result["timeout"] and runtime_config.backend == "docker":
                     task_runtime.close(success=False)
                     runtime_closed = True
-                diff_text = git_tracked_diff(workspace_path)
+                diff_text = git_workspace_diff(workspace_path)
                 diff_path: Path | None = None
                 if diff_text.strip():
                     diff_path = task_dir / "workspace.diff"
@@ -426,7 +474,7 @@ def run_coding_agent_task(
         if main_result.command_result["timeout"] and runtime_config.backend == "docker":
             task_runtime.close(success=False)
             runtime_closed = True
-        diff_text = git_tracked_diff(workspace_path)
+        diff_text = git_workspace_diff(workspace_path)
         diff_path: Path | None = None
         if diff_text.strip():
             diff_path = task_dir / "workspace.diff"

@@ -13,6 +13,7 @@ from contextbench.coding_agents.constants import CODEX_OUTPUT_SCHEMA_PATH
 from contextbench.coding_agents.runtime import (
     build_claude_command,
     build_codex_command,
+    git_workspace_diff,
     git_untracked_files,
     prepare_claude_runtime_files,
     prepare_codex_runtime_env,
@@ -36,6 +37,36 @@ def assert_subsequence(values: list[str], expected: list[str]) -> None:
         None,
     )
     assert start is not None, f"{expected!r} not found in {values!r}"
+
+
+def test_git_workspace_diff_includes_untracked_files_and_restores_index(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "tracked.txt").write_text("old\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
+    (repo / "new.txt").write_text("created\n", encoding="utf-8")
+    (repo / "new file with space.txt").write_text("spaced\n", encoding="utf-8")
+
+    diff = git_workspace_diff(repo)
+
+    assert "diff --git a/tracked.txt b/tracked.txt" in diff
+    assert "diff --git a/new.txt b/new.txt" in diff
+    assert "diff --git a/new file with space.txt b/new file with space.txt" in diff
+    assert "+created" in diff
+    assert "+spaced" in diff
+    status = subprocess.run(["git", "status", "--short"], cwd=repo, check=True, capture_output=True, text=True)
+    assert set(status.stdout.splitlines()) == {" M tracked.txt", "?? new.txt", '?? "new file with space.txt"'}
+
 
 def test_run_coding_agent_task_codex_setup_prompt_runs_before_scored_prompt(
     tmp_path,
@@ -174,7 +205,7 @@ def test_run_coding_agent_task_runtime_setup_command_short_circuits_scored_promp
 
     monkeypatch.setattr("contextbench.coding_agents.runtime.checkout", lambda *args, **kwargs: str(workspace_path))
     monkeypatch.setattr("contextbench.coding_agents.runtime.reset_workspace", lambda path: None)
-    monkeypatch.setattr("contextbench.coding_agents.runtime.git_diff", lambda path: "")
+    monkeypatch.setattr("contextbench.coding_agents.runtime.git_workspace_diff", lambda path: "")
     monkeypatch.setattr(
         "contextbench.agents.codex.runtime.prepare_runtime_env",
         lambda task_dir, **kwargs: {"HOME": str(task_dir / "codex-home")},
@@ -280,7 +311,7 @@ def test_run_coding_agent_task_fails_when_runtime_setup_creates_untracked_files(
     assert reset_calls == [workspace_path]
 
 
-def test_git_untracked_files_fails_loudly_when_git_status_fails(tmp_path, monkeypatch) -> None:
+def test_git_untracked_files_fails_loudly_when_git_ls_files_fails(tmp_path, monkeypatch) -> None:
     class Result:
         returncode = 128
         stdout = ""
@@ -291,8 +322,9 @@ def test_git_untracked_files_fails_loudly_when_git_status_fails(tmp_path, monkey
         lambda *args, **kwargs: Result(),
     )
 
-    with pytest.raises(RuntimeError, match="git status failed while checking setup contamination"):
+    with pytest.raises(RuntimeError, match="git ls-files failed while checking untracked files"):
         git_untracked_files(tmp_path)
+
 
 def test_run_coding_agent_task_fails_when_runtime_setup_changes_tracked_files(
     tmp_path,

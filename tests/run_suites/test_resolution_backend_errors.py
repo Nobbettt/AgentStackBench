@@ -166,6 +166,8 @@ def test_evaluate_resolution_for_suite_marks_backend_partial_when_error_ids_exis
     assert bench_summary["status"] == "failed"
     assert bench_summary["error_ids"] == [instance_id]
     assert bench_summary["unknown_ids"] == []
+
+
 def test_evaluate_resolution_for_suite_fails_when_backend_omits_prediction_id(tmp_path: Path, monkeypatch) -> None:
     variant_dir = tmp_path / "variant"
     source_dir = variant_dir / "agent_runs" / "codex"

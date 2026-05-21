@@ -258,7 +258,7 @@ def test_run_coding_agent_task_codex_retries_transient_failure(tmp_path, monkeyp
             "codex-events.jsonl",
         ),
     )
-    monkeypatch.setattr("contextbench.coding_agents.runtime.git_diff", lambda path: "")
+    monkeypatch.setattr("contextbench.coding_agents.runtime.git_workspace_diff", lambda path: "")
     monkeypatch.setattr("contextbench.agents.codex.runtime.time.sleep", lambda seconds: None)
 
     def fake_run_command(command, *, cwd, stdin_text, stdout_path, stderr_path, timeout, env=None):
@@ -359,7 +359,7 @@ def test_run_coding_agent_task_passes_workspace_key_to_checkout(tmp_path, monkey
             "codex-events.jsonl",
         ),
     )
-    monkeypatch.setattr("contextbench.coding_agents.runtime.git_diff", lambda path: "")
+    monkeypatch.setattr("contextbench.coding_agents.runtime.git_workspace_diff", lambda path: "")
 
     def fake_run_command(command, *, cwd, stdin_text, stdout_path, stderr_path, timeout, env=None):
         stdout_path.write_text(

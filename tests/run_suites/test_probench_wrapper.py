@@ -242,3 +242,158 @@ def test_probench_wrapper_zero_exit_without_result_writes_error_not_unresolved(t
     assert errors[0]["instance_id"] == "instance_repo__repo-1"
     assert errors[0]["exit_code"] is None
     assert Path(errors[0]["error_path"]).exists()
+
+
+@pytest.mark.parametrize("resolved", [True, False])
+def test_probench_wrapper_reuses_checkpoint_after_local_cleanup(
+    tmp_path: Path,
+    monkeypatch,
+    resolved: bool,
+) -> None:
+    module = _prepare_pro_wrapper(tmp_path, monkeypatch)
+    patch_path = tmp_path / "predictions.json"
+    output_dir = tmp_path / "work" / "evaluation_results"
+    cache_dir = tmp_path / "checkpoints" / "pro"
+    instance_id = "instance_repo__repo-1"
+    row = {"instance_id": instance_id, "patch": "diff", "prefix": "codex"}
+    patch_path.write_text(json.dumps([row]) + "\n", encoding="utf-8")
+    module._write_instance_result(
+        cache_dir / "instances" / instance_id,
+        instance_id,
+        resolved,
+        module._prediction_metadata(row),
+    )
+    monkeypatch.setattr(
+        module,
+        "parse_args",
+        lambda: types.SimpleNamespace(
+            patch_path=patch_path,
+            output_dir=output_dir,
+            num_workers=1,
+            dockerhub_username="jefzda",
+            use_local_docker=True,
+            cache_dir=cache_dir,
+            self_clean_resolution_artifacts=True,
+        ),
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, check, cwd: pytest.fail("checkpointed Pro result should avoid evaluator execution"),
+    )
+
+    assert module.main() == 0
+    assert json.loads((output_dir / "eval_results.json").read_text(encoding="utf-8")) == {instance_id: resolved}
+    assert not (tmp_path / "work" / "instances" / instance_id).exists()
+
+
+def test_probench_wrapper_caches_false_result_and_cleans_local_artifacts(tmp_path: Path, monkeypatch) -> None:
+    module = _prepare_pro_wrapper(tmp_path, monkeypatch)
+    patch_path = tmp_path / "predictions.json"
+    output_dir = tmp_path / "work" / "evaluation_results"
+    cache_dir = tmp_path / "checkpoints" / "pro"
+    instance_id = "instance_repo__repo-1"
+    patch_path.write_text(
+        json.dumps([{"instance_id": instance_id, "patch": "diff", "prefix": "codex"}]) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        module,
+        "parse_args",
+        lambda: types.SimpleNamespace(
+            patch_path=patch_path,
+            output_dir=output_dir,
+            num_workers=1,
+            dockerhub_username="jefzda",
+            use_local_docker=True,
+            cache_dir=cache_dir,
+            self_clean_resolution_artifacts=True,
+        ),
+    )
+
+    def fake_run(command, check, cwd):
+        del check, cwd
+        instance_output = Path(command[command.index("--output_dir") + 1])
+        instance_output.mkdir(parents=True, exist_ok=True)
+        (instance_output / "eval_results.json").write_text(json.dumps({instance_id: False}) + "\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert module.main() == 0
+    checkpoint_result = json.loads(
+        (cache_dir / "instances" / instance_id / "evaluation_results" / "eval_results.json").read_text(encoding="utf-8")
+    )
+    assert checkpoint_result == {instance_id: False}
+    assert not (tmp_path / "work" / "instances" / instance_id).exists()
+
+
+def test_probench_wrapper_does_not_clean_without_cache_dir(tmp_path: Path, monkeypatch) -> None:
+    module = _prepare_pro_wrapper(tmp_path, monkeypatch)
+    patch_path = tmp_path / "predictions.json"
+    output_dir = tmp_path / "work" / "evaluation_results"
+    instance_id = "instance_repo__repo-1"
+    patch_path.write_text(
+        json.dumps([{"instance_id": instance_id, "patch": "diff", "prefix": "codex"}]) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        module,
+        "parse_args",
+        lambda: types.SimpleNamespace(
+            patch_path=patch_path,
+            output_dir=output_dir,
+            num_workers=1,
+            dockerhub_username="jefzda",
+            use_local_docker=True,
+            cache_dir=None,
+            self_clean_resolution_artifacts=True,
+        ),
+    )
+
+    def fake_run(command, check, cwd):
+        del check, cwd
+        instance_output = Path(command[command.index("--output_dir") + 1])
+        instance_output.mkdir(parents=True, exist_ok=True)
+        (instance_output / "eval_results.json").write_text(json.dumps({instance_id: True}) + "\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert module.main() == 0
+    assert json.loads((output_dir / "eval_results.json").read_text(encoding="utf-8")) == {instance_id: True}
+    assert (tmp_path / "work" / "instances" / instance_id / "evaluation_results" / "eval_results.json").exists()
+
+
+def test_probench_wrapper_does_not_cache_or_clean_evaluator_error(tmp_path: Path, monkeypatch) -> None:
+    module = _prepare_pro_wrapper(tmp_path, monkeypatch)
+    patch_path = tmp_path / "predictions.json"
+    output_dir = tmp_path / "work" / "evaluation_results"
+    cache_dir = tmp_path / "checkpoints" / "pro"
+    instance_id = "instance_repo__repo-1"
+    patch_path.write_text(
+        json.dumps([{"instance_id": instance_id, "patch": "diff", "prefix": "codex"}]) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        module,
+        "parse_args",
+        lambda: types.SimpleNamespace(
+            patch_path=patch_path,
+            output_dir=output_dir,
+            num_workers=1,
+            dockerhub_username="jefzda",
+            use_local_docker=True,
+            cache_dir=cache_dir,
+            self_clean_resolution_artifacts=True,
+        ),
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, check, cwd: subprocess.CompletedProcess(command, 2),
+    )
+
+    assert module.main() == 1
+    assert not (cache_dir / "instances" / instance_id / "evaluation_results" / "eval_results.json").exists()
+    assert (tmp_path / "work" / "instances" / instance_id / "evaluation-error.json").exists()

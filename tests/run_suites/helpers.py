@@ -39,6 +39,53 @@ def load_resolution_wrapper_module(relative_path: str, module_name: str):
     return module
 
 
+def write_agent_resolution_record(
+    *,
+    variant_dir: Path,
+    bench: str,
+    instance_id: str,
+    original_inst_id: str | None = None,
+    agent: str = "codex",
+    model_patch: str = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+y\n",
+) -> Path:
+    original_id = original_inst_id or instance_id
+    source_dir = variant_dir / "agent_runs" / agent
+    task_dir = source_dir / bench / instance_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    record_path = task_dir / f"{instance_id}.{agent}-record.json"
+    record_path.write_text(
+        json.dumps(
+            {
+                "agent": agent,
+                "instance_id": instance_id,
+                "original_inst_id": original_id,
+                "status": "completed",
+                "ok": True,
+                "timeout": False,
+                "model_patch": model_patch,
+            }
+        ),
+        encoding="utf-8",
+    )
+    task_results_path = variant_dir / "task-results.jsonl"
+    with open(task_results_path, "a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "instance_id": instance_id,
+                    "original_inst_id": original_id,
+                    "bench": bench,
+                    "status": "completed",
+                    "ok": True,
+                    "timeout": False,
+                    "record_path": str(record_path),
+                }
+            )
+            + "\n"
+        )
+    return record_path
+
+
 def _write_task_inputs(tmp_path: Path, *, count: int = 2) -> tuple[Path, Path]:
     task_rows = []
     csv_rows = [

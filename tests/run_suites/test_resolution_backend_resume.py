@@ -92,6 +92,48 @@ def test_resolution_instance_resume_does_not_reuse_error_summaries(tmp_path: Pat
     )
 
     assert postprocess._read_resolution_instance_summary(instance_dir)["status"] == "unresolved"
+
+
+def test_resolution_instance_resume_reuses_swebench_test_timeout_as_unresolved(tmp_path: Path) -> None:
+    instance_id = "django__django-15022"
+    instance_dir = tmp_path / "instances" / instance_id
+    log_dir = instance_dir / "logs" / "run_evaluation" / "run" / "codex" / instance_id
+    log_dir.mkdir(parents=True)
+    (log_dir / "run_instance.log").write_text(
+        "Applied Patch:\n"
+        "Test runtime: 7_200.79 seconds\n"
+        f"{instance_id}: Test timed out after 7200 seconds.\n",
+        encoding="utf-8",
+    )
+    (log_dir / "test_output.txt").write_text(
+        ">>>>> Start Test Output\n"
+        "test_many_search_terms (admin_changelist.tests.ChangeListTests) ... \n"
+        "Timeout error: 7200 seconds exceeded.\n",
+        encoding="utf-8",
+    )
+    (instance_dir / "resolution-result.json").write_text(
+        json.dumps(
+            {
+                "instance_id": instance_id,
+                "resolved_ids": [],
+                "unresolved_ids": [],
+                "error_ids": [instance_id],
+                "status": "error",
+                "input_metadata": {"backend": "swebench"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = postprocess._read_resolution_instance_summary(instance_dir)
+
+    assert summary is not None
+    assert summary["status"] == "unresolved"
+    assert summary["unresolved_ids"] == [instance_id]
+    assert summary["error_ids"] == []
+    assert summary["test_timeout_ids"] == [instance_id]
+
+
 def test_resolution_instance_resume_does_not_reuse_empty_unresolved_summary(tmp_path: Path) -> None:
     instance_dir = tmp_path / "instances" / "task-a"
     instance_dir.mkdir(parents=True)
@@ -147,7 +189,7 @@ def test_run_resolution_evaluation_rewrites_reused_instance_log(tmp_path: Path, 
         prediction,
         backend=postprocess._resolution_backend_for_bench("Verified"),
         dataset_name="princeton-nlp/SWE-bench_Verified",
-        harness_args=None,
+        harness_args=["--timeout", "1800"],
     )
     summary_path = instance_dir / "resolution-result.json"
     summary_path.write_text(

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-05-20 from upstream ContextBench.
+# Summary of changes: support fork run suites and resolution-aware resume behavior.
 
 """Run suite orchestration."""
 
@@ -843,8 +846,23 @@ class RunSuiteRunner:
         if task_dir.exists():
             shutil.rmtree(task_dir)
 
+    def _record_is_resume_complete(self, record_path: Path) -> bool:
+        if not record_is_resume_complete(record_path):
+            return False
+        if (
+            not self.config.postprocess.resolve
+            or self.skip_resolve
+            or not self.config.postprocess.rerun_empty_patch_records_on_resume
+        ):
+            return True
+        try:
+            record = read_json(record_path)
+        except Exception:
+            return False
+        return bool(str(record.get("model_patch") or "").strip())
+
     def _task_is_resume_complete(self, states: list[_PreparedVariant], task: dict[str, object]) -> bool:
-        return all(record_is_resume_complete(self._task_record_path(state, task)) for state in states)
+        return all(self._record_is_resume_complete(self._task_record_path(state, task)) for state in states)
 
     def _workspace_key(self, state: _PreparedVariant, task: dict[str, object]) -> str:
         parts = [
@@ -1109,6 +1127,7 @@ class RunSuiteRunner:
                 "task_results_sha256": self._file_sha256(state.task_results_path),
                 "records": self._task_record_fingerprint(state, tasks),
                 "harness_args": self.config.postprocess.resolve_harness_args,
+                "swebench_timeout": self.config.postprocess.swebench_timeout,
                 "resolve_workers": self.config.postprocess.resolve_workers,
                 "env_file": str(env_file.resolve()) if env_file else None,
                 "env_file_sha256": self._file_sha256(env_file) if env_file else None,
@@ -1243,6 +1262,9 @@ class RunSuiteRunner:
                 max_workers=self.config.postprocess.resolve_workers,
                 harness_args=self.config.postprocess.resolve_harness_args,
                 env=read_env_file(self.config.postprocess.env_file),
+                swebench_timeout=self.config.postprocess.swebench_timeout,
+                self_clean_resolution_artifacts=self.config.postprocess.self_clean_resolution_artifacts,
+                self_clean_resolution_docker_images=self.config.postprocess.self_clean_resolution_docker_images,
                 run_suffix=self._run_invocation_key,
                 resume_existing_resolution=self.resume_resolution,
                 clean_resolution_artifacts=not self.resume_resolution,

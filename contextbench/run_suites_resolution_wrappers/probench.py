@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-05-21 from upstream ContextBench.
+# Summary of changes: add SWE-bench Pro run-suite wrapper checkpointing.
 
 from __future__ import annotations
 
@@ -7,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -122,6 +126,57 @@ def _write_metadata(instance_dir: Path, metadata: dict[str, object]) -> None:
     path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _instance_result(instance_dir: Path, instance_id: str, metadata: dict[str, object]) -> bool | None:
+    if not _has_matching_metadata(instance_dir, metadata):
+        return None
+    instance_results = _load_eval_results(instance_dir / "evaluation_results" / "eval_results.json")
+    if instance_id not in instance_results:
+        return None
+    return bool(instance_results[instance_id])
+
+
+def _write_instance_result(instance_dir: Path, instance_id: str, resolved: bool, metadata: dict[str, object]) -> None:
+    output_dir = instance_dir / "evaluation_results"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "eval_results.json").write_text(
+        json.dumps({instance_id: bool(resolved)}, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    _write_metadata(instance_dir, metadata)
+
+
+def _checkpoint_instance_dir(cache_dir: Path, instance_id: str) -> Path:
+    return cache_dir / "instances" / _safe_component(instance_id)
+
+
+def _cache_instance_result(
+    *,
+    cache_dir: Path | None,
+    instance_id: str,
+    resolved: bool,
+    metadata: dict[str, object],
+) -> None:
+    if cache_dir is None:
+        return
+    _write_instance_result(_checkpoint_instance_dir(cache_dir, instance_id), instance_id, resolved, metadata)
+
+
+def _cached_instance_result(
+    *,
+    cache_dir: Path | None,
+    instance_id: str,
+    metadata: dict[str, object],
+) -> bool | None:
+    if cache_dir is None:
+        return None
+    return _instance_result(_checkpoint_instance_dir(cache_dir, instance_id), instance_id, metadata)
+
+
+def _cleanup_instance_artifacts(instance_dir: Path, *, enabled: bool, cache_dir: Path | None) -> None:
+    if enabled and cache_dir is not None and instance_dir.exists():
+        shutil.rmtree(instance_dir)
+
+
 def _write_instance_error(
     *,
     instance_dir: Path,
@@ -206,6 +261,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_workers", type=int, default=1)
     parser.add_argument("--dockerhub_username", required=True)
     parser.add_argument("--use_local_docker", action="store_true")
+    parser.add_argument("--cache_dir", "--cache-dir", type=Path, default=None)
+    parser.add_argument("--self-clean-resolution-artifacts", action="store_true")
     return parser.parse_args()
 
 
@@ -214,6 +271,9 @@ def main() -> int:
     patch_path = args.patch_path.resolve()
     output_dir = args.output_dir.resolve()
     work_dir = output_dir.parent
+    configured_cache_dir = getattr(args, "cache_dir", None)
+    cache_dir = configured_cache_dir.resolve() if configured_cache_dir is not None else None
+    self_clean_resolution_artifacts = bool(getattr(args, "self_clean_resolution_artifacts", False))
 
     prediction_rows = _load_prediction_rows(patch_path)
     aggregate_results: dict[str, bool] = _load_eval_results(output_dir / "eval_results.json")
@@ -227,14 +287,69 @@ def main() -> int:
         instance_output_dir = instance_dir / "evaluation_results"
         input_metadata = _prediction_metadata(row)
         if instance_id in aggregate_results:
-            if _has_matching_metadata(instance_dir, input_metadata):
+            local_result = _instance_result(instance_dir, instance_id, input_metadata)
+            if local_result is not None:
+                aggregate_results[instance_id] = local_result
+                _cache_instance_result(
+                    cache_dir=cache_dir,
+                    instance_id=instance_id,
+                    resolved=local_result,
+                    metadata=input_metadata,
+                )
+                _cleanup_instance_artifacts(
+                    instance_dir,
+                    enabled=self_clean_resolution_artifacts,
+                    cache_dir=cache_dir,
+                )
+                print(f"[probench-wrapper] reusing existing result for {instance_id}", flush=True)
+                continue
+            cached_result = _cached_instance_result(
+                cache_dir=cache_dir,
+                instance_id=instance_id,
+                metadata=input_metadata,
+            )
+            if cached_result is not None:
+                aggregate_results[instance_id] = cached_result
+                if not self_clean_resolution_artifacts:
+                    _write_instance_result(instance_dir, instance_id, cached_result, input_metadata)
+                else:
+                    _cleanup_instance_artifacts(instance_dir, enabled=True, cache_dir=cache_dir)
                 print(f"[probench-wrapper] reusing existing result for {instance_id}", flush=True)
                 continue
             aggregate_results.pop(instance_id, None)
-        instance_results = _load_eval_results(instance_output_dir / "eval_results.json")
-        if instance_id in instance_results and _has_matching_metadata(instance_dir, input_metadata):
+
+        local_result = _instance_result(instance_dir, instance_id, input_metadata)
+        if local_result is not None:
             print(f"[probench-wrapper] reusing existing result for {instance_id}", flush=True)
-            aggregate_results[instance_id] = instance_results[instance_id]
+            aggregate_results[instance_id] = local_result
+            _cache_instance_result(
+                cache_dir=cache_dir,
+                instance_id=instance_id,
+                resolved=local_result,
+                metadata=input_metadata,
+            )
+            _cleanup_instance_artifacts(
+                instance_dir,
+                enabled=self_clean_resolution_artifacts,
+                cache_dir=cache_dir,
+            )
+            (output_dir / "eval_results.json").write_text(
+                json.dumps(aggregate_results, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            continue
+        cached_result = _cached_instance_result(
+            cache_dir=cache_dir,
+            instance_id=instance_id,
+            metadata=input_metadata,
+        )
+        if cached_result is not None:
+            print(f"[probench-wrapper] reusing cached result for {instance_id}", flush=True)
+            aggregate_results[instance_id] = cached_result
+            if not self_clean_resolution_artifacts:
+                _write_instance_result(instance_dir, instance_id, cached_result, input_metadata)
+            else:
+                _cleanup_instance_artifacts(instance_dir, enabled=True, cache_dir=cache_dir)
             (output_dir / "eval_results.json").write_text(
                 json.dumps(aggregate_results, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
@@ -291,6 +406,17 @@ def main() -> int:
         elif instance_id in instance_results:
             aggregate_results[instance_id] = instance_results[instance_id]
             _write_metadata(instance_dir, input_metadata)
+            _cache_instance_result(
+                cache_dir=cache_dir,
+                instance_id=instance_id,
+                resolved=instance_results[instance_id],
+                metadata=input_metadata,
+            )
+            _cleanup_instance_artifacts(
+                instance_dir,
+                enabled=self_clean_resolution_artifacts,
+                cache_dir=cache_dir,
+            )
         else:
             detail = (
                 f"SWE-bench Pro evaluator produced no eval_results entry for {instance_id}; "

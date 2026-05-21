@@ -124,12 +124,16 @@ def test_run_pro_resolution_evaluation_uses_official_local_docker_contract(tmp_p
         run_id="demo-pro",
         work_dir=tmp_path / "work",
         max_workers=3,
+        cache_dir=tmp_path / "checkpoints" / "pro",
+        self_clean_resolution_artifacts=True,
     )
 
     command = captured["command"]
     assert isinstance(command, list)
     assert command[:2] == [str(pro_python), str(postprocess._PROBENCH_RESOLUTION_WRAPPER)]
     assert "--use_local_docker" in command
+    assert command[command.index("--cache_dir") + 1] == str((tmp_path / "checkpoints" / "pro").resolve())
+    assert "--self-clean-resolution-artifacts" in command
     assert command[command.index("--dockerhub_username") + 1] == "jefzda"
     assert command[command.index("--num_workers") + 1] == "3"
     assert captured["cwd"] == (tmp_path / "work").resolve()

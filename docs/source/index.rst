@@ -1,45 +1,37 @@
-ContextBench Documentation
-==========================
+AgentStackBench Documentation
+=============================
 
-.. image:: ../assets/branding/contextbench-logo.jpg
-   :align: center
-   :width: 200px
-   :alt: ContextBench Logo
+.. centered:: **A benchmark harness for comparing coding-agent configurations**
 
-.. centered:: **A Comprehensive Benchmark for Evaluating Context Retrieval in Code Agents**
-
-.. centered:: A collaboration between Nanjing University and University College London
+.. centered:: Derived from ContextBench, with fork-specific support for agent runtime, prompt, tool, and evaluator experiments.
 
 ----
 
 Overview
 --------
 
-LLM-based coding agents have shown strong performance on automated issue resolution benchmarks, yet existing evaluations largely focus on final task success, providing limited insight into how agents retrieve and use code context during problem solving.
+AgentStackBench is a fork-derived benchmark harness for comparing coding-agent configurations across model, runtime, mounted resources, prompts, tools, and evaluator setup.
 
-We introduce **ContextBench**, a process-oriented evaluation of context retrieval in coding agents. ContextBench consists of **1,136** issue-resolution tasks from 66 repositories across eight programming languages, each augmented with human-annotated gold contexts. We further implement an automated evaluation framework that tracks agent trajectories and measures context recall, precision, and efficiency throughout issue resolution.
+The project keeps the upstream ContextBench evaluator and dataset-processing path as the compatibility layer, while adding fork-specific support for running agents such as Codex and Claude, converting their run records to ContextBench-compatible trajectories, and publishing sanitized comparison data for the frontend.
 
-Using ContextBench, we evaluate four frontier LLMs and five coding agents. Our results show that sophisticated agent scaffolding yields only marginal gains in context retrieval (**"The Bitter Lesson"** of coding agents), LLMs consistently favor recall over precision, and substantial gaps exist between explored and utilized context.
-
-ContextBench augments existing end-to-end benchmarks with intermediate gold-context metrics that unbox the issue-resolution process. These contexts offer valuable intermediate signals for guiding LLM reasoning in software tasks.
+The Python package remains ``contextbench`` so existing evaluator imports, command lines, and upstream integration points continue to work.
 
 Key Features
 ------------
 
-- **Multi-granularity metrics**: File, symbol, span, and edit-location analysis
-- **Trajectory-aware**: Per-step coverage tracking with AUC and redundancy metrics
-- **Multi-language support**: Python, Java, JavaScript, TypeScript, Go, Rust, C, C++
-- **Agent-agnostic**: Unified extractors for multiple agent frameworks
-- **Tree-sitter powered**: Precise symbol extraction across programming languages
-- **Reproducible**: Deterministic evaluation with cached repository snapshots
+- **Run suites**: Compare multiple coding-agent setups over the same selected task set
+- **Runtime controls**: Isolate agent runs, mount resources, and capture raw task artifacts
+- **Context metrics**: Preserve ContextBench-compatible file, symbol, span, line, and edit-location scoring
+- **Resolution metrics**: Route SWE-Bench Verified, SWE-bench Pro, SWE-PolyBench, and Multi-SWE-Bench tasks to their native evaluators
+- **Frontend exports**: Publish distilled, sanitized comparison payloads without exposing private local paths
 
 Quick Links
 -----------
 
-- **GitHub Repository**: https://github.com/EuniAI/ContextBench
-- **Paper**: https://arxiv.org/abs/2602.05892
-- **Dataset**: https://huggingface.co/datasets/Contextbench/ContextBench
-- **Live Leaderboard**: https://contextbench.github.io/
+- **AgentStackBench repository**: https://github.com/Nobbettt/AgentStackBench
+- **Upstream ContextBench repository**: https://github.com/EuniAI/ContextBench
+- **ContextBench paper**: https://arxiv.org/abs/2602.05892
+- **ContextBench dataset**: https://huggingface.co/datasets/Contextbench/ContextBench
 
 .. toctree::
    :maxdepth: 2

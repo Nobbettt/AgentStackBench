@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-05-21 from upstream ContextBench.
+# Summary of changes: add fork run-suite resolution controls.
 
 """Pydantic models for run suite configuration and state."""
 
@@ -183,6 +186,10 @@ class PostprocessConfig(BaseModel):
     cache_dir: Path | None = None
     env_file: Path | None = None
     resolve_workers: int = Field(default=1, gt=0)
+    swebench_timeout: int = Field(default=1800, gt=0)
+    self_clean_resolution_artifacts: bool = True
+    self_clean_resolution_docker_images: bool = True
+    rerun_empty_patch_records_on_resume: bool = False
     resolve_harness_args: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
