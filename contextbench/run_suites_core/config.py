@@ -90,7 +90,7 @@ def build_run_suite_variant(
         bench=base.bench,
         instances=base.instances,
         limit=base.limit,
-        timeout=variant.timeout or base.timeout,
+        timeout=variant.timeout if variant.timeout is not None else base.timeout,
         repo_cache=base.repo_cache,
         schema_path=base.schema_path,
         model=variant.model if variant.model is not None else base.model,

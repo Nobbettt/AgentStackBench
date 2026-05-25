@@ -136,7 +136,7 @@ class VariantConfig(BaseModel):
     notes: str | None = None
     model: str | None = None
     reasoning_effort: ReasoningLevel | None = None
-    timeout: int | None = None
+    timeout: int | None = Field(default=None, gt=0)
     agent_args_add: list[str] = Field(default_factory=list)
     agent_args_replace: list[str] | None = None
     env_add: dict[str, str] = Field(default_factory=dict)

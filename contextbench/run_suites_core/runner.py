@@ -21,7 +21,6 @@ from ..artifact_sanitization import (
     assert_no_private_paths,
     assert_paths_have_no_private_artifacts,
     sanitize_artifact_tree,
-    sanitize_artifact_tree_in_place,
     sanitize_json_value,
 )
 from ..coding_agents.constants import DEFAULT_SUBSET_CSV
@@ -486,15 +485,6 @@ class RunSuiteRunner:
 
     def _write_public_artifacts(self) -> None:
         repo_root = Path.cwd().resolve()
-        try:
-            self.experiment_dir.resolve().relative_to(repo_root)
-        except ValueError:
-            pass
-        else:
-            sanitize_artifact_tree_in_place(
-                source_dir=self.experiment_dir,
-                repo_root=repo_root,
-            )
         sanitize_artifact_tree(
             source_dir=self.experiment_dir,
             output_dir=self.public_artifacts_dir,
