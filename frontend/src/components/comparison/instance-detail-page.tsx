@@ -1,23 +1,65 @@
-
-import { useMemo, useState } from "react";
-import { Percent } from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
+import {
+  Columns2,
+  Minus,
+  Percent,
+  TrendingDown,
+  TrendingUp,
+  TrendingUpDown,
+} from "lucide-react";
 
 import type { ComparisonCard, ComparisonInstanceDetail } from "@/data/comparisons";
-import { Table, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { DetailSection, TrajectoryTableHead } from "@/components/comparison/detail-section";
+import { TrajectoryTableHead } from "@/components/comparison/detail-section";
+import { FinalAnswerSection, ModelPatchSection } from "@/components/comparison/instance-detail-panels";
 import { buildInstanceComparison, buildInstanceRows } from "@/components/comparison/instance-data";
-import { MarkdownText } from "@/components/comparison/markdown-text";
-import { ComparisonMetricSections, PatchOverlapBetweenVariantsSection } from "@/components/comparison/metric-sections";
 import {
-  formatDurationMs,
+  ContextRetrievalMetricSection,
+  PatchOverlapBetweenVariantsSection,
+  ResolutionMetricSection,
+  ResourceUsageMetricSection,
+} from "@/components/comparison/metric-sections";
+import {
   formatInstanceMetric,
+  formatLanguageLabel,
   formatResolutionStatus,
   resolutionStatusClassName,
+  getComparisonPair,
+  deltaIndicatorClassName,
 } from "@/components/comparison/format";
+import {
+  contextRetrievalMetricDefinitions,
+  resolutionMetricDefinitions,
+  resourceMetricDefinitions,
+} from "@/components/comparison/metrics";
+import { HelpIcon, MetricDirectionBadge } from "@/components/comparison/shared";
+import { TraceSection } from "@/components/comparison/trace-section";
 import type { ComparisonResultsViewMode, DeltaDisplayMode } from "@/components/comparison/types";
 import { cn } from "@/lib/utils";
+
+type InstanceDetailTab = "overview" | "resolution" | "context" | "resources" | "answer" | "trajectory" | "patch" | "trace";
+
+const instanceDetailTabs: Array<{ id: InstanceDetailTab; label: string }> = [
+  { id: "overview", label: "Overview" },
+  { id: "resolution", label: "Resolution" },
+  { id: "context", label: "Context" },
+  { id: "resources", label: "Resources" },
+  { id: "answer", label: "Final Answer" },
+  { id: "trajectory", label: "Trajectory" },
+  { id: "patch", label: "Model Patch" },
+  { id: "trace", label: "Trace" },
+];
+
+const segmentedControlClassName = "gap-0 rounded-md shadow-lg backdrop-blur";
+const segmentedControlItemClassName = "w-14 rounded-none bg-background px-0 data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
+const trajectoryExplanation = "Shows how cumulative retrieved context coverage changes over retrieval steps. Each row is a step, and the columns measure file, block, line, and symbol-level overlap with the gold context.";
+const overviewMetricDefinitions = [
+  ...resolutionMetricDefinitions.filter((metric) => ["fixOverlapVsGoldF1"].includes(metric.key)),
+  ...contextRetrievalMetricDefinitions.filter((metric) => ["contextF1", "fileF1", "spanF1"].includes(metric.key)),
+  ...resourceMetricDefinitions.filter((metric) => ["averageSteps", "averageDuration", "totalTokens", "estimatedCost"].includes(metric.key)),
+];
 
 export function ComparisonInstanceDetailPage({
   comparison,
@@ -36,7 +78,8 @@ export function ComparisonInstanceDetailPage({
   );
   const instanceComparison = row ? buildInstanceComparison(comparison, row) : null;
   const [viewMode, setViewMode] = useState<ComparisonResultsViewMode>("treatment-delta");
-  const [deltaDisplayMode, setDeltaDisplayMode] = useState<DeltaDisplayMode>("absolute");
+  const [deltaDisplayMode, setDeltaDisplayMode] = useState<DeltaDisplayMode>("percent");
+  const [activeTab, setActiveTab] = useState<InstanceDetailTab>("overview");
 
   if (!row || !instanceComparison) {
     return <section className="rounded-lg border bg-background p-6 text-sm text-muted-foreground">Instance detail not found in the current comparison snapshot.</section>;
@@ -44,83 +87,477 @@ export function ComparisonInstanceDetailPage({
 
   return (
     <TooltipProvider>
-      <div className="space-y-6">
-        <InstanceHeader row={row} instanceComparison={instanceComparison} />
+      <div className="space-y-4 pb-40">
+        <InstanceHeader row={row} />
+        <InstanceDetailTabs activeTab={activeTab} onChange={setActiveTab} />
+        {renderInstanceDetailTab({
+          activeTab,
+          row,
+          instanceComparison,
+          viewMode,
+          deltaDisplayMode,
+          detail,
+          detailError,
+        })}
         <DetailControls
           viewMode={viewMode}
           deltaDisplayMode={deltaDisplayMode}
           onViewModeChange={setViewMode}
           onDeltaDisplayModeChange={setDeltaDisplayMode}
         />
-        <ComparisonMetricSections comparison={instanceComparison} viewMode={viewMode} deltaDisplayMode={deltaDisplayMode} />
-        {detail ? <PatchOverlapBetweenVariantsSection overlap={detail.fixOverlapBetweenVariants} collapsible /> : null}
-        {renderDetailContent(detail, detailError)}
       </div>
     </TooltipProvider>
   );
 }
 
-function renderDetailContent(detail: ComparisonInstanceDetail | null | undefined, detailError?: string | null) {
-  if (detail) {
-    return <DetailedRunSections detail={detail} />;
-  }
-  if (detailError) {
+function renderInstanceDetailTab({
+  activeTab,
+  row,
+  instanceComparison,
+  viewMode,
+  deltaDisplayMode,
+  detail,
+  detailError,
+}: {
+  activeTab: InstanceDetailTab;
+  row: ReturnType<typeof buildInstanceRows>[number];
+  instanceComparison: ComparisonCard;
+  viewMode: ComparisonResultsViewMode;
+  deltaDisplayMode: DeltaDisplayMode;
+  detail: ComparisonInstanceDetail | null | undefined;
+  detailError?: string | null;
+}) {
+  if (activeTab === "overview") {
     return (
-      <section className="rounded-lg border bg-background p-6 text-sm text-rose-700">
-        Unable to load detailed trajectory and trace data: {detailError}
-      </section>
+      <InstanceOverview
+        row={row}
+        instanceComparison={instanceComparison}
+        viewMode={viewMode}
+      />
     );
+  }
+
+  if (activeTab === "resolution") {
+    return (
+      <div className="space-y-6">
+        <ResolutionMetricSection
+          comparison={instanceComparison}
+          viewMode={viewMode}
+          deltaDisplayMode={deltaDisplayMode}
+          treatmentDeltaDisplay="versus"
+          nonGraphDisplay
+        />
+        {detail ? <PatchOverlapBetweenVariantsSection overlap={detail.fixOverlapBetweenVariants} /> : null}
+      </div>
+    );
+  }
+
+  if (activeTab === "context") {
+    return <ContextRetrievalMetricSection comparison={instanceComparison} viewMode={viewMode} deltaDisplayMode={deltaDisplayMode} treatmentDeltaDisplay="versus" />;
+  }
+
+  if (activeTab === "resources") {
+    return (
+      <ResourceUsageMetricSection
+        comparison={instanceComparison}
+        viewMode={viewMode}
+        deltaDisplayMode={deltaDisplayMode}
+        treatmentDeltaDisplay="versus"
+        nonGraphDisplay
+      />
+    );
+  }
+
+  return renderDetailBackedTab(activeTab, detail, detailError, viewMode);
+}
+
+function renderDetailBackedTab(
+  activeTab: InstanceDetailTab,
+  detail: ComparisonInstanceDetail | null | undefined,
+  detailError: string | null | undefined,
+  viewMode: ComparisonResultsViewMode,
+) {
+  if (detailError) {
+    return <StatusPanel tone="danger" message={`Unable to load detailed trajectory and trace data: ${detailError}`} />;
   }
   if (detail === undefined) {
-    return (
-      <section className="rounded-lg border bg-background p-6 text-sm text-muted-foreground">
-        Loading detailed trajectory and trace data...
-      </section>
-    );
+    return <StatusPanel message="Loading detailed trajectory and trace data..." />;
   }
+  if (detail === null) {
+    return <StatusPanel message="Detailed trajectory and trace data is not available for this instance." />;
+  }
+
+  const variants = detailVariantsForViewMode(detail, viewMode);
+  if (activeTab === "answer") return <FinalAnswerSection variants={detail.variants} />;
+  if (activeTab === "trajectory") return <TrajectorySection variants={viewMode === "treatment-delta" ? detail.variants : variants} viewMode={viewMode} />;
+  if (activeTab === "patch") return <ModelPatchSection variants={detail.variants} />;
+  if (activeTab === "trace") return <TraceSection variants={detail.variants} />;
+
+  return null;
+}
+
+function detailVariantsForViewMode(detail: ComparisonInstanceDetail, viewMode: ComparisonResultsViewMode): ComparisonInstanceDetail["variants"] {
+  if (viewMode === "treatment-delta" && detail.variants.length > 1) {
+    return [detail.variants[1]];
+  }
+  return detail.variants;
+}
+
+function StatusPanel({ message, tone = "muted" }: { message: string; tone?: "muted" | "danger" }) {
   return (
-    <section className="rounded-lg border bg-background p-6 text-sm text-muted-foreground">
-      Detailed trajectory and trace data is not available for this instance.
+    <section className={cn("rounded-lg bg-background p-6 text-sm", tone === "danger" ? "text-rose-700" : "text-muted-foreground")}>
+      {message}
     </section>
+  );
+}
+
+function SectionTitleWithHelp({ title, explanation }: { title: string; explanation: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <h2 className="text-xl font-semibold tracking-tight">{title}</h2>
+      <HelpIcon label={title} explanation={explanation} />
+    </div>
   );
 }
 
 function InstanceHeader({
   row,
+}: {
+  row: ReturnType<typeof buildInstanceRows>[number];
+}) {
+  return (
+    <section className="rounded-lg bg-background px-4 py-3">
+      <h1 className="text-2xl font-semibold tracking-tight [overflow-wrap:anywhere] sm:text-3xl">{row.instanceId}</h1>
+      <p className="mt-1 text-sm text-muted-foreground">
+        {row.bench} / {formatLanguageLabel(row.language)}
+        {row.originalInstanceId ? ` / ${row.originalInstanceId}` : ""}
+      </p>
+    </section>
+  );
+}
+
+function InstanceDetailTabs({ activeTab, onChange }: { activeTab: InstanceDetailTab; onChange: (tab: InstanceDetailTab) => void }) {
+  return (
+    <div className="overflow-x-auto border-b" role="tablist" aria-label="Instance detail sections">
+      <div className="flex min-w-max gap-1">
+        {instanceDetailTabs.map((tab) => {
+          const selected = tab.id === activeTab;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              className={`border-b-2 px-4 py-3 text-sm font-medium transition-colors ${
+                selected
+                  ? "border-primary text-foreground"
+                  : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
+              }`}
+              onClick={() => onChange(tab.id)}
+            >
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function InstanceOverview({
+  row,
   instanceComparison,
+  viewMode,
 }: {
   row: ReturnType<typeof buildInstanceRows>[number];
   instanceComparison: ComparisonCard;
+  viewMode: ComparisonResultsViewMode;
 }) {
   return (
-    <section className="rounded-lg bg-background p-6">
-      <h1 className="text-3xl font-semibold tracking-tight">{row.instanceId}</h1>
-      {row.originalInstanceId ? <p className="mt-2 text-sm text-muted-foreground">{row.originalInstanceId}</p> : null}
-      <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <SummaryCard label="Dataset" value={row.bench} />
-        <SummaryCard label="Language" value={row.language} />
-        <SummaryCard
-          label={`${instanceComparison.variants[0].name} Pass@1`}
-          value={formatResolutionStatus(row.baseline?.artifacts?.resolutionStatus)}
-          className={resolutionStatusClassName(row.baseline?.artifacts?.resolutionStatus)}
-        />
-        {instanceComparison.variants[1] ? (
-          <SummaryCard
-            label={`${instanceComparison.variants[1].name} Pass@1`}
-            value={formatResolutionStatus(row.treatment?.artifacts?.resolutionStatus)}
-            className={resolutionStatusClassName(row.treatment?.artifacts?.resolutionStatus)}
-          />
-        ) : null}
+    <section className="space-y-6">
+      <OverviewRunSummary comparison={instanceComparison} viewMode={viewMode} />
+      <SetupDatasetSection
+        row={row}
+        instanceComparison={instanceComparison}
+        viewMode={viewMode}
+      />
+    </section>
+  );
+}
+
+function OverviewRunSummary({
+  comparison,
+  viewMode,
+}: {
+  comparison: ComparisonCard;
+  viewMode: ComparisonResultsViewMode;
+}) {
+  const visibleMetrics = overviewMetricDefinitions.filter((metric) => comparison.variants.some((variant) => metric.value(variant) !== "—"));
+  const comparisonPair = getComparisonPair(comparison);
+
+  if (viewMode === "treatment-delta" && comparisonPair) {
+    return (
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">Run Summary</h2>
+        <div className="rounded-lg bg-background p-5">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <OverviewResolutionComparisonCard baseline={comparisonPair.baseline} treatment={comparisonPair.treatment} />
+            {visibleMetrics.map((metric) => (
+              <OverviewMetricComparisonCard
+                key={metric.key}
+                metric={metric}
+                baseline={comparisonPair.baseline}
+                treatment={comparisonPair.treatment}
+              />
+            ))}
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="space-y-4">
+      <h2 className="text-xl font-semibold tracking-tight">Run Summary</h2>
+      <div className="grid gap-5 lg:grid-cols-2">
+        {comparison.variants.map((variant) => (
+          <div key={variant.label} className="rounded-lg bg-background p-5">
+            <div className="mb-4 text-sm font-medium text-muted-foreground">{variant.name}</div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <OverviewResolutionCard variant={variant} />
+              {visibleMetrics.map((metric) => (
+                <OverviewMetricCard
+                  key={`${variant.label}-${metric.key}`}
+                  label={overviewMetricLabel(metric)}
+                  explanation={overviewMetricExplanation(metric)}
+                  direction={metric.direction}
+                  value={metric.value(variant)}
+                />
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
     </section>
   );
 }
 
-function SummaryCard({ label, value, className }: { label: string; value: string; className?: string }) {
+function OverviewResolutionCard({ variant }: { variant: ComparisonCard["variants"][number] }) {
+  const status = variant.instances?.[0]?.artifacts?.resolutionStatus;
+
+  return (
+    <SummaryCard
+      label="Pass@1"
+      value={formatResolutionStatus(status)}
+      className={resolutionStatusClassName(status)}
+    />
+  );
+}
+
+function OverviewResolutionComparisonCard({
+  baseline,
+  treatment,
+}: {
+  baseline: ComparisonCard["variants"][number];
+  treatment: ComparisonCard["variants"][number];
+}) {
+  const baselineStatus = baseline.instances?.[0]?.artifacts?.resolutionStatus;
+  const treatmentStatus = treatment.instances?.[0]?.artifacts?.resolutionStatus;
+  const baselineValue = formatResolutionStatus(baselineStatus);
+  const treatmentValue = formatResolutionStatus(treatmentStatus);
+  return (
+    <div className="rounded-md border p-4">
+      <div className="text-xs uppercase tracking-wide text-muted-foreground">Pass@1</div>
+      <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+        <OverviewComparisonValue
+          value={baselineValue}
+          className={resolutionStatusClassName(baselineStatus)}
+        />
+        <OverviewDirectionSeparator
+          direction="higher"
+          baselineValue={baselineValue}
+          treatmentValue={treatmentValue}
+          baselineNumericValue={resolutionStatusScore(baselineStatus)}
+          treatmentNumericValue={resolutionStatusScore(treatmentStatus)}
+        />
+        <OverviewComparisonValue
+          value={treatmentValue}
+          className={resolutionStatusClassName(treatmentStatus)}
+        />
+      </div>
+    </div>
+  );
+}
+
+function OverviewMetricComparisonCard({
+  metric,
+  baseline,
+  treatment,
+}: {
+  metric: (typeof overviewMetricDefinitions)[number];
+  baseline: ComparisonCard["variants"][number];
+  treatment: ComparisonCard["variants"][number];
+}) {
+  const baselineValue = metric.value(baseline);
+  const treatmentValue = metric.value(treatment);
+  return (
+    <div className="rounded-md border p-4">
+      <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
+        <span>{overviewMetricLabel(metric)}</span>
+        <MetricDirectionBadge direction={metric.direction} />
+        <HelpIcon label={overviewMetricLabel(metric)} explanation={overviewMetricExplanation(metric)} />
+      </div>
+      <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+        <OverviewComparisonValue value={baselineValue} />
+        <OverviewDirectionSeparator
+          direction={metric.direction}
+          baselineValue={baselineValue}
+          treatmentValue={treatmentValue}
+          baselineNumericValue={metric.parse(baselineValue)}
+          treatmentNumericValue={metric.parse(treatmentValue)}
+        />
+        <OverviewComparisonValue value={treatmentValue} />
+      </div>
+    </div>
+  );
+}
+
+function OverviewDirectionSeparator({
+  direction,
+  baselineValue,
+  treatmentValue,
+  baselineNumericValue,
+  treatmentNumericValue,
+  className,
+  iconClassName,
+}: {
+  direction: (typeof overviewMetricDefinitions)[number]["direction"];
+  baselineValue: string;
+  treatmentValue: string;
+  baselineNumericValue?: number | null;
+  treatmentNumericValue?: number | null;
+  className?: string;
+  iconClassName?: string;
+}) {
+  const matches = baselineValue === treatmentValue;
+  const delta = baselineNumericValue !== null && baselineNumericValue !== undefined && treatmentNumericValue !== null && treatmentNumericValue !== undefined
+    ? treatmentNumericValue - baselineNumericValue
+    : null;
+  const Icon = delta === null
+    ? matches ? Minus : direction === "higher" ? TrendingUp : direction === "lower" ? TrendingDown : Minus
+    : delta > 0
+      ? TrendingUp
+      : delta < 0
+        ? TrendingDown
+        : Minus;
+  const improved = delta === null || delta === 0 || direction === "neutral"
+    ? null
+    : direction === "higher"
+      ? delta > 0
+      : delta < 0;
+  const tone = matches || improved === null ? "text-muted-foreground" : deltaIndicatorClassName(improved ? "success" : "danger");
+  return (
+    <div
+      className={cn("flex h-8 w-8 items-center justify-center", tone, className)}
+      aria-label="Baseline to treatment"
+    >
+      <Icon className={cn("h-5 w-5", iconClassName)} />
+    </div>
+  );
+}
+
+function resolutionStatusScore(status: string | undefined): number | null {
+  const normalized = (status ?? "").trim().toLowerCase();
+  if (normalized === "resolved") return 1;
+  if (["unresolved", "error", "missing"].includes(normalized)) return 0;
+  return null;
+}
+
+function OverviewComparisonValue({
+  value,
+  className,
+}: {
+  value: string;
+  className?: string;
+}) {
+  return (
+    <div className="min-w-0 rounded-md bg-muted/30 px-3 py-2 text-center">
+      <div className={cn("truncate text-sm font-medium tabular-nums", className)} title={value}>{value}</div>
+    </div>
+  );
+}
+
+function OverviewMetricCard({
+  label,
+  explanation,
+  direction,
+  value,
+}: {
+  label: string;
+  explanation: string;
+  direction: (typeof overviewMetricDefinitions)[number]["direction"];
+  value: string;
+}) {
+  return (
+    <div className="rounded-md border p-4">
+      <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
+        <span>{label}</span>
+        <MetricDirectionBadge direction={direction} />
+        <HelpIcon label={label} explanation={explanation} />
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <span className="font-medium tabular-nums">{value}</span>
+      </div>
+    </div>
+  );
+}
+
+function overviewMetricLabel(metric: (typeof overviewMetricDefinitions)[number]): string {
+  if (metric.key === "spanF1") return "Block F1";
+  return metric.label;
+}
+
+function overviewMetricExplanation(metric: (typeof overviewMetricDefinitions)[number]): string {
+  if (metric.key === "contextF1") return "Balanced file/symbol/block F1 score.";
+  if (metric.key === "spanF1") return "Block-level retrieval F1.";
+  return metric.explanation;
+}
+
+function SetupDatasetSection({
+  row,
+  instanceComparison,
+  viewMode,
+}: {
+  row: ReturnType<typeof buildInstanceRows>[number];
+  instanceComparison: ComparisonCard;
+  viewMode: ComparisonResultsViewMode;
+}) {
+  const setupVariants = setupVariantsForViewMode(instanceComparison, viewMode);
+  const comparisonPair = getComparisonPair(instanceComparison);
+  const setupBaseline = viewMode === "treatment-delta" && comparisonPair ? comparisonPair.baseline : undefined;
+
+  return (
+    <section className="space-y-4">
+      <h2 className="text-xl font-semibold tracking-tight">Setup & Dataset</h2>
+      <div className="rounded-lg bg-background p-5">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <SummaryCard label="Dataset" value={row.bench} />
+          <SummaryCard label="Language" value={formatLanguageLabel(row.language)} />
+          <SummaryCard label="Instance" value={row.instanceId} />
+          <SummaryCard label="Original Issue" value={row.originalInstanceId ?? "—"} />
+        </div>
+      </div>
+      <RunSetupSection variants={setupVariants} baseline={setupBaseline} />
+    </section>
+  );
+}
+
+function SummaryCard({ label, value, note, className }: { label: string; value: string; note?: string; className?: string }) {
   return (
     <div className="rounded-md border p-4">
       <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className={cn("mt-2 text-sm font-medium", className)}>{value}</div>
+      <div className={cn("mt-2 text-sm font-medium [overflow-wrap:anywhere]", className)}>{value}</div>
+      {note ? <div className="mt-1.5 break-words text-xs leading-5 text-muted-foreground">{note}</div> : null}
     </div>
   );
 }
@@ -137,171 +574,281 @@ function DetailControls({
   onDeltaDisplayModeChange: (value: DeltaDisplayMode) => void;
 }) {
   return (
-    <section className="rounded-lg border bg-background px-4 py-4">
-      <div className="space-y-3">
-        <div className="text-xs uppercase tracking-wide text-muted-foreground">Detail Controls</div>
-        <div className="flex justify-center">
-          <ToggleGroup type="single" variant="outline" value={viewMode} onValueChange={(value) => value && onViewModeChange(value as ComparisonResultsViewMode)}>
-            <ToggleGroupItem value="treatment-delta">Treatment Delta</ToggleGroupItem>
-            <ToggleGroupItem value="side-by-side">Side by Side</ToggleGroupItem>
-          </ToggleGroup>
-        </div>
-        {viewMode === "treatment-delta" ? (
-          <div className="flex justify-center">
-            <ToggleGroup type="single" variant="outline" value={deltaDisplayMode} onValueChange={(value) => value && onDeltaDisplayModeChange(value as DeltaDisplayMode)}>
-              <ToggleGroupItem value="absolute" aria-label="Numerical Diff"><span className="font-semibold tabular-nums">1.2→</span></ToggleGroupItem>
-              <ToggleGroupItem value="percent" aria-label="Percent Diff"><Percent className="h-4 w-4" /></ToggleGroupItem>
-            </ToggleGroup>
+    <section className="flex w-full flex-col items-end gap-2 sm:fixed sm:bottom-4 sm:right-4 sm:z-40 sm:w-auto">
+      <div
+        className={`overflow-hidden transition-all duration-200 ${
+          viewMode === "treatment-delta"
+            ? "max-h-10 translate-y-0 opacity-100"
+            : "max-h-0 translate-y-1 opacity-0"
+        }`}
+        aria-hidden={viewMode !== "treatment-delta"}
+      >
+        <ToggleGroup
+          type="single"
+          variant="outline"
+          value={deltaDisplayMode}
+          onValueChange={(value) => value && onDeltaDisplayModeChange(value as DeltaDisplayMode)}
+          className={segmentedControlClassName}
+        >
+          <ToggleGroupItem
+            value="percent"
+            aria-label="Percent diff"
+            title="Percent diff"
+            className={`${segmentedControlItemClassName} rounded-l-md border-r-0`}
+          >
+            <Percent className="h-4 w-4" />
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="absolute"
+            aria-label="Numerical diff"
+            title="Numerical diff"
+            className={`${segmentedControlItemClassName} rounded-r-md`}
+          >
+            <span className="font-semibold tabular-nums">1.2→</span>
+          </ToggleGroupItem>
+        </ToggleGroup>
+      </div>
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        value={viewMode}
+        onValueChange={(value) => value && onViewModeChange(value as ComparisonResultsViewMode)}
+        className={segmentedControlClassName}
+      >
+        <ToggleGroupItem
+          value="treatment-delta"
+          aria-label="Treatment delta view"
+          title="Treatment delta view"
+          className={`${segmentedControlItemClassName} rounded-l-md border-r-0`}
+        >
+          <TrendingUpDown className="h-4 w-4" />
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value="side-by-side"
+          aria-label="Side by side view"
+          title="Side by side view"
+          className={`${segmentedControlItemClassName} rounded-r-md`}
+        >
+          <Columns2 className="h-4 w-4" />
+        </ToggleGroupItem>
+      </ToggleGroup>
+    </section>
+  );
+}
+
+function RunSetupSection({ variants, baseline }: { variants: ComparisonCard["variants"]; baseline?: ComparisonCard["variants"][number] }) {
+  return (
+    <div className={variants.length > 1 ? "grid gap-5 lg:grid-cols-2" : "grid gap-5"}>
+      {variants.map((variant) => (
+        <div key={variant.label} className="rounded-lg bg-background p-5">
+          <h3 className="text-sm font-medium text-muted-foreground">{variant.name}</h3>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <SetupSummaryCard label="Model" value={variant.model ?? "—"} baselineValue={baseline?.model} />
+            <SetupSummaryCard label="Effort" value={variant.effort ?? "—"} baselineValue={baseline?.effort} />
+            <SetupSummaryCard
+              label="Mounted Resources"
+              value={setupParameterValue(variant, "Mounted Resources")}
+              baselineValue={baseline ? setupParameterValue(baseline, "Mounted Resources") : undefined}
+            />
+            <SetupSummaryCard
+              label="Additional Prompt"
+              value={setupParameterValue(variant, "Additional Prompt", "Setup Prompt")}
+              baselineValue={baseline ? setupParameterValue(baseline, "Additional Prompt", "Setup Prompt") : undefined}
+            />
           </div>
-        ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SetupSummaryCard({
+  label,
+  value,
+  baselineValue,
+}: {
+  label: string;
+  value: string;
+  baselineValue?: string;
+}) {
+  return (
+    <SummaryCard
+      label={label}
+      value={value}
+      note={baselineValue === undefined ? undefined : baselineValue === value ? "Matches baseline" : `Baseline: ${baselineValue}`}
+    />
+  );
+}
+
+function setupVariantsForViewMode(
+  instanceComparison: ComparisonCard,
+  viewMode: ComparisonResultsViewMode,
+): ComparisonCard["variants"] {
+  const comparisonPair = getComparisonPair(instanceComparison);
+  return viewMode === "treatment-delta" && comparisonPair ? [comparisonPair.treatment] : instanceComparison.variants;
+}
+
+function setupParameterValue(variant: ComparisonCard["variants"][number], ...labels: string[]): string {
+  for (const label of labels) {
+    const value = variant.parameters.find((parameter) => parameter.label.toLowerCase() === label.toLowerCase())?.value;
+    if (value && value.trim()) return value;
+  }
+  return "None";
+}
+function TrajectorySection({
+  variants,
+  viewMode,
+}: {
+  variants: ComparisonInstanceDetail["variants"];
+  viewMode: ComparisonResultsViewMode;
+}) {
+  if (viewMode === "treatment-delta" && variants.length >= 2) {
+    return <TrajectoryVersusSection baseline={variants[0]} treatment={variants[1]} />;
+  }
+
+  return (
+    <section className="space-y-4">
+      <SectionTitleWithHelp title="Cumulative Evaluated Trajectory" explanation={trajectoryExplanation} />
+      <div className={variants.length > 1 ? "grid gap-6 xl:grid-cols-2" : "grid gap-6"}>
+        {variants.map((variant) => (
+          <div key={variant.label} className="h-full rounded-lg bg-background p-5">
+            <h3 className="text-lg font-semibold">{variant.name}</h3>
+            {(variant.evaluatedTrajectory?.steps?.length ?? 0) > 0 ? (
+              <Table className="mt-4">
+                <TableHeader>
+                  <TableRow>
+                    <TrajectoryTableHead label="Step" explanation="Cumulative retrieval step number." />
+                    <TrajectoryTableHead label="File" explanation="Cumulative file-level gold-context coverage." />
+                    <TrajectoryTableHead label="Block" explanation="Cumulative block-level gold-context coverage." />
+                    <TrajectoryTableHead label="Line" explanation="Cumulative line-level gold-context coverage." />
+                    <TrajectoryTableHead label="Symbol" explanation="Cumulative symbol-level gold-context coverage." />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {variant.evaluatedTrajectory?.steps?.map((step) => (
+                    <TableRow key={`${variant.label}-coverage-${step.step}`}>
+                      <TableCell>{step.step}</TableCell>
+                      <TableCell>{formatInstanceMetric(step.coverage.file ?? null)}</TableCell>
+                      <TableCell>{formatInstanceMetric(step.coverage.span ?? null)}</TableCell>
+                      <TableCell>{formatInstanceMetric(step.coverage.line ?? null)}</TableCell>
+                      <TableCell>{formatInstanceMetric(step.coverage.symbol ?? null)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : <p className="mt-4 text-sm text-muted-foreground">No evaluated trajectory coverage data was recorded.</p>}
+          </div>
+        ))}
       </div>
     </section>
   );
 }
 
-function DetailedRunSections({ detail }: { detail: ComparisonInstanceDetail }) {
+function TrajectoryVersusSection({
+  baseline,
+  treatment,
+}: {
+  baseline: ComparisonInstanceDetail["variants"][number];
+  treatment: ComparisonInstanceDetail["variants"][number];
+}) {
+  const rows = mergedTrajectorySteps(baseline, treatment);
   return (
-    <div className="space-y-6">
-      <DetailSection title="Run Detail" variants={detail.variants} render={(variant) => (
-        <div className="h-full rounded-lg border bg-background p-6">
-          <h3 className="text-lg font-semibold">{variant.name}</h3>
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <SummaryCard label="Model" value={variant.model ?? "—"} />
-            <SummaryCard label="Effort" value={variant.effort ?? "—"} />
-            <SummaryCard label="Duration" value={typeof variant.durationMs === "number" ? formatDurationMs(variant.durationMs) : "—"} />
-            <SummaryCard label="Status" value={variant.status ?? "—"} />
-          </div>
-        </div>
-      )} />
-      <DetailSection title="Final Answer" variants={detail.variants} render={(variant) => (
-        <MarkdownTextPanel title={variant.name} text={variant.finalOutput?.finalAnswer || "No final answer recorded."} />
-      )} />
-      <TrajectorySection detail={detail} />
-      {detail.variants.some((variant) => variant.modelPatch) ? (
-        <DetailSection title="Model Patch" variants={detail.variants} render={(variant) => (
-          <DiffCodePanel title={variant.name} text={variant.modelPatch || "No model patch recorded for this run."} />
-        )} />
-      ) : null}
-      <DetailSection title="Reasoning & Conversation Trace" variants={detail.variants} render={(variant) => (
-        <TracePanel variant={variant} />
-      )} />
-    </div>
-  );
-}
-
-function TrajectorySection({ detail }: { detail: ComparisonInstanceDetail }) {
-  return (
-    <DetailSection title="Cumulative Evaluated Trajectory" variants={detail.variants} render={(variant) => (
-      <div className="h-full rounded-lg border bg-background p-6">
-        <h3 className="text-lg font-semibold">{variant.name}</h3>
-        {(variant.evaluatedTrajectory?.steps?.length ?? 0) > 0 ? (
-          <Table className="mt-4">
+    <section className="space-y-4">
+      <SectionTitleWithHelp title="Cumulative Evaluated Trajectory" explanation={trajectoryExplanation} />
+      <div className="rounded-lg bg-background p-5">
+        {rows.length > 0 ? (
+          <Table className="min-w-[42rem] table-fixed">
             <TableHeader>
               <TableRow>
-                <TrajectoryTableHead label="Step" explanation="Cumulative retrieval step number." />
-                <TrajectoryTableHead label="File" explanation="Cumulative file-level gold-context coverage." />
-                <TrajectoryTableHead label="Symbol" explanation="Cumulative symbol-level gold-context coverage." />
-                <TrajectoryTableHead label="Span" explanation="Cumulative span-level gold-context coverage." />
-                <TrajectoryTableHead label="Line" explanation="Cumulative line-level gold-context coverage." />
+                <TrajectoryMajorTableHead label="Step" explanation="Cumulative retrieval step number." className="w-16 border-l-0" />
+                <TrajectoryMajorTableHead label="File" explanation="Cumulative file-level gold-context coverage." />
+                <TrajectoryMajorTableHead label="Block" explanation="Cumulative block-level gold-context coverage." />
+                <TrajectoryMajorTableHead label="Line" explanation="Cumulative line-level gold-context coverage." />
+                <TrajectoryMajorTableHead label="Symbol" explanation="Cumulative symbol-level gold-context coverage." />
               </TableRow>
             </TableHeader>
             <TableBody>
-              {variant.evaluatedTrajectory?.steps?.map((step) => (
-                <TableRow key={`${variant.label}-coverage-${step.step}`}>
-                  <TableCell>{step.step}</TableCell>
-                  <TableCell>{formatInstanceMetric(step.coverage.file ?? null)}</TableCell>
-                  <TableCell>{formatInstanceMetric(step.coverage.symbol ?? null)}</TableCell>
-                  <TableCell>{formatInstanceMetric(step.coverage.span ?? null)}</TableCell>
-                  <TableCell>{formatInstanceMetric(step.coverage.line ?? null)}</TableCell>
+              {rows.map((row) => (
+                <TableRow key={`trajectory-versus-${row.step}`}>
+                  <TableCell className="w-16 px-3 py-3">{row.step}</TableCell>
+                  <TrajectoryMajorTableCell><CoverageVersusValue baselineValue={row.baseline?.coverage.file} treatmentValue={row.treatment?.coverage.file} /></TrajectoryMajorTableCell>
+                  <TrajectoryMajorTableCell><CoverageVersusValue baselineValue={row.baseline?.coverage.span} treatmentValue={row.treatment?.coverage.span} /></TrajectoryMajorTableCell>
+                  <TrajectoryMajorTableCell><CoverageVersusValue baselineValue={row.baseline?.coverage.line} treatmentValue={row.treatment?.coverage.line} /></TrajectoryMajorTableCell>
+                  <TrajectoryMajorTableCell><CoverageVersusValue baselineValue={row.baseline?.coverage.symbol} treatmentValue={row.treatment?.coverage.symbol} /></TrajectoryMajorTableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
-        ) : <p className="mt-4 text-sm text-muted-foreground">No evaluated trajectory coverage data was recorded.</p>}
+        ) : (
+          <p className="text-sm text-muted-foreground">No evaluated trajectory coverage data was recorded.</p>
+        )}
       </div>
-    )} />
+    </section>
   );
 }
 
-function TextPanel({ title, text }: { title: string; text: string }) {
+function TrajectoryMajorTableHead({
+  label,
+  explanation,
+  className,
+}: {
+  label: string;
+  explanation: string;
+  className?: string;
+}) {
   return (
-    <div className="h-full rounded-lg border bg-background p-6">
-      <h3 className="text-lg font-semibold">{title}</h3>
-      <div className="mt-4 whitespace-pre-wrap text-sm leading-6">{text}</div>
-    </div>
-  );
-}
-
-function MarkdownTextPanel({ title, text }: { title: string; text: string }) {
-  return (
-    <div className="h-full rounded-lg border bg-background p-6">
-      <h3 className="text-lg font-semibold">{title}</h3>
-      <MarkdownText text={text} className="mt-4" />
-    </div>
-  );
-}
-
-function DiffCodePanel({ title, text }: { title: string; text: string }) {
-  const lines = text.replace(/\r\n?/g, "\n").split("\n");
-
-  return (
-    <div className="h-full rounded-lg border bg-background p-6">
-      <h3 className="text-lg font-semibold">{title}</h3>
-      <pre className="mt-4 max-h-[28rem] overflow-auto rounded-md border bg-muted/20 py-3 text-xs leading-6">
-        <code>
-          {lines.map((line, index) => (
-            <span
-              key={`${title}-patch-line-${index}`}
-              className={cn("block min-h-6 whitespace-pre px-4", diffLineClassName(line))}
-            >
-              {line || " "}
-            </span>
-          ))}
-        </code>
-      </pre>
-    </div>
-  );
-}
-
-function diffLineClassName(line: string): string {
-  if (line.startsWith("diff --git ") || line.startsWith("index ")) {
-    return "bg-muted/50 font-semibold text-muted-foreground";
-  }
-  if (line.startsWith("@@")) {
-    return "border-l-2 border-sky-500 bg-sky-50 text-sky-900";
-  }
-  if (line.startsWith("+++") || line.startsWith("---")) {
-    return "bg-muted/40 font-medium text-muted-foreground";
-  }
-  if (line.startsWith("+")) {
-    return "border-l-2 border-emerald-500 bg-emerald-50 text-emerald-950";
-  }
-  if (line.startsWith("-")) {
-    return "border-l-2 border-rose-500 bg-rose-50 text-rose-950";
-  }
-  if (line.startsWith("\\ No newline at end of file")) {
-    return "text-muted-foreground";
-  }
-  return "";
-}
-
-function TracePanel({ variant }: { variant: ComparisonInstanceDetail["variants"][number] }) {
-  if ((variant.traceEntries?.length ?? 0) === 0) {
-    return <TextPanel title={variant.name} text="No structured conversation or reasoning trace was exported for this run." />;
-  }
-  return (
-    <div className="h-full rounded-lg border bg-background p-6">
-      <h3 className="text-lg font-semibold">{variant.name}</h3>
-      <div className="mt-4 space-y-3">
-        {variant.traceEntries?.map((entry, index) => (
-          <details key={`${variant.label}-trace-${index}`} className="rounded-md border p-4">
-            <summary className="cursor-pointer list-none font-medium">{entry.command || entry.kind.replace("_", " ")}</summary>
-            <pre className="mt-3 max-h-80 overflow-auto rounded-md bg-muted/20 p-3 text-xs leading-6">
-              {entry.text || entry.output || (entry.payload ? JSON.stringify(entry.payload, null, 2) : "")}
-            </pre>
-          </details>
-        ))}
+    <TableHead className={cn("border-l px-3 text-center", className)}>
+      <div className="flex items-center justify-center gap-2">
+        <span>{label}</span>
+        <HelpIcon label={label} explanation={explanation} />
       </div>
+    </TableHead>
+  );
+}
+
+function TrajectoryMajorTableCell({ children }: { children: ReactNode }) {
+  return (
+    <TableCell className="border-l px-3 py-3 text-center">
+      {children}
+    </TableCell>
+  );
+}
+
+function mergedTrajectorySteps(
+  baseline: ComparisonInstanceDetail["variants"][number],
+  treatment: ComparisonInstanceDetail["variants"][number],
+) {
+  const baselineSteps = new Map((baseline.evaluatedTrajectory?.steps ?? []).map((step) => [step.step, step]));
+  const treatmentSteps = new Map((treatment.evaluatedTrajectory?.steps ?? []).map((step) => [step.step, step]));
+  return Array.from(new Set([...baselineSteps.keys(), ...treatmentSteps.keys()]))
+    .sort((left, right) => left - right)
+    .map((step) => ({
+      step,
+      baseline: baselineSteps.get(step),
+      treatment: treatmentSteps.get(step),
+    }));
+}
+
+function CoverageVersusValue({
+  baselineValue,
+  treatmentValue,
+}: {
+  baselineValue: number | null | undefined;
+  treatmentValue: number | null | undefined;
+}) {
+  return (
+    <div className="inline-grid grid-cols-[max-content_auto_max-content] items-center gap-1.5">
+      <span className="whitespace-nowrap text-xs tabular-nums">{formatInstanceMetric(baselineValue ?? null)}</span>
+      <OverviewDirectionSeparator
+        direction="higher"
+        baselineValue={formatInstanceMetric(baselineValue ?? null)}
+        treatmentValue={formatInstanceMetric(treatmentValue ?? null)}
+        baselineNumericValue={baselineValue ?? null}
+        treatmentNumericValue={treatmentValue ?? null}
+        className="h-6 w-5"
+        iconClassName="h-4 w-4"
+      />
+      <span className="whitespace-nowrap text-xs tabular-nums">{formatInstanceMetric(treatmentValue ?? null)}</span>
     </div>
   );
 }

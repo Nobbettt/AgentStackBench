@@ -276,8 +276,9 @@ def test_load_predictions_from_aggregate_jsonl_resolves_relative_sidecars(
 
     assert summary["conversion_error_count"] == 0
     assert len(predictions) == 1
-    assert predictions[0]["traj_data"]["pred_files"] == ["pkg/mod.py"]
-    assert predictions[0]["traj_data"]["pred_files_source"] == ["trace_inference"]
+    assert predictions[0]["traj_data"]["pred_files"] == []
+    assert predictions[0]["traj_data"]["pred_files_source"] == []
+    assert predictions[0]["traj_data"]["pred_steps"][0]["files"] == ["pkg/mod.py"]
 
 
 def test_load_predictions_from_aggregate_jsonl_flags_missing_relative_sidecar(

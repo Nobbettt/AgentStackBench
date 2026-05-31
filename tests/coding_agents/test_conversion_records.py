@@ -207,6 +207,30 @@ def test_convert_run_record_normalizes_absolute_paths_under_workspace(tmp_path) 
     assert converted["traj_data"]["pred_symbols"] == {"pkg/mod.py": ["Thing"]}
 
 
+def test_convert_run_record_normalizes_public_worktree_placeholder_paths() -> None:
+    record = {
+        "agent": "codex",
+        "instance_id": "task-1",
+        "workspace_path": "<worktree>/github.com__example__repo/abc123__task",
+        "repo_url": "https://github.com/example/repo.git",
+        "commit": "abc123",
+        "model_patch": "",
+        "final_output": {
+            "task_id": "task-1",
+            "status": "completed",
+            "retrieved_context_files": ["<worktree>/pkg/mod.py"],
+            "retrieved_context_spans": [{"file": "<worktree>/pkg/mod.py", "start": 1, "end": 3}],
+            "retrieved_context_symbols": [{"file": "<worktree>/pkg/mod.py", "name": "Thing"}],
+        },
+    }
+
+    converted = convert_run_record(record)
+
+    assert converted["traj_data"]["pred_files"] == ["pkg/mod.py"]
+    assert converted["traj_data"]["pred_spans"] == {"pkg/mod.py": [{"start": 1, "end": 3}]}
+    assert converted["traj_data"]["pred_symbols"] == {"pkg/mod.py": ["Thing"]}
+
+
 def test_convert_records_with_summary_fails_outside_workspace_context(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     record = {
@@ -266,9 +290,9 @@ def test_convert_run_record_drops_trace_inferred_paths_outside_workspace(tmp_pat
 
     converted = convert_run_record(record, parser=Parser())
 
-    assert converted["traj_data"]["pred_files"] == ["pkg/mod.py"]
+    assert converted["traj_data"]["pred_files"] == []
 
-def test_convert_run_record_merges_inferred_and_reported_retrieval() -> None:
+def test_convert_run_record_keeps_trace_steps_out_of_final_context() -> None:
     record = {
         "agent": "codex",
         "instance_id": "task-1",
@@ -314,17 +338,54 @@ def test_convert_run_record_merges_inferred_and_reported_retrieval() -> None:
 
     converted = convert_run_record(record)
 
-    assert converted["traj_data"]["pred_files"] == [
-        "sklearn/impute/_iterative.py",
-        "sklearn/impute/tests/test_impute.py",
-    ]
-    assert converted["traj_data"]["pred_spans"]["sklearn/impute/_iterative.py"][0]["start"] == 120
+    assert converted["traj_data"]["pred_files"] == ["sklearn/impute/tests/test_impute.py"]
+    assert "sklearn/impute/_iterative.py" not in converted["traj_data"]["pred_spans"]
     assert converted["traj_data"]["pred_spans"]["sklearn/impute/tests/test_impute.py"][0]["start"] == 10
     assert len(converted["traj_data"]["pred_steps"]) == 2
-    assert converted["traj_data"]["pred_files_provenance"]["sklearn/impute/_iterative.py"] == "trace_inference"
     assert converted["traj_data"]["pred_files_provenance"]["sklearn/impute/tests/test_impute.py"] == "agent_report"
-    assert "trace_inference" in converted["traj_data"]["pred_files_source"]
-    assert "agent_report" in converted["traj_data"]["pred_files_source"]
+    assert converted["traj_data"]["pred_files_source"] == ["agent_report"]
+
+
+def test_convert_run_record_does_not_score_rg_file_list_as_final_context() -> None:
+    record = {
+        "agent": "codex",
+        "instance_id": "task-1",
+        "workspace_path": "/tmp/workspace",
+        "repo_url": "https://github.com/example/repo.git",
+        "commit": "abc123",
+        "raw_response": {
+            "agent": "codex",
+            "response_format": "jsonl-events",
+            "events": [
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item_1",
+                        "type": "command_execution",
+                        "command": "/bin/zsh -lc 'rg --files | rg \"pkg|tests\"'",
+                        "aggregated_output": "pkg/mod.py\ntests/test_mod.py\npkg/extra.py\n",
+                        "exit_code": 0,
+                        "status": "completed",
+                    },
+                }
+            ],
+        },
+        "model_patch": "",
+        "final_output": {
+            "task_id": "task-1",
+            "status": "completed",
+            "final_answer": "done",
+            "retrieved_context_files": ["pkg/mod.py"],
+            "retrieved_context_spans": [{"file": "pkg/mod.py", "start": 10, "end": 20}],
+            "retrieved_context_symbols": [],
+        },
+    }
+
+    converted = convert_run_record(record)
+
+    assert converted["traj_data"]["pred_files"] == ["pkg/mod.py"]
+    assert converted["traj_data"]["pred_spans"] == {"pkg/mod.py": [{"start": 10, "end": 20}]}
+    assert converted["traj_data"]["pred_steps"] == []
 
 
 def test_convert_records_to_jsonl_resolves_host_absolute_raw_response_sidecar(tmp_path) -> None:
@@ -387,8 +448,9 @@ def test_convert_records_to_jsonl_resolves_host_absolute_raw_response_sidecar(tm
 
     assert summary["prediction_count"] == 1
     assert summary["conversion_error_count"] == 0
-    assert predictions[0]["traj_data"]["pred_files"] == ["pkg/mod.py"]
-    assert predictions[0]["traj_data"]["pred_files_source"] == ["trace_inference"]
+    assert predictions[0]["traj_data"]["pred_files"] == []
+    assert predictions[0]["traj_data"]["pred_files_source"] == []
+    assert predictions[0]["traj_data"]["pred_steps"][0]["files"] == ["pkg/mod.py"]
 
 
 def test_convert_run_record_preserves_symbols_when_merging_duplicate_steps() -> None:

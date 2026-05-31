@@ -44,7 +44,7 @@ def test_convert_run_record_does_not_use_patch_as_retrieval_context(make_record)
     assert converted["traj_data"]["pred_files_provenance"] == {}
     assert converted["traj_data"]["pred_files_source"] == []
 
-def test_convert_run_record_trace_only_sources_do_not_claim_agent_report() -> None:
+def test_convert_run_record_trace_only_sources_do_not_become_final_context() -> None:
     record = {
         "agent": "codex",
         "instance_id": "task-trace",
@@ -75,8 +75,10 @@ def test_convert_run_record_trace_only_sources_do_not_claim_agent_report() -> No
 
     converted = convert_run_record(record)
 
-    assert converted["traj_data"]["pred_files_source"] == ["trace_inference"]
-    assert converted["traj_data"]["pred_files_provenance"]["requests/api.py"] == "trace_inference"
+    assert converted["traj_data"]["pred_files"] == []
+    assert converted["traj_data"]["pred_files_source"] == []
+    assert converted["traj_data"]["pred_files_provenance"] == {}
+    assert converted["traj_data"]["pred_steps"][0]["files"] == ["requests/api.py"]
 
 def test_convert_run_record_marks_span_only_reported_file_provenance(make_record) -> None:
     record = make_record(

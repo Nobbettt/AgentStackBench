@@ -1,12 +1,31 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import { Bar, BarChart, CartesianGrid, LabelList, ResponsiveContainer, XAxis, YAxis } from "recharts";
 
 import type { ComparisonCard } from "@/data/comparisons";
 import { formatPercentDelta, formatSignedFixed, getComparisonPair } from "@/components/comparison/format";
 import { ComparisonSectionShell, DeltaIndicator, DeltaSectionLabel, HelpIcon } from "@/components/comparison/shared";
 import type { ComparisonResultsViewMode, DeltaDisplayMode, MetricDelta } from "@/components/comparison/types";
-import { cn } from "@/lib/utils";
+import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 
-function hasBreakdownData(usage: { totalInvocations?: number; byType?: Array<{ name: string; averagePerRun: number }> } | undefined): boolean {
+type UsageBreakdownEntry = {
+  name: string;
+  averagePerRun: number;
+};
+
+const usageChartConfig = {
+  invocations: {
+    label: "Invocations / Run",
+    color: "hsl(var(--chart-1))",
+  },
+} satisfies ChartConfig;
+
+function hasBreakdownData(usage: { totalInvocations?: number; byType?: UsageBreakdownEntry[] } | undefined): boolean {
   return (usage?.totalInvocations ?? 0) > 0 || (usage?.byType?.length ?? 0) > 0;
+}
+
+export function comparisonHasToolUsage(comparison: ComparisonCard): boolean {
+  return comparison.variants.some((variant) => hasBreakdownData(variant.results.tools));
 }
 
 function UsageSection({
@@ -31,18 +50,19 @@ function UsageSection({
   if (!hasData) return null;
 
   const comparisonPair = getComparisonPair(comparison);
-  const variants = viewMode === "treatment-delta" && comparisonPair ? [comparisonPair.treatment] : comparison.variants;
-  const headerAside = viewMode === "treatment-delta" && comparisonPair
+  const showDeltas = viewMode === "treatment-delta" && comparisonPair;
+  const variants = showDeltas ? [comparisonPair.treatment] : comparison.variants;
+  const headerAside = showDeltas
     ? <DeltaSectionLabel baseline={comparisonPair.baseline} treatment={comparisonPair.treatment} />
     : undefined;
 
   return (
     <ComparisonSectionShell title={title} collapsible={collapsible} headerAside={headerAside}>
-      <div className={cn(collapsible ? "rounded-lg bg-background p-5" : "rounded-lg border bg-background p-5")}>
+      <div className="rounded-lg bg-background p-5">
         <div className="grid gap-5 md:grid-cols-2">
           {variants.map((variant) => {
             const usage = variant.results[kind];
-            const delta = comparisonPair
+            const delta = showDeltas
               ? usageDelta(kind, comparisonPair.baseline, comparisonPair.treatment, deltaDisplayMode)
               : null;
             return (
@@ -58,22 +78,73 @@ function UsageSection({
                     {delta ? <DeltaIndicator label={delta.label} delta={delta.delta} tone={delta.tone} /> : null}
                   </div>
                 </div>
-                {(usage?.byType?.length ?? 0) > 0 ? (
-                  <div className="mt-3 grid gap-2">
-                    {usage?.byType?.map((entry) => (
-                      <div key={entry.name} className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
-                        <span>{entry.name}</span>
-                        <span className="font-medium tabular-nums">{entry.averagePerRun.toFixed(2)}</span>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
+                <UsageBreakdownChart entries={usage?.byType ?? []} />
               </div>
             );
           })}
         </div>
       </div>
     </ComparisonSectionShell>
+  );
+}
+
+function UsageBreakdownChart({ entries }: { entries: UsageBreakdownEntry[] }) {
+  if (entries.length === 0) {
+    return (
+      <p className="mt-3 text-sm text-muted-foreground">
+        No per-type invocation breakdown available.
+      </p>
+    );
+  }
+
+  const chartData = entries
+    .map((entry) => ({
+      name: entry.name,
+      invocations: Number(entry.averagePerRun.toFixed(2)),
+    }))
+    .sort((a, b) => b.invocations - a.invocations);
+  const chartHeight = Math.max(140, chartData.length * 36 + 28);
+
+  return (
+    <ChartContainer config={usageChartConfig} className="mt-3 w-full" style={{ height: chartHeight }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart
+          accessibilityLayer
+          data={chartData}
+          layout="vertical"
+          margin={{ left: 4, right: 44, top: 8, bottom: 8 }}
+        >
+          <CartesianGrid horizontal={false} />
+          <YAxis
+            dataKey="name"
+            type="category"
+            tickLine={false}
+            tickMargin={10}
+            axisLine={false}
+            width={190}
+          />
+          <XAxis dataKey="invocations" type="number" hide />
+          <ChartTooltip
+            cursor={false}
+            content={
+              <ChartTooltipContent
+                hideLabel
+                formatter={(value) => Number(value).toFixed(2)}
+              />
+            }
+          />
+          <Bar dataKey="invocations" fill="var(--color-invocations)" radius={4}>
+            <LabelList
+              dataKey="invocations"
+              position="right"
+              offset={8}
+              className="fill-foreground text-xs font-medium"
+              formatter={(value: number) => value.toFixed(2)}
+            />
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </ChartContainer>
   );
 }
 

@@ -12,6 +12,26 @@ export function instanceContextF1(instance: ComparisonInstance | undefined): num
   return (f1(fileMetrics.coverage, fileMetrics.precision) + f1(symbolMetrics.coverage, symbolMetrics.precision) + f1(spanMetrics.coverage, spanMetrics.precision)) / 3;
 }
 
+function instanceContextRecallPrecision(instance: ComparisonInstance | undefined): { recall: number; precision: number } | null {
+  if (!instance || (instance.artifacts && instance.artifacts.evaluationStatus !== "valid")) return null;
+  const fileMetrics = coveragePrecision(instance.quality.file.predSize, instance.quality.file.goldSize, instance.quality.file.intersection);
+  const symbolMetrics = coveragePrecision(instance.quality.symbol.predSize, instance.quality.symbol.goldSize, instance.quality.symbol.intersection);
+  const spanMetrics = coveragePrecision(instance.quality.span.predSize, instance.quality.span.goldSize, instance.quality.span.intersection);
+  return {
+    recall: (fileMetrics.coverage + symbolMetrics.coverage + spanMetrics.coverage) / 3,
+    precision: (fileMetrics.precision + symbolMetrics.precision + spanMetrics.precision) / 3,
+  };
+}
+
+function formatContextLevelMetrics(metric: ComparisonInstance["quality"]["file"] | undefined) {
+  const values = coveragePrecision(metric?.predSize ?? 0, metric?.goldSize ?? 0, metric?.intersection ?? 0);
+  return {
+    recall: formatMetric(values.coverage),
+    precision: formatMetric(values.precision),
+    f1: formatMetric(f1(values.coverage, values.precision)),
+  };
+}
+
 export function buildInstanceRows(comparison: ComparisonCard): InstanceRow[] {
   const comparisonPair = getComparisonPair(comparison);
   if (comparisonPair) {
@@ -66,12 +86,13 @@ export function buildInstanceVariant(variant: ComparisonVariant, instance: Compa
   const spanF1 = metricF1(instance?.quality.span);
   const lineF1 = metricF1(instance?.quality.line);
   const contextF1 = instanceContextF1(instance);
+  const contextRecallPrecision = instanceContextRecallPrecision(instance);
 
   return {
     ...variant,
     contextF1: contextF1 !== null ? formatMetric(contextF1) : undefined,
     score: contextF1 !== null ? formatMetric(contextF1) : undefined,
-    parameters: [],
+    parameters: variant.parameters ?? [],
     results: {
       outcome: {
         completedRuns,
@@ -97,10 +118,20 @@ export function buildInstanceVariant(variant: ComparisonVariant, instance: Compa
       },
       quality: {
         contextF1: contextF1 !== null ? formatMetric(contextF1) : undefined,
+        contextRecall: contextRecallPrecision ? formatMetric(contextRecallPrecision.recall) : undefined,
+        contextPrecision: contextRecallPrecision ? formatMetric(contextRecallPrecision.precision) : undefined,
         fileF1: hasValidEvaluation && instance ? formatMetric(fileF1) : undefined,
         symbolF1: hasValidEvaluation && instance ? formatMetric(symbolF1) : undefined,
         spanF1: hasValidEvaluation && instance ? formatMetric(spanF1) : undefined,
         avgLineF1: hasValidEvaluation && instance ? formatMetric(lineF1) : undefined,
+        contextLevels: hasValidEvaluation && instance
+          ? {
+              file: formatContextLevelMetrics(instance.quality.file),
+              symbol: formatContextLevelMetrics(instance.quality.symbol),
+              block: formatContextLevelMetrics(instance.quality.span),
+              line: formatContextLevelMetrics(instance.quality.line),
+            }
+          : undefined,
         fixOverlapVsGold: fixOverlapSummaryFromInstance(instance),
       },
       efficiency: {

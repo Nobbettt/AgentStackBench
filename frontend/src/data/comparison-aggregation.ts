@@ -76,6 +76,14 @@ function f1(coverage: number, precision: number): number {
   return denominator === 0 ? 0 : (2 * coverage * precision) / denominator;
 }
 
+function formatContextLevelMetrics(metrics: { coverage: number; precision: number }) {
+  return {
+    recall: formatMetric(metrics.coverage),
+    precision: formatMetric(metrics.precision),
+    f1: formatMetric(f1(metrics.coverage, metrics.precision)),
+  };
+}
+
 function mean(values: number[]): number | null {
   return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
 }
@@ -191,6 +199,8 @@ function aggregateVariant(
   const symbolF1 = f1(symbolMetrics.coverage, symbolMetrics.precision);
   const spanF1 = f1(spanMetrics.coverage, spanMetrics.precision);
   const lineF1 = f1(lineMetrics.coverage, lineMetrics.precision);
+  const contextRecall = (fileMetrics.coverage + symbolMetrics.coverage + spanMetrics.coverage) / 3;
+  const contextPrecision = (fileMetrics.precision + symbolMetrics.precision + spanMetrics.precision) / 3;
   const contextF1 = (fileF1 + symbolF1 + spanF1) / 3;
 
   const efficiency = mean(
@@ -282,10 +292,20 @@ function aggregateVariant(
       },
       quality: {
         contextF1: taskCount > 0 ? formatMetric(contextF1) : undefined,
+        contextRecall: taskCount > 0 ? formatMetric(contextRecall) : undefined,
+        contextPrecision: taskCount > 0 ? formatMetric(contextPrecision) : undefined,
         fileF1: taskCount > 0 ? formatMetric(fileF1) : undefined,
         symbolF1: taskCount > 0 ? formatMetric(symbolF1) : undefined,
         spanF1: taskCount > 0 ? formatMetric(spanF1) : undefined,
         avgLineF1: taskCount > 0 ? formatMetric(lineF1) : undefined,
+        contextLevels: taskCount > 0
+          ? {
+              file: formatContextLevelMetrics(fileMetrics),
+              symbol: formatContextLevelMetrics(symbolMetrics),
+              block: formatContextLevelMetrics(spanMetrics),
+              line: formatContextLevelMetrics(lineMetrics),
+            }
+          : undefined,
         fixOverlapVsGold: aggregateFixOverlapVsGold(filteredInstances),
       },
       efficiency: {

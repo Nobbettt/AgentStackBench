@@ -27,13 +27,14 @@ export function HelpIcon({ label, explanation }: { label: string; explanation: s
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <button
-          type="button"
-          className="inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground"
+        <span
+          role="button"
+          tabIndex={0}
+          className="inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           aria-label={`What ${label} means`}
         >
           <CircleHelp className="h-3.5 w-3.5" />
-        </button>
+        </span>
       </TooltipTrigger>
       <TooltipContent>{explanation}</TooltipContent>
     </Tooltip>
@@ -68,12 +69,14 @@ export function DeltaSectionLabel({
 export function ComparisonSectionShell({
   title,
   children,
+  headerInline,
   headerAside,
   collapsible = false,
   defaultOpen = true,
 }: {
   title: string;
   children: React.ReactNode;
+  headerInline?: React.ReactNode;
   headerAside?: React.ReactNode;
   collapsible?: boolean;
   defaultOpen?: boolean;
@@ -82,7 +85,10 @@ export function ComparisonSectionShell({
     return (
       <section className="space-y-4">
         <div className="flex items-center justify-between gap-4">
-          <h2 className="text-xl font-semibold tracking-tight">{title}</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-xl font-semibold tracking-tight">{title}</h2>
+            {headerInline}
+          </div>
           {headerAside}
         </div>
         {children}
@@ -97,12 +103,15 @@ export function ComparisonSectionShell({
         type="single"
         collapsible
         defaultValue={defaultOpen ? value : undefined}
-        className="w-full rounded-lg border bg-background px-6"
+        className="w-full rounded-lg bg-background px-6"
       >
         <AccordionItem value={value} className="!border-b-0">
           <AccordionTrigger className="text-xl font-semibold tracking-tight hover:no-underline">
             <div className="flex w-full items-center justify-between gap-4 pr-4 text-left">
-              <span>{title}</span>
+              <span className="inline-flex items-center gap-2">
+                <span>{title}</span>
+                {headerInline}
+              </span>
               {headerAside}
             </div>
           </AccordionTrigger>

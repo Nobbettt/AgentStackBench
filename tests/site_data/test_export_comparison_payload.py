@@ -2,13 +2,94 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
+import scripts.export_comparison_data as export_comparison_data
 from scripts.export_comparison_data import ComparisonExportError, build_comparison_payload
 
 from .helpers import _record, _write
+
+
+def test_repository_size_line_counts_are_opt_in_and_local_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo_cache = tmp_path / "repo-cache"
+    repo_dir = repo_cache / "github.com__example__repo"
+    repo_dir.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+    _write(repo_dir / "src" / "a.py", "one\n\nthree\n")
+    _write(repo_dir / "README.md", "title\n")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_dir, check=True, capture_output=True, text=True)
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_dir, check=True, capture_output=True, text=True).stdout.strip()
+
+    monkeypatch.setattr(export_comparison_data, "DEFAULT_REPO_CACHE_DIR", repo_cache)
+    export_comparison_data._REPOSITORY_SIZE_CACHE.clear()
+    task_row = {"repo_url": "https://github.com/example/repo.git", "commit": commit}
+    record = {}
+
+    default_payload = export_comparison_data._repository_size_payload(task_row, record)
+    assert default_payload == {
+        "status": "available",
+        "repo": "example/repo",
+        "trackedFiles": 2,
+    }
+
+    export_comparison_data._REPOSITORY_SIZE_CACHE.clear()
+    line_payload = export_comparison_data._repository_size_payload(task_row, record, include_line_counts=True)
+    assert line_payload == {
+        "status": "available",
+        "repo": "example/repo",
+        "trackedFiles": 2,
+        "lineCountStatus": "available",
+        "trackedTextLines": 4,
+    }
+
+
+def test_repository_size_cache_is_commit_specific(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo_cache = tmp_path / "repo-cache"
+    repo_dir = repo_cache / "github.com__example__repo"
+    repo_dir.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+
+    _write(repo_dir / "src" / "a.py", "one\n")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_dir, check=True, capture_output=True, text=True)
+    first_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_dir, check=True, capture_output=True, text=True).stdout.strip()
+
+    _write(repo_dir / "src" / "b.py", "two\n")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "second"], cwd=repo_dir, check=True, capture_output=True, text=True)
+    second_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_dir, check=True, capture_output=True, text=True).stdout.strip()
+
+    monkeypatch.setattr(export_comparison_data, "DEFAULT_REPO_CACHE_DIR", repo_cache)
+    export_comparison_data._REPOSITORY_SIZE_CACHE.clear()
+
+    first_payload = export_comparison_data._repository_size_payload(
+        {"repo_url": "https://github.com/example/repo.git", "commit": first_commit},
+        {},
+    )
+    second_payload = export_comparison_data._repository_size_payload(
+        {"repo_url": "https://github.com/example/repo.git", "commit": second_commit},
+        {},
+    )
+
+    assert first_payload == {
+        "status": "available",
+        "repo": "example/repo",
+        "trackedFiles": 1,
+    }
+    assert second_payload == {
+        "status": "available",
+        "repo": "example/repo",
+        "trackedFiles": 2,
+    }
+
 
 def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
     suite_dir = tmp_path / "results" / "run_suites" / "demo-suite"
@@ -215,6 +296,12 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
     }
     assert payload["comparisonCards"][0]["variants"][0]["results"]["quality"]["spanF1"] == "0.667"
     assert payload["comparisonCards"][0]["variants"][0]["results"]["quality"]["avgLineF1"] == "0.600"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["quality"]["contextLevels"] == {
+        "file": {"recall": "0.750", "precision": "0.750", "f1": "0.750"},
+        "block": {"recall": "0.600", "precision": "0.750", "f1": "0.667"},
+        "line": {"recall": "0.750", "precision": "0.500", "f1": "0.600"},
+        "symbol": {"recall": "0.500", "precision": "0.500", "f1": "0.500"},
+    }
     assert payload["comparisonCards"][0]["variants"][0]["results"]["quality"]["fixOverlapVsGold"] == {
         "status": "available",
         "recall": "50.0%",
@@ -251,3 +338,95 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
     assert payload["leaderboardRows"][0]["officialPassAt1"] == "10.0%"
     assert payload["leaderboardRows"][0]["passAt1"] == "10.0%"
     assert payload["leaderboardRows"][0]["contextF1"] == "0.639"
+
+
+def test_build_comparison_payload_can_export_aligned_postprocess_artifacts(tmp_path: Path) -> None:
+    suite_dir = tmp_path / "results" / "run_suites" / "demo-suite"
+    variant_dir = suite_dir / "variants" / "baseline"
+    _write(
+        suite_dir / "experiment.json",
+        json.dumps(
+            {
+                "experiment_name": "demo-suite",
+                "description": "Aligned comparison",
+                "agent": "codex",
+                "base_run": {"reasoning_effort": "high"},
+            }
+        ),
+    )
+    _write(suite_dir / "summary.json", json.dumps([{"variant": "baseline", "total_tasks": 1}]))
+    _write(
+        suite_dir / "manifest.json",
+        json.dumps(
+            {
+                "task_set": {"count": 1},
+                "variants": [
+                    {
+                        "name": "baseline",
+                        "effective_config_path": str(variant_dir / "effective-config.json"),
+                        "task_results_path": str(variant_dir / "task-results.jsonl"),
+                        "output_dir": str(variant_dir),
+                    }
+                ],
+            }
+        ),
+    )
+    _write(
+        variant_dir / "effective-config.json",
+        json.dumps(
+            {
+                "effective_config": {
+                    "name": "baseline",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "high",
+                    "timeout": 2400,
+                    "setup": {"copy_paths": []},
+                }
+            }
+        ),
+    )
+    _write(variant_dir / "task-results.jsonl", "")
+    _write(
+        variant_dir / "eval.jsonl",
+        json.dumps(
+            {
+                "final": {
+                    "file": {"intersection": 1, "gold_size": 10, "pred_size": 100},
+                    "symbol": {"intersection": 0, "gold_size": 1, "pred_size": 1},
+                    "span": {"intersection": 0, "gold_size": 1, "pred_size": 1},
+                    "line": {"intersection": 0, "gold_size": 1, "pred_size": 1},
+                },
+                "trajectory": {"auc_coverage": {}, "redundancy": {}},
+            }
+        ),
+    )
+    _write(
+        variant_dir / "eval.aligned.jsonl",
+        json.dumps(
+            {
+                "final": {
+                    "file": {"intersection": 5, "gold_size": 10, "pred_size": 10},
+                    "symbol": {"intersection": 1, "gold_size": 2, "pred_size": 2},
+                    "span": {"intersection": 3, "gold_size": 6, "pred_size": 6},
+                    "line": {"intersection": 4, "gold_size": 8, "pred_size": 8},
+                },
+                "trajectory": {
+                    "auc_coverage": {"file": 0.5, "symbol": 0.5, "span": 0.5},
+                    "redundancy": {"file": 0.1, "symbol": 0.1, "span": 0.1},
+                },
+            }
+        ),
+    )
+
+    payload = build_comparison_payload(suite_dir, variant_name="baseline", artifact_suffix="aligned")
+
+    variant = payload["comparisonCards"][0]["variants"][0]
+    assert variant["results"]["quality"]["fileF1"] == "0.500"
+    assert variant["results"]["quality"]["contextF1"] == "0.500"
+    assert variant["results"]["quality"]["contextLevels"] == {
+        "file": {"recall": "0.500", "precision": "0.500", "f1": "0.500"},
+        "block": {"recall": "0.500", "precision": "0.500", "f1": "0.500"},
+        "line": {"recall": "0.500", "precision": "0.500", "f1": "0.500"},
+        "symbol": {"recall": "0.500", "precision": "0.500", "f1": "0.500"},
+    }
+    assert any("aligned postprocess artifacts" in note for note in payload["comparisonCards"][0]["notes"])

@@ -1,5 +1,5 @@
 # Fork note: Modified by Norbert Laszlo on 2026-04-17 from upstream ContextBench.
-# Summary of changes: resolve task-result record paths robustly, tighten provenance source attribution, and normalize file coverage from spans and symbols.
+# Summary of changes: resolve task-result record paths robustly, tighten provenance source attribution, and keep final context scoring explicit.
 
 """Conversion helpers from coding-agent records to ContextBench trajectories."""
 
@@ -230,6 +230,10 @@ def _workspace_path_for_record(record: dict[str, object]) -> Path | None:
 
 def _clean_relative_context_path(value: str) -> str:
     normalized = str(value).strip().strip("'\"").replace("\\", "/")
+    if normalized == "<worktree>":
+        return ""
+    if normalized.startswith("<worktree>/"):
+        normalized = normalized[len("<worktree>/") :]
     while normalized.startswith("./"):
         normalized = normalized[2:]
     if not normalized:
@@ -534,7 +538,6 @@ def convert_run_record(record: dict[str, object], parser=None) -> dict[str, obje
         invalid_paths=invalid_context_paths,
         strict=True,
     )
-    reported_retrieval_steps = list(retrieval_steps)
     retrieved_context_files = _normalize_context_file_list(
         final_output.get("retrieved_context_files") or [],
         workspace_path=workspace_path,
@@ -556,37 +559,8 @@ def convert_run_record(record: dict[str, object], parser=None) -> dict[str, obje
 
     model_patch = str(record.get("model_patch") or "").strip()
 
-    merged_step_spans = merge_span_maps(*(step.get("spans") for step in retrieval_steps))
-    merged_step_symbols: SymbolMap = {}
-    for step in retrieval_steps:
-        for file_path, names in normalize_symbol_map(step.get("symbols")).items():
-            merged_step_symbols.setdefault(file_path, []).extend(names)
-    merged_step_symbols = {
-        file_path: sorted(set(names))
-        for file_path, names in merged_step_symbols.items()
-        if names
-    }
-
     inferred_steps = _normalize_context_steps(
         inferred_traj.get("pred_steps", []) if inferred_traj else [],
-        workspace_path=workspace_path,
-        invalid_paths=invalid_context_paths,
-        strict=False,
-    )
-    inferred_files = _normalize_context_file_list(
-        inferred_traj.get("pred_files", []) if inferred_traj else [],
-        workspace_path=workspace_path,
-        invalid_paths=invalid_context_paths,
-        strict=False,
-    )
-    inferred_spans = _normalize_context_span_map(
-        inferred_traj.get("pred_spans", {}) if inferred_traj else {},
-        workspace_path=workspace_path,
-        invalid_paths=invalid_context_paths,
-        strict=False,
-    )
-    inferred_symbols = _normalize_context_symbol_map(
-        inferred_traj.get("pred_symbols", {}) if inferred_traj else {},
         workspace_path=workspace_path,
         invalid_paths=invalid_context_paths,
         strict=False,
@@ -611,15 +585,12 @@ def convert_run_record(record: dict[str, object], parser=None) -> dict[str, obje
         }
         for step in pred_steps
     ]
-    pred_files = sorted(
-        set(
-            inferred_files
-            or []
-        )
-        | set(retrieved_context_files)
-        | {file for step in pred_steps for file in step.get("files", [])}
-    )
-    pred_spans = merge_span_maps(inferred_spans, retrieved_context_spans, merged_step_spans)
+    # Final ContextBench quality metrics are computed from traj_data.pred_*.
+    # Keep inferred/retrieval-step data in pred_steps for trajectory diagnostics, but
+    # do not promote broad trace evidence such as `rg --files` output into final
+    # scored context. This mirrors upstream MiniSWE extraction where final context
+    # is explicit PATCH_CONTEXT only and command fallback never affects final.
+    pred_spans = merge_span_maps(retrieved_context_spans)
     pred_spans = {
         file_path: [
             span
@@ -634,57 +605,48 @@ def convert_run_record(record: dict[str, object], parser=None) -> dict[str, obje
         if spans
     }
     pred_symbols: SymbolMap = {}
-    for mapping in (inferred_symbols, retrieved_context_symbols, merged_step_symbols):
+    for mapping in (retrieved_context_symbols,):
         for file_path, names in mapping.items():
             pred_symbols.setdefault(file_path, []).extend(names)
     pred_symbols = {file_path: sorted(set(names)) for file_path, names in pred_symbols.items() if names}
-    pred_files = sorted(effective_file_list(files=pred_files, spans=pred_spans, symbols=pred_symbols))
-
-    inferred_context_files = set(inferred_files) | set(inferred_spans) | set(inferred_symbols)
-    agent_report_files = set(retrieved_context_files) | set(retrieved_context_spans) | set(retrieved_context_symbols)
-    for step in reported_retrieval_steps:
-        agent_report_files.update(
-            effective_file_list(
-                files=step.get("files", []),
-                spans=step.get("spans", {}),
-                symbols=step.get("symbols", {}),
-            )
+    pred_files = sorted(
+        effective_file_list(
+            files=retrieved_context_files,
+            spans=pred_spans,
+            symbols=pred_symbols,
         )
+    )
+
+    final_agent_report_files = set(
+        effective_file_list(
+            files=retrieved_context_files,
+            spans=pred_spans,
+            symbols=pred_symbols,
+        )
+    )
 
     pred_files_provenance: dict[str, str] = {}
     all_provenance_files = sorted(set(pred_files))
     for file_path in all_provenance_files:
-        sources: list[str] = []
-        if file_path in inferred_context_files:
-            sources.append("trace_inference")
-        if file_path in agent_report_files:
-            sources.append("agent_report")
-        pred_files_provenance[file_path] = _pick_preferred_source(*sources) if sources else "trace_inference"
+        pred_files_provenance[file_path] = "agent_report"
 
     pred_spans_provenance = _merge_span_provenance(
-        _spans_to_provenance(inferred_spans, "trace_inference"),
         _spans_to_provenance(retrieved_context_spans, "agent_report"),
-        _spans_to_provenance(merged_step_spans, "agent_report"),
     )
     pred_symbols_provenance = _merge_symbol_provenance(
-        _symbols_to_provenance(inferred_symbols, "trace_inference"),
         _symbols_to_provenance(retrieved_context_symbols, "agent_report"),
-        _symbols_to_provenance(merged_step_symbols, "agent_report"),
     )
 
-    has_reported_file_context = bool(agent_report_files)
+    has_reported_file_context = bool(final_agent_report_files)
 
     pred_files_source = _merge_source_lists(
-        ["trace_inference"] if inferred_context_files else [],
         ["agent_report"] if has_reported_file_context else [],
     )
     pred_spans_source = _merge_source_lists(
-        ["trace_inference"] if inferred_spans else [],
-        ["agent_report"] if retrieved_context_spans or merged_step_spans else [],
+        ["agent_report"] if retrieved_context_spans else [],
     )
     pred_symbols_source = _merge_source_lists(
-        ["trace_inference"] if inferred_symbols else [],
-        ["agent_report"] if retrieved_context_symbols or merged_step_symbols else [],
+        ["agent_report"] if retrieved_context_symbols else [],
     )
 
     traj_data: TrajectoryData = {

@@ -1,5 +1,5 @@
 # Fork note: Modified by Norbert Laszlo on 2026-04-16 from upstream ContextBench.
-# Summary of changes: restore safe repo-root file inference while keeping conservative trace guards.
+# Summary of changes: keep conservative trace guards and avoid treating broad file lists as retrieved context.
 
 """Heuristics for inferring ContextBench trajectory data from raw agent traces."""
 
@@ -238,15 +238,12 @@ def infer_retrieval_step_from_command(
 
     if "rg" in tokens or "grep" in tokens or _command_has_word(raw_command, "rg") or _command_has_word(raw_command, "grep"):
         spans = infer_grep_spans_from_text(output_text, workspace_path, meta=meta)
-        files = sorted(spans) or infer_file_list_from_text(output_text, workspace_path, meta=meta)
-        if files or spans:
-            return {"files": files, "spans": spans, "symbols": {}}
+        if spans:
+            return {"files": sorted(spans), "spans": spans, "symbols": {}}
+        infer_file_list_from_text(output_text, workspace_path, meta=meta)
         return None
 
     if "find" in tokens or _command_has_word(raw_command, "find"):
-        files = infer_file_list_from_text(output_text, workspace_path, meta=meta)
-        if files:
-            return {"files": files, "spans": {}, "symbols": {}}
         return None
 
     if any(token in {"sed", "cat", "head", "tail", "nl"} for token in tokens) or any(
