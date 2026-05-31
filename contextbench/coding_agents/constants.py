@@ -19,24 +19,17 @@ CODEX_OUTPUT_SCHEMA_PATH = REPO_ROOT / "contextbench" / "agents" / "codex" / "ou
 CLAUDE_OUTPUT_SCHEMA_PATH = REPO_ROOT / "contextbench" / "agents" / "claude" / "output.schema.json"
 # Pinned local Docker images for deterministic benchmark infrastructure.
 DEFAULT_CODEX_RUNTIME_IMAGE = "contextbench-codex-runtime:codex-cli-0.122.0"
+DEFAULT_CLAUDE_RUNTIME_IMAGE = "contextbench-claude-runtime:claude-code-2.1.126"
+DEFAULT_CLAUDE_RUNTIME_AMD64_IMAGE = "contextbench-claude-runtime:claude-code-2.1.126-linux-amd64"
 DEFAULT_AGENT_RUNTIME_IMAGES = {
     "codex": DEFAULT_CODEX_RUNTIME_IMAGE,
+    "claude": DEFAULT_CLAUDE_RUNTIME_IMAGE,
 }
 DEFAULT_POSTPROCESS_RUNTIME_IMAGE = "contextbench-postprocess:2026-04-23"
 
 # Candidate task-data field names, in priority order, for the natural-language issue prompt.
 DEFAULT_PROMPT_FIELDS = ["prompt", "question", "task", "problem_statement", "instruction"]
 # Required keys used to recognize the benchmark summary object inside raw CLI responses.
-RICH_OUTPUT_KEYS = [
-    "status",
-    "final_answer",
-    "touched_files",
-    "retrieval_steps",
-    "retrieved_context_files",
-    "retrieved_context_spans",
-    "retrieved_context_symbols",
-    "notes",
-]
 SEMANTIC_OUTPUT_KEYS = [
     "status",
     "final_answer",

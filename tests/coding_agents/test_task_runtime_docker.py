@@ -65,6 +65,10 @@ def test_run_coding_agent_task_closes_timed_out_docker_runtime_before_diff(tmp_p
             return None
 
         def run_command(self, command, *, cwd, stdin_text, stdout_path, stderr_path, timeout, env=None, host_runner=None):
+            if list(command) == ["codex", "--version"]:
+                stdout_path.write_text("codex 0.122.0\n", encoding="utf-8")
+                stderr_path.write_text("", encoding="utf-8")
+                return {"ok": True, "exit_code": 0, "signal": None, "timeout": False}
             stdout_path.write_text("", encoding="utf-8")
             stderr_path.write_text("timed out", encoding="utf-8")
             return {"ok": False, "exit_code": None, "signal": "SIGTERM", "timeout": True}
@@ -92,7 +96,7 @@ def test_run_coding_agent_task_closes_timed_out_docker_runtime_before_diff(tmp_p
         ),
     )
 
-    def fake_git_workspace_diff(path):
+    def fake_git_workspace_diff(path, **kwargs):
         assert fake_runtime.closed is True
         return ""
 
@@ -138,7 +142,7 @@ def test_run_coding_agent_task_codex_setup_prompt_failure_short_circuits_scored_
         "contextbench.agents.codex.runtime.prepare_runtime_env",
         lambda task_dir, **kwargs: {"HOME": str(task_dir / "codex-home")},
     )
-    monkeypatch.setattr("contextbench.coding_agents.runtime.git_workspace_diff", lambda path: "")
+    monkeypatch.setattr("contextbench.coding_agents.runtime.git_workspace_diff", lambda path, **kwargs: "")
 
     def fake_build_codex_command(**kwargs):
         phase = "setup" if kwargs["schema_path"] is None else "main"

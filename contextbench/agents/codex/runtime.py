@@ -10,29 +10,72 @@ import shutil
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Callable
 
-from ...artifact_sanitization import SanitizationContext, sanitize_json_value, sanitize_text
 from ...coding_agents.files import ensure_dir, write_json, usage_error
-from ...coding_agents.response_parsing import build_codex_raw_response
-from ...coding_agents.runtime_backends import BaseTaskRuntime
-from ...coding_agents.runtime_common import archive_retry_artifacts, run_command, write_prompt_file
+from ...coding_agents.response_parsing import build_codex_raw_response, structured_output_schema_error
+from ...coding_agents.runtime_backends import BaseTaskRuntime, RuntimeSetupResult
+from ...coding_agents.runtime_common import (
+    archive_retry_artifacts,
+    run_command,
+    SHARED_RETRYABLE_ERROR_SNIPPETS,
+    write_prompt_file,
+)
 from ...coding_agents.types import CodexRawResponse, CommandResult
 from ..adapter_base import CodingAgentInvocationResult
 from .parser import CodexAgentParser
 
 _RETRYABLE_ERROR_SNIPPETS = (
+    *SHARED_RETRYABLE_ERROR_SNIPPETS,
     "failed to connect to websocket",
-    "currently experiencing high demand",
     "missing bearer or basic authentication in header",
     "falling back from websockets to https transport",
 )
 _RETRY_DELAYS_SECONDS = (2, 5)
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_CONTAINER_DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
 def runtime_root(task_dir: Path) -> Path:
     digest = hashlib.sha1(str(task_dir.resolve()).encode("utf-8")).hexdigest()[:20]
     return _REPO_ROOT / ".cache" / "agent-runtimes" / "codex" / digest
+
+
+def runtime_roots(task_dir: Path) -> dict[str, Path]:
+    root = runtime_root(task_dir)
+    home_dir = root / "home"
+    return {
+        "task_dir": task_dir,
+        "runtime_root": root,
+        "home_dir": home_dir,
+        "codex_home": home_dir / ".codex",
+        "xdg_config_home": root / "xdg-config",
+        "xdg_data_home": root / "xdg-data",
+        "xdg_cache_home": root / "xdg-cache",
+    }
+
+
+def apply_runtime_setup_files(
+    task_dir: Path,
+    *,
+    materialized_files: Sequence[dict[str, object]] | None = None,
+    copy_paths: Sequence[dict[str, object]] | None = None,
+) -> None:
+    from ...coding_agents.runtime_common import apply_copy_paths, apply_materialized_files
+
+    apply_copy_paths(copy_paths, roots=runtime_roots(task_dir))
+    apply_materialized_files(materialized_files, roots=runtime_roots(task_dir))
+
+
+def validate_auth_file(auth_path: Path) -> None:
+    try:
+        payload = json.loads(auth_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise usage_error(f"Codex auth file is not valid JSON: {auth_path}") from exc
+    except OSError as exc:
+        raise usage_error(f"Codex auth file could not be read: {auth_path}") from exc
+    if not isinstance(payload, dict):
+        raise usage_error(f"Codex auth file must contain a JSON object: {auth_path}")
 
 
 def build_command(
@@ -85,36 +128,35 @@ def prepare_runtime_env(
     materialized_files: Sequence[dict[str, object]] | None = None,
     copy_paths: Sequence[dict[str, object]] | None = None,
 ) -> dict[str, str]:
-    from ...coding_agents.runtime_common import apply_copy_paths, apply_materialized_files
-
     source_root = source_codex_dir or (Path.home() / ".codex")
     auth_path = source_root / "auth.json"
     if not auth_path.exists():
         raise usage_error(f"Codex auth is unavailable: expected {auth_path}")
+    validate_auth_file(auth_path)
 
-    root = runtime_root(task_dir)
-    home_dir = root / "home"
-    codex_home = home_dir / ".codex"
-    xdg_config_home = root / "xdg-config"
-    xdg_data_home = root / "xdg-data"
-    xdg_cache_home = root / "xdg-cache"
+    roots = runtime_roots(task_dir)
+    home_dir = roots["home_dir"]
+    codex_home = roots["codex_home"]
+    xdg_config_home = roots["xdg_config_home"]
+    xdg_data_home = roots["xdg_data_home"]
+    xdg_cache_home = roots["xdg_cache_home"]
+    local_bin = home_dir / ".local" / "bin"
+    runtime_bin = roots["runtime_root"] / "bin"
 
-    for path in (codex_home, xdg_config_home, xdg_data_home, xdg_cache_home):
+    for path in (codex_home, xdg_config_home, xdg_data_home, xdg_cache_home, local_bin, runtime_bin):
         ensure_dir(path)
 
     shutil.copy2(auth_path, codex_home / "auth.json")
-    runtime_roots = {
-        "task_dir": task_dir,
-        "runtime_root": root,
-        "home_dir": home_dir,
-        "codex_home": codex_home,
-        "xdg_config_home": xdg_config_home,
-        "xdg_data_home": xdg_data_home,
-        "xdg_cache_home": xdg_cache_home,
-    }
-    apply_copy_paths(copy_paths, roots=runtime_roots)
-    apply_materialized_files(materialized_files, roots=runtime_roots)
+    apply_runtime_setup_files(task_dir, materialized_files=materialized_files, copy_paths=copy_paths)
     env = os.environ.copy() if include_host_env else {}
+    if not include_host_env:
+        env["PATH"] = ":".join(
+            [
+                str(local_bin),
+                str(runtime_bin),
+                _CONTAINER_DEFAULT_PATH,
+            ]
+        )
     env.update(
         {
             "HOME": str(home_dir),
@@ -125,6 +167,40 @@ def prepare_runtime_env(
         }
     )
     return env
+
+
+def validate_cli_in_runtime(
+    *,
+    runtime: BaseTaskRuntime,
+    task_dir: Path,
+    workspace_path: Path,
+    timeout: int,
+    env: dict[str, str] | None,
+) -> RuntimeSetupResult | None:
+    command = ["codex", "--version"]
+    stdout_path = task_dir / "codex-version.stdout.log"
+    stderr_path = task_dir / "codex-version.stderr.log"
+    started_at = time.time()
+    result = runtime.run_command(
+        command,
+        cwd=workspace_path,
+        stdin_text=None,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        timeout=min(max(int(timeout), 1), 30),
+        env=env,
+    )
+    completed_at = time.time()
+    if result["ok"]:
+        return None
+    return RuntimeSetupResult(
+        command_result=result,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        command=" ".join(command),
+        started_at=started_at,
+        completed_at=completed_at,
+    )
 
 
 def normalize_reasoning_effort(reasoning_effort: str | None) -> str | None:
@@ -150,13 +226,6 @@ def _raw_response_text(raw_response: CodexRawResponse) -> str:
     return "\n".join(fragments)
 
 
-def _sanitize_text_artifact(path: Path, *, context: SanitizationContext) -> None:
-    if not path.exists():
-        return
-    sanitized = sanitize_text(path.read_text(encoding="utf-8", errors="replace"), context=context)
-    path.write_text(sanitized, encoding="utf-8")
-
-
 def should_retry_failure(
     *,
     command_result: CommandResult,
@@ -168,6 +237,24 @@ def should_retry_failure(
     stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
     haystack = "\n".join((stderr_text, _raw_response_text(raw_response))).lower()
     return any(snippet in haystack for snippet in _RETRYABLE_ERROR_SNIPPETS)
+
+
+def _build_retry_metadata(
+    *,
+    attempts: int,
+    max_attempts: int,
+    events: list[dict[str, object]],
+    suppressed: bool,
+    suppression_reason: str | None,
+) -> dict[str, object]:
+    return {
+        "attempts": attempts,
+        "max_attempts": max_attempts,
+        "retried": attempts > 1,
+        "suppressed": suppressed,
+        "suppression_reason": suppression_reason,
+        "events": events,
+    }
 
 
 def run_invocation(
@@ -187,6 +274,7 @@ def run_invocation(
     env: dict[str, str] | None,
     schema_path: Path | None,
     execution_backend: BaseTaskRuntime | None = None,
+    retry_dirty_check: Callable[[], bool] | None = None,
 ) -> CodingAgentInvocationResult:
     parser = CodexAgentParser()
     prompt_path = write_prompt_file(task_dir, prompt_filename, prompt)
@@ -213,7 +301,12 @@ def run_invocation(
     command_result: CommandResult = {"ok": False, "exit_code": None, "signal": None, "timeout": False}
     max_attempts = len(_RETRY_DELAYS_SECONDS) + 1
     completed_at = started_at
+    attempts_used = 0
+    retry_events: list[dict[str, object]] = []
+    retry_suppressed = False
+    retry_suppression_reason: str | None = None
     for attempt_index in range(1, max_attempts + 1):
+        attempts_used = attempt_index
         for path in (raw_output_path, stderr_path, raw_response_path, final_output_path):
             if path is not None and path.exists():
                 path.unlink()
@@ -239,30 +332,60 @@ def run_invocation(
                 host_runner=run_command,
             )
         completed_at = time.time()
-        sanitize_context = SanitizationContext(
-            repo_root=Path.cwd().resolve(),
-            workspace_path=workspace_path,
-            task_dir=task_dir,
-        )
-        _sanitize_text_artifact(raw_output_path, context=sanitize_context)
-        _sanitize_text_artifact(stderr_path, context=sanitize_context)
-        if final_output_path is not None:
-            _sanitize_text_artifact(final_output_path, context=sanitize_context)
         raw_response = build_codex_raw_response(raw_output_path, final_output_path)
-        raw_response = sanitize_json_value(raw_response, context=sanitize_context)
         write_json(raw_response_path, raw_response)
-        if attempt_index >= max_attempts or not should_retry_failure(
+        retryable_failure = should_retry_failure(
             command_result=command_result,
             raw_response=raw_response,
             stderr_path=stderr_path,
-        ):
+        )
+        if attempt_index >= max_attempts or not retryable_failure:
             break
+        if retry_dirty_check is not None:
+            try:
+                dirty_after_failure = retry_dirty_check()
+            except Exception as exc:
+                dirty_after_failure = True
+                retry_suppression_reason = f"workspace_dirty_check_failed: {exc}"
+            if dirty_after_failure:
+                retry_suppressed = True
+                retry_suppression_reason = retry_suppression_reason or "workspace_dirty_after_failed_attempt"
+                retry_events.append(
+                    {
+                        "attempt": attempt_index,
+                        "action": "suppressed",
+                        "reason": retry_suppression_reason,
+                    }
+                )
+                break
         archive_retry_artifacts(
             [raw_output_path, stderr_path, raw_response_path, final_output_path],
             attempt_index=attempt_index,
         )
+        retry_events.append(
+            {
+                "attempt": attempt_index,
+                "action": "retry",
+                "reason": "transient_failure",
+                "delay_seconds": _RETRY_DELAYS_SECONDS[attempt_index - 1],
+            }
+        )
         time.sleep(_RETRY_DELAYS_SECONDS[attempt_index - 1])
     structured_output = parser.extract_structured_output(raw_response) if schema_path is not None else None
+    schema_validation_note = (
+        structured_output_schema_error(structured_output, schema_path)
+        if structured_output is not None and schema_path is not None
+        else None
+    )
+    if schema_validation_note:
+        structured_output = None
+    diagnostic_note = (
+        "Retry suppressed because the failed attempt modified the workspace; preserving the failed record."
+        if retry_suppressed
+        else None
+    )
+    if schema_validation_note:
+        diagnostic_note = f"{diagnostic_note} {schema_validation_note}" if diagnostic_note else schema_validation_note
     return CodingAgentInvocationResult(
         prompt_path=prompt_path,
         stderr_path=stderr_path,
@@ -271,6 +394,16 @@ def run_invocation(
         structured_output=structured_output,
         token_usage=parser.extract_token_usage(raw_response),
         tool_calls=parser.extract_tool_calls(raw_response),
+        available_tools=parser.extract_available_tools(raw_response),
+        persisted_tool_results=[],
+        diagnostic_note=diagnostic_note,
+        retry=_build_retry_metadata(
+            attempts=attempts_used,
+            max_attempts=max_attempts,
+            events=retry_events,
+            suppressed=retry_suppressed,
+            suppression_reason=retry_suppression_reason,
+        ),
         started_at=started_at,
         completed_at=completed_at,
     )

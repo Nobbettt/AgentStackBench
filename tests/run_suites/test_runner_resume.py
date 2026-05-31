@@ -96,6 +96,248 @@ def test_run_suite_runner_resume_skips_completed_tasks(tmp_path, monkeypatch) ->
     ]
 
 
+def test_run_suite_runner_resume_skips_required_available_tool_records(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    call_log: list[dict[str, object]] = []
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task(call_log))
+    monkeypatch.setattr("contextbench.run_suites_core.runner.remove_worktree", lambda *args, **kwargs: None)
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "resume-required-available-tool",
+            "agent": "claude",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "timeout": 30,
+                "runtime_backend": "host",
+            },
+            "variants": [
+                {
+                    "name": "with-cortex",
+                    "required_available_tool_patterns_add": [r"^mcp__cortex__"],
+                }
+            ],
+            "postprocess": {"convert": False, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    assert RunSuiteRunner(config).run() == 0
+    record_path = (
+        tmp_path
+        / "results"
+        / "resume-required-available-tool"
+        / "variants"
+        / "with-cortex"
+        / "agent_runs"
+        / "claude"
+        / "Verified"
+        / "psf__requests-1000"
+        / "psf__requests-1000.claude-record.json"
+    )
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["available_tools"] = ["Read", "mcp__cortex__context_get_rules"]
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    call_log.clear()
+    assert RunSuiteRunner(config, resume=True).run() == 0
+
+    assert call_log == []
+
+
+def test_run_suite_runner_resume_reruns_completed_records_missing_required_available_tools(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    call_log: list[dict[str, object]] = []
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task(call_log))
+    monkeypatch.setattr("contextbench.run_suites_core.runner.remove_worktree", lambda *args, **kwargs: None)
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "resume-missing-required-available-tool",
+            "agent": "claude",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "timeout": 30,
+                "runtime_backend": "host",
+            },
+            "variants": [
+                {
+                    "name": "with-cortex",
+                    "required_available_tool_patterns_add": [r"^mcp__cortex__"],
+                }
+            ],
+            "postprocess": {"convert": False, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    assert RunSuiteRunner(config).run() == 0
+
+    call_log.clear()
+    assert RunSuiteRunner(config, resume=True).run() == 0
+
+    assert len(call_log) == 1
+    assert call_log[0]["required_available_tool_patterns"] == [r"^mcp__cortex__"]
+
+
+def test_run_suite_runner_resume_skips_required_tool_call_records(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    call_log: list[dict[str, object]] = []
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task(call_log))
+    monkeypatch.setattr("contextbench.run_suites_core.runner.remove_worktree", lambda *args, **kwargs: None)
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "resume-required-tool-call",
+            "agent": "claude",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "timeout": 30,
+                "runtime_backend": "host",
+            },
+            "variants": [
+                {
+                    "name": "with-cortex",
+                    "required_tool_call_patterns_add": [r"^mcp__cortex__"],
+                }
+            ],
+            "postprocess": {"convert": False, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    assert RunSuiteRunner(config).run() == 0
+    record_path = (
+        tmp_path
+        / "results"
+        / "resume-required-tool-call"
+        / "variants"
+        / "with-cortex"
+        / "agent_runs"
+        / "claude"
+        / "Verified"
+        / "psf__requests-1000"
+        / "psf__requests-1000.claude-record.json"
+    )
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["tool_calls"] = [
+        {
+            "source": "claude.tool_use",
+            "tool_name": "mcp__cortex__context_get_rules",
+            "payload": {"mcp_server": "cortex", "mcp_tool": "context_get_rules", "result": {"is_error": False}},
+        }
+    ]
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    call_log.clear()
+    assert RunSuiteRunner(config, resume=True).run() == 0
+
+    assert call_log == []
+
+
+def test_run_suite_runner_resume_reruns_completed_records_missing_required_tool_calls(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    call_log: list[dict[str, object]] = []
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task(call_log))
+    monkeypatch.setattr("contextbench.run_suites_core.runner.remove_worktree", lambda *args, **kwargs: None)
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "resume-missing-required-tool-call",
+            "agent": "claude",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "timeout": 30,
+                "runtime_backend": "host",
+            },
+            "variants": [
+                {
+                    "name": "with-cortex",
+                    "required_tool_call_patterns_add": [r"^mcp__cortex__"],
+                }
+            ],
+            "postprocess": {"convert": False, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    assert RunSuiteRunner(config).run() == 0
+
+    call_log.clear()
+    assert RunSuiteRunner(config, resume=True).run() == 0
+
+    assert len(call_log) == 1
+    assert call_log[0]["required_tool_call_patterns"] == [r"^mcp__cortex__"]
+
+
+def test_run_suite_runner_resume_reruns_only_variant_missing_required_available_tools(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    call_log: list[dict[str, object]] = []
+    cleanup_calls: list[tuple[str, str, str]] = []
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task(call_log))
+    monkeypatch.setattr(
+        "contextbench.run_suites_core.runner.remove_worktree",
+        lambda repo_url, cache_dir, worktree_dir: cleanup_calls.append((repo_url, cache_dir, worktree_dir)),
+    )
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "resume-required-available-partial",
+            "agent": "claude",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "timeout": 30,
+                "runtime_backend": "host",
+            },
+            "variants": [
+                {"name": "baseline"},
+                {
+                    "name": "with-cortex",
+                    "required_available_tool_patterns_add": [r"^mcp__cortex__"],
+                },
+            ],
+            "parallelism": {"max_workers": 2},
+            "postprocess": {"convert": False, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    assert RunSuiteRunner(config).run() == 0
+    assert RunSuiteRunner(config, resume=True).run() == 0
+
+    assert len(call_log) == 3
+    assert len(cleanup_calls) == 3
+    slugs = [str(call["workspace_key"]).rsplit("__", 1)[-1] for call in call_log]
+    assert sorted(slugs[:2]) == ["baseline", "with-cortex"]
+    assert slugs[2:] == ["with-cortex"]
+    assert call_log[-1]["required_available_tool_patterns"] == [r"^mcp__cortex__"]
+
+
 def test_run_suite_runner_resume_reruns_completed_ok_false_records(tmp_path, monkeypatch) -> None:
     task_data, task_csv = _write_task_inputs(tmp_path, count=1)
     call_log: list[dict[str, object]] = []
@@ -148,6 +390,50 @@ def test_run_suite_runner_resume_reruns_completed_ok_false_records(tmp_path, mon
     assert manifest["variants"][0]["task_counts"]["failed"] == 0
 
 
+def test_run_suite_runner_resume_reruns_completed_schema_invalid_records(tmp_path, monkeypatch) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    call_log: list[dict[str, object]] = []
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task(call_log))
+    monkeypatch.setattr("contextbench.run_suites_core.runner.remove_worktree", lambda *args, **kwargs: None)
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "resume-schema-invalid",
+            "agent": "codex",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "timeout": 30,
+            },
+            "variants": [{"name": "baseline"}],
+            "postprocess": {"convert": False, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    assert RunSuiteRunner(config).run() == 0
+    record_path = (
+        tmp_path
+        / "results"
+        / "resume-schema-invalid"
+        / "variants"
+        / "baseline"
+        / "agent_runs"
+        / "codex"
+        / "Verified"
+        / "psf__requests-1000"
+        / "psf__requests-1000.codex-record.json"
+    )
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["final_output"]["task_id"] = "psf__requests-1000"
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    assert RunSuiteRunner(config, resume=True).run() == 0
+
+    assert len(call_log) == 2
+
+
 def test_run_suite_runner_resume_regenerates_conversion_when_record_changes(tmp_path, monkeypatch) -> None:
     task_data, task_csv = _write_task_inputs(tmp_path, count=1)
     call_log: list[dict[str, object]] = []
@@ -186,9 +472,8 @@ def test_run_suite_runner_resume_regenerates_conversion_when_record_changes(tmp_
     )
     record = json.loads(record_path.read_text(encoding="utf-8"))
     record["final_output"]["retrieved_context_files"] = ["requests/sessions.py"]
-    record["final_output"]["retrieved_context_spans"] = {"requests/sessions.py": [{"start": 1, "end": 2}]}
-    record["final_output"]["retrieved_context_symbols"] = {}
-    record["final_output"]["retrieval_steps"] = []
+    record["final_output"]["retrieved_context_spans"] = [{"file": "requests/sessions.py", "start": 1, "end": 2}]
+    record["final_output"]["retrieved_context_symbols"] = []
     record_path.write_text(json.dumps(record), encoding="utf-8")
 
     assert RunSuiteRunner(config, resume=True).run() == 0
@@ -313,7 +598,49 @@ def test_run_suite_runner_resume_rejects_model_change(tmp_path, monkeypatch) -> 
         RunSuiteRunner(config_second, resume=True).run()
 
 
-def test_run_suite_runner_resume_reruns_full_task_fanout_when_one_variant_is_missing(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("variant_override", "experiment_name"),
+    [
+        ({"required_available_tool_patterns_add": [r"^mcp__cortex__"]}, "resume-required-available-change"),
+        ({"required_tool_call_patterns_add": [r"^mcp__cortex__"]}, "resume-required-call-change"),
+    ],
+)
+def test_run_suite_runner_resume_rejects_validation_gate_change(
+    tmp_path,
+    monkeypatch,
+    variant_override,
+    experiment_name,
+) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    call_log: list[dict[str, object]] = []
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task(call_log))
+    monkeypatch.setattr("contextbench.run_suites_core.runner.remove_worktree", lambda *args, **kwargs: None)
+
+    base_config = {
+        "experiment_name": experiment_name,
+        "agent": "claude",
+        "base_run": {
+            "task_data": str(task_data),
+            "task_csv": str(task_csv),
+            "output_root": str(tmp_path / "results"),
+            "repo_cache": str(tmp_path / "cache"),
+            "timeout": 30,
+            "runtime_backend": "host",
+        },
+        "variants": [{"name": "baseline"}],
+        "postprocess": {"convert": False, "evaluate": False, "runtime_backend": "host"},
+    }
+    config_first = RunSuiteConfig.model_validate(base_config)
+    config_second_payload = dict(base_config)
+    config_second_payload["variants"] = [{"name": "baseline", **variant_override}]
+    config_second = RunSuiteConfig.model_validate(config_second_payload)
+
+    assert RunSuiteRunner(config_first).run() == 0
+    with pytest.raises(RuntimeError, match="already exists with a different effective config"):
+        RunSuiteRunner(config_second, resume=True).run()
+
+
+def test_run_suite_runner_resume_reruns_only_missing_variant(tmp_path, monkeypatch) -> None:
     task_data, task_csv = _write_task_inputs(tmp_path, count=1)
     call_log: list[dict[str, object]] = []
     cleanup_calls: list[tuple[str, str, str]] = []
@@ -361,7 +688,10 @@ def test_run_suite_runner_resume_reruns_full_task_fanout_when_one_variant_is_mis
 
     assert first_rc == 0
     assert second_rc == 0
-    assert len(call_log) == 4
-    assert len(cleanup_calls) == 4
+    assert len(call_log) == 3
+    assert len(cleanup_calls) == 3
+    slugs = [str(call["workspace_key"]).rsplit("__", 1)[-1] for call in call_log]
+    assert sorted(slugs[:2]) == ["baseline", "plugin"]
+    assert slugs[2:] == ["plugin"]
     assert all(variant["task_counts"]["completed"] == 1 for variant in manifest["variants"])
     assert all(variant["task_counts"]["skipped"] == 0 for variant in manifest["variants"])

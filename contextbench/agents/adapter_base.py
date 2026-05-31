@@ -6,12 +6,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from ..coding_agents.types import CommandResult, StructuredOutput, TokenUsage, ToolCall
 
 if TYPE_CHECKING:
     from .base import BaseCodingAgentParser
+    from ..coding_agents.runtime_backends import RuntimeSetupResult
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,10 @@ class CodingAgentInvocationResult:
     structured_output: StructuredOutput | None
     token_usage: TokenUsage | None
     tool_calls: list[ToolCall]
+    available_tools: list[str]
+    persisted_tool_results: list[dict[str, object]]
+    diagnostic_note: str | None
+    retry: dict[str, object]
     started_at: float
     completed_at: float
 
@@ -47,6 +52,7 @@ class BaseCodingAgentAdapter(ABC):
     output_schema_path: Path
     supported_reasoning_efforts: frozenset[str] = frozenset()
     supported_runtime_target_roots: frozenset[str] = frozenset()
+    supports_available_tools: bool = False
 
     @property
     def all_names(self) -> tuple[str, ...]:
@@ -74,8 +80,25 @@ class BaseCodingAgentAdapter(ABC):
         setup: dict[str, object],
         env_overrides: dict[str, str] | None,
         runtime_backend: str,
+        runtime_env: dict[str, str] | None = None,
     ) -> PreparedCodingAgentRuntime:
         """Prepare adapter-specific runtime state for the task."""
+
+    def validate_pre_invocation_runtime(
+        self,
+        *,
+        task_dir: Path,
+        workspace_path: Path,
+        timeout: int,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        extra_args: tuple[str, ...] = (),
+        prepared_runtime: PreparedCodingAgentRuntime,
+    ) -> "RuntimeSetupResult | None":
+        """Validate the selected runtime before setup prompts or scored work run."""
+
+        del task_dir, workspace_path, timeout, model, reasoning_effort, extra_args, prepared_runtime
+        return None
 
     @abstractmethod
     def run_setup_invocation(
@@ -89,6 +112,7 @@ class BaseCodingAgentAdapter(ABC):
         reasoning_effort: str | None,
         extra_args: tuple[str, ...],
         prepared_runtime: PreparedCodingAgentRuntime,
+        retry_dirty_check: Callable[[], bool] | None = None,
     ) -> CodingAgentInvocationResult:
         """Run the unscored setup phase in an already-prepared runtime."""
 
@@ -105,5 +129,6 @@ class BaseCodingAgentAdapter(ABC):
         extra_args: tuple[str, ...],
         schema_path: Path,
         prepared_runtime: PreparedCodingAgentRuntime,
+        retry_dirty_check: Callable[[], bool] | None = None,
     ) -> CodingAgentInvocationResult:
         """Run the scored benchmark phase in an already-prepared runtime."""

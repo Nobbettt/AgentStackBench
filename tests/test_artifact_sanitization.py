@@ -26,13 +26,15 @@ def test_sanitize_text_rewrites_worktree_and_home_paths() -> None:
     text = (
         "opened /Users/nobbe/Repos/ContextBench/.cache/worktrees/contextbench_worktrees/"
         "github.com__django__django/django/db/models.py and /Users/nobbe/.codex/auth.json "
-        "plus /private/var/folders/abc/T/contextbench_worktrees/github.com__django__django/django/forms.py"
+        "plus /private/var/folders/abc/T/contextbench_worktrees/github.com__django__django/django/forms.py "
+        "and root /Users/nobbe/Repos/ContextBench/.cache/worktrees/contextbench_worktrees/"
     )
 
     sanitized = sanitize_text(text, context=context)
 
     assert "<worktree>/db/models.py" in sanitized
     assert "<worktree>/github.com__django__django/django/forms.py" in sanitized
+    assert "root <worktree>" in sanitized
     assert "<home>/.codex/auth.json" in sanitized
     assert find_private_path_matches(sanitized) == []
 
@@ -66,6 +68,26 @@ def test_sanitize_text_rewrites_env_path_segments_after_colon() -> None:
     assert "/var/folders" not in sanitized
     assert "PYTHONPATH=src:<tmp>" in sanitized
     assert find_private_path_matches(sanitized) == []
+
+
+def test_sanitize_text_rewrites_agent_runtime_paths() -> None:
+    repo_root = Path("/Users/nobbe/Repos/ContextBench")
+    raw = (
+        "memory at /Users/nobbe/Repos/ContextBench/.cache/agent-runtimes/claude/"
+        "abc123/home/.claude/projects/-Users-nobbe-Repos-ContextBench--cache-repos/memory/ "
+        "and redacted root <contextbench-root>/.cache/agent-runtimes/codex/"
+        "def456/home/.codex/sessions/session.jsonl "
+        "and relative ../../../../agent-runtimes/codex/def456/home/.local/lib/site.py"
+    )
+
+    sanitized = sanitize_text(raw, context=SanitizationContext(repo_root=repo_root))
+
+    assert "<agent-runtime>" in sanitized
+    assert "agent-runtimes" not in sanitized
+    assert "Users-nobbe" not in sanitized
+    assert find_private_path_matches(sanitized) == []
+    assert find_private_path_matches("<contextbench-root>/.cache/agent-runtimes/claude/abc123")
+    assert find_private_path_matches("../../../../agent-runtimes/codex/def456/home/.local/lib/site.py")
 
 
 def test_sanitize_artifact_tree_writes_publishable_copy(tmp_path: Path) -> None:

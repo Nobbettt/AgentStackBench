@@ -34,18 +34,22 @@ def make_final_output():
         final_answer: str = "done",
         status: str = "completed",
         notes: str = "",
+        include_legacy_fields: bool = False,
     ) -> dict[str, object]:
-        return {
-            "task_id": task_id,
+        payload: dict[str, object] = {
             "status": status,
             "final_answer": final_answer,
-            "touched_files": touched_files or [],
-            "retrieval_steps": retrieval_steps or [],
             "retrieved_context_files": retrieved_context_files or [],
             "retrieved_context_spans": retrieved_context_spans or [],
             "retrieved_context_symbols": retrieved_context_symbols or [],
             "notes": notes,
         }
+        if include_legacy_fields:
+            if task_id is not None:
+                payload["task_id"] = task_id
+            payload["touched_files"] = touched_files or []
+            payload["retrieval_steps"] = retrieval_steps or []
+        return payload
 
     return _make_final_output
 

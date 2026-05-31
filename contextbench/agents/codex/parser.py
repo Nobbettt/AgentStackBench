@@ -6,8 +6,66 @@ from __future__ import annotations
 from ..base import BaseCodingAgentParser
 from ...coding_agents.inference_limits import MAX_COMMAND_OUTPUT_CHARS
 from ...coding_agents.response_parsing import extract_structured_output_from_value
-from ...coding_agents.trace_inference import infer_retrieval_step_from_command, trajectory_from_steps
+from ...coding_agents.trace_inference import (
+    infer_retrieval_step_from_command,
+    infer_retrieval_step_from_tool_result,
+    tool_result_text_from_value,
+    trajectory_from_steps,
+)
 from ...coding_agents.types import CodexRawResponse, StructuredOutput, TokenUsage, ToolCall, TraceInferenceMeta, TrajectoryData
+
+
+def _codex_tool_name(event: dict[str, object], item: dict[str, object] | None = None) -> str:
+    sources = [source for source in (item, event) if isinstance(source, dict)]
+    for source in sources:
+        for key in ("tool_name", "toolName", "name"):
+            value = str(source.get(key) or "").strip()
+            if value.startswith("mcp__"):
+                return value
+
+    for source in sources:
+        server = str(
+            source.get("mcp_server")
+            or source.get("mcpServer")
+            or source.get("server_name")
+            or source.get("serverName")
+            or source.get("server")
+            or ""
+        ).strip()
+        tool = str(
+            source.get("mcp_tool")
+            or source.get("mcpTool")
+            or source.get("tool_name")
+            or source.get("toolName")
+            or source.get("name")
+            or ""
+        ).strip()
+        if tool.startswith("mcp__"):
+            return tool
+        if server and tool:
+            return f"mcp__{server}__{tool}"
+
+    for source in sources:
+        for key in ("tool_name", "toolName", "name", "type"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return "unknown"
+
+
+def _codex_tool_payload(event: dict[str, object], item: dict[str, object]) -> dict[str, object]:
+    payload = dict(item)
+    payload.setdefault("event_type", event.get("type"))
+    for key in ("status", "error", "is_error", "tool_name", "name"):
+        if key not in payload and key in event:
+            payload[key] = event[key]
+    tool_name = _codex_tool_name(event, item)
+    if tool_name.startswith("mcp__"):
+        parts = tool_name.split("__", 2)
+        if len(parts) >= 3:
+            payload.setdefault("mcp_server", parts[1])
+            payload.setdefault("mcp_tool", parts[2])
+    return payload
 
 
 class CodexAgentParser(BaseCodingAgentParser):
@@ -71,12 +129,30 @@ class CodexAgentParser(BaseCodingAgentParser):
             if not isinstance(event, dict):
                 continue
             event_type = str(event.get("type") or "")
-            if "tool" not in event_type.lower() and "mcp" not in event_type.lower():
+            event_type_lower = event_type.lower()
+            item = event.get("item")
+            if isinstance(item, dict):
+                item_type_lower = str(item.get("type") or "").lower()
+                if (
+                    "tool" in item_type_lower
+                    or "mcp" in item_type_lower
+                    or "tool" in event_type_lower
+                    or "mcp" in event_type_lower
+                ):
+                    calls.append(
+                        {
+                            "source": "codex.item",
+                            "tool_name": _codex_tool_name(event, item),
+                            "payload": _codex_tool_payload(event, item),
+                        }
+                    )
+                    continue
+            if "tool" not in event_type_lower and "mcp" not in event_type_lower:
                 continue
             calls.append(
                 {
                     "source": "codex.event",
-                    "tool_name": str(event.get("tool_name") or event.get("type") or "unknown"),
+                    "tool_name": _codex_tool_name(event),
                     "payload": dict(event),
                 }
             )
@@ -123,6 +199,34 @@ class CodexAgentParser(BaseCodingAgentParser):
                     output_text = ""
                 step = infer_retrieval_step_from_command(
                     command,
+                    output_text=output_text,
+                    workspace_path=workspace_path,
+                    meta=meta,
+                )
+                if step:
+                    steps.append(step)
+                continue
+            event_type = str(event.get("type") or "").lower()
+            if (
+                "tool" in item_type.lower()
+                or "mcp" in item_type.lower()
+                or "tool" in event_type
+                or "mcp" in event_type
+            ):
+                if str(item.get("status") or "completed") not in {"completed", "success", "succeeded", ""}:
+                    continue
+                if bool(item.get("is_error") or item.get("error")):
+                    continue
+                result_value = item.get("result")
+                if result_value is None:
+                    result_value = item.get("output")
+                if result_value is None:
+                    result_value = item.get("content")
+                if result_value is None:
+                    result_value = item
+                output_text = tool_result_text_from_value(result_value)
+                step = infer_retrieval_step_from_tool_result(
+                    result_value,
                     output_text=output_text,
                     workspace_path=workspace_path,
                     meta=meta,

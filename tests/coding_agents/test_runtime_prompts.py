@@ -61,6 +61,10 @@ def test_build_prompt_includes_benchmark_guidance_and_omits_identity_echo() -> N
         assert "Work inside the checked-out repository workspace for this task." in prompt
         assert 'set the final schema status to "completed"' in prompt
         assert 'Reserve "partial" only for genuinely unfinished implementation' in prompt
+        assert "exactly these top-level fields" in prompt
+        assert "never put one required field inside another field" in prompt
+        assert "do not put JSON, XML, tags, or schema fields inside notes" in prompt
+        assert "Do not add extra bookkeeping fields beyond the required schema." in prompt
         assert "Fix it." in prompt
     assert "Task ID:" not in codex_prompt
     assert "Task ID:" not in claude_prompt

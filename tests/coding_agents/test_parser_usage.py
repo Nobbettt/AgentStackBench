@@ -116,6 +116,37 @@ def test_claude_parser_extracts_usage_from_response_usage() -> None:
         "server_tool_use": {"web_search_requests": 1, "web_fetch_requests": 0},
     }
 
+
+def test_claude_parser_extracts_reasoning_tokens_from_usage_details() -> None:
+    parser = ClaudeAgentParser()
+    raw_response = {
+        "agent": "claude",
+        "response_format": "json",
+        "response": [
+            {
+                "type": "result",
+                "usage": {
+                    "input_tokens": 20,
+                    "output_tokens": 9,
+                    "total_tokens": 31,
+                    "output_tokens_details": {"reasoning_tokens": 2},
+                },
+            }
+        ],
+    }
+
+    usage = parser.extract_token_usage(raw_response)
+
+    assert usage == {
+        "source": "claude.response.usage",
+        "input_tokens": 20,
+        "output_tokens": 9,
+        "total_tokens": 31,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "reasoning_tokens": 2,
+    }
+
 def test_claude_parser_returns_none_when_usage_missing() -> None:
     parser = ClaudeAgentParser()
 

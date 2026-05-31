@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=None)
     parser.add_argument("--agent-arg", action="append", default=[])
     parser.add_argument("--runtime-env", action="append", default=[])
+    parser.add_argument("--runtime-platform", default=None)
     return parser.parse_args()
 
 
@@ -56,6 +57,7 @@ def main() -> int:
             model=args.model,
             agent_args=args.agent_arg,
             runtime_backend="docker",
+            runtime_platform=args.runtime_platform,
             runtime_env=runtime_env,
         )
     except Exception as exc:

@@ -8,14 +8,18 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import os
 import shutil
+import subprocess
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..agents.registry import get_coding_agent_adapter
+from ..agents.claude.runtime import claude_portable_auth_sources
 from ..artifact_sanitization import (
     SanitizationContext,
     assert_no_private_paths,
@@ -25,7 +29,12 @@ from ..artifact_sanitization import (
 )
 from ..coding_agents.constants import DEFAULT_SUBSET_CSV
 from ..coding_agents.files import append_jsonl, ensure_dir, read_json, safe_path_component, write_json
-from ..coding_agents.runtime import run_coding_agent_task
+from ..coding_agents.response_parsing import structured_output_schema_error
+from ..coding_agents.runtime import (
+    missing_required_available_tool_patterns,
+    missing_required_tool_call_patterns,
+    run_coding_agent_task,
+)
 from ..coding_agents.task_data import count_task_rows, load_tasks
 from ..core.repo import remove_worktree
 from ..extractors import available as treesitter_available
@@ -45,6 +54,7 @@ from .postprocess import (
     _docker_host_socket_path,
     _docker_image_available,
     _docker_image_id,
+    _docker_image_platform,
     _postprocess_image_supports_evaluation,
     _run_resolution_command,
     convert_records_to_jsonl,
@@ -55,6 +65,45 @@ from .postprocess import (
 from .types import EffectiveVariantConfig, RunSuiteConfig
 
 _POSTPROCESS_FINGERPRINT_VERSION = 4
+
+
+def _claude_host_auth_status_summary() -> dict[str, object]:
+    """Return a redacted host Claude auth status summary for diagnostics."""
+
+    try:
+        result = subprocess.run(
+            ["claude", "auth", "status", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "checked": False,
+            "logged_in": None,
+            "error": type(exc).__name__,
+        }
+
+    summary: dict[str, object] = {
+        "checked": True,
+        "exit_code": result.returncode,
+        "logged_in": None,
+    }
+    if result.returncode != 0:
+        return summary
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        summary["parse_error"] = True
+        return summary
+
+    summary["logged_in"] = payload.get("loggedIn") is True
+    for key in ("authMethod", "apiProvider", "subscriptionType"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            summary[key] = value
+    return summary
 
 
 @dataclass
@@ -190,6 +239,7 @@ class RunSuiteRunner:
             "count": len(tasks),
             "source_count": source_count,
             "selection_kind": self._task_selection_kind(source_count=source_count, selected_count=len(tasks)),
+            "selection_assertion": base.selection_assertion,
             "hash": stable_json_hash(task_index),
             "bench_counts": dict(sorted(bench_counts.items())),
             "task_ids": [task_key(task) for task in tasks],
@@ -226,20 +276,16 @@ class RunSuiteRunner:
     def _validate_preflight(self, tasks: list[dict[str, object]], variants: list[EffectiveVariantConfig]) -> None:
         failures: list[dict[str, object]] = []
 
-        full_markers = " ".join(
-            str(item or "")
-            for item in (self.config.experiment_name, self.config.description)
-        ).lower()
-        if "full" in full_markers and self.config.base_run.limit > 0:
-            failures.append(
-                {
-                    "kind": "limited_full_suite_config",
-                    "limit": self.config.base_run.limit,
-                    "message": "Run-suite name/description indicates a full run, but base_run.limit is nonzero.",
-                }
-            )
-        if "full" in full_markers:
-            base = self.config.base_run
+        base = self.config.base_run
+        if base.selection_assertion == "full_dataset":
+            if base.limit > 0:
+                failures.append(
+                    {
+                        "kind": "limited_full_dataset_assertion",
+                        "limit": base.limit,
+                        "message": "base_run.selection_assertion='full_dataset' requires base_run.limit=0.",
+                    }
+                )
             selectors: dict[str, object] = {}
             if base.task_csv is not None:
                 selectors["task_csv"] = str(base.task_csv)
@@ -252,14 +298,84 @@ class RunSuiteRunner:
             if selectors:
                 failures.append(
                     {
-                        "kind": "selected_full_suite_config",
+                        "kind": "selected_full_dataset_assertion",
                         "selectors": selectors,
                         "message": (
-                            "Run-suite name/description indicates a full run, but task selection filters are configured. "
+                            "base_run.selection_assertion='full_dataset' is set, but task selection filters are configured. "
                             "Use task_csv=null, subset_csv=null, bench=null, instances=null, and limit=0 for the full dataset."
                         ),
                     }
                 )
+
+        unsupported_available_tool_requirements = []
+        for variant in variants:
+            if not variant.required_available_tool_patterns:
+                continue
+            adapter = get_coding_agent_adapter(variant.agent)
+            if not adapter.supports_available_tools:
+                unsupported_available_tool_requirements.append(
+                    {
+                        "variant": variant.name,
+                        "agent": variant.agent,
+                        "patterns": list(variant.required_available_tool_patterns),
+                    }
+                )
+        if unsupported_available_tool_requirements:
+            failures.append(
+                {
+                    "kind": "required_available_tools_unsupported",
+                    "requirements": unsupported_available_tool_requirements,
+                    "message": (
+                        "required_available_tool_patterns requires an adapter that can report runtime-advertised tools."
+                    ),
+                }
+            )
+
+        missing_claude_docker_auth: list[dict[str, object]] = []
+        host_claude_auth_status: dict[str, object] | None = None
+        for variant in variants:
+            if variant.agent != "claude" or variant.runtime_backend != "docker":
+                continue
+            auth_sources = claude_portable_auth_sources(
+                env={
+                    **os.environ,
+                    **variant.runtime_env,
+                    **variant.env,
+                }
+            )
+            if auth_sources["env_vars"] or auth_sources["files"]:
+                continue
+            if host_claude_auth_status is None:
+                host_claude_auth_status = _claude_host_auth_status_summary()
+            missing_claude_docker_auth.append(
+                {
+                    "variant": variant.name,
+                    "source_config_dir": auth_sources["source_config_dir"],
+                    "checked_env_vars": auth_sources["checked_env_vars"],
+                    "checked_files": auth_sources["checked_files"],
+                }
+            )
+        if missing_claude_docker_auth:
+            logged_in = bool((host_claude_auth_status or {}).get("logged_in"))
+            message = (
+                "Claude Docker runtime requires portable auth, but none was found. "
+                "Host Claude login can use local keychain state that is not visible inside Docker. "
+                "Run `claude setup-token` and export CLAUDE_CODE_OAUTH_TOKEN in the same shell, "
+                "or place CLAUDE_CODE_OAUTH_TOKEN in an ignored runtime_env_file referenced by the run config."
+            )
+            if logged_in:
+                message = (
+                    "Host Claude appears logged in, but no portable Claude auth was found for Docker. "
+                    + message
+                )
+            failures.append(
+                {
+                    "kind": "claude_docker_portable_auth_unavailable",
+                    "variants": missing_claude_docker_auth,
+                    "host_auth": host_claude_auth_status,
+                    "message": message,
+                }
+            )
 
         gold_loader = None
         if self.config.postprocess.evaluate and not self.skip_evaluate:
@@ -342,30 +458,35 @@ class RunSuiteRunner:
                     {
                         "variant": variant.name,
                         "image": variant.runtime_image,
+                        "platform": variant.runtime_platform,
                     }
                     for variant in variants
                     if variant.runtime_backend == "docker" and not _docker_image_available(variant.runtime_image)
                 ]
                 if missing_images:
                     failures.append({"kind": "runtime_image_missing", "images": missing_images})
-
-        claude_docker_variants = [
-            variant.name
-            for variant in variants
-            if variant.agent == "claude" and variant.runtime_backend == "docker"
-        ]
-        if claude_docker_variants:
-            failures.append(
-                {
-                    "kind": "claude_docker_auth_unsupported",
-                    "variants": claude_docker_variants,
-                    "message": (
-                        "Claude Docker runtime is not enabled because local Claude authentication is not "
-                        "copied into the container. Use runtime_backend='host' for Claude until a deterministic "
-                        "container auth path is implemented."
-                    ),
-                }
-            )
+                platform_mismatches = []
+                for variant in variants:
+                    if variant.runtime_backend != "docker" or not variant.runtime_platform:
+                        continue
+                    actual_platform = _docker_image_platform(variant.runtime_image)
+                    if actual_platform and actual_platform != variant.runtime_platform:
+                        platform_mismatches.append(
+                            {
+                                "variant": variant.name,
+                                "image": variant.runtime_image,
+                                "expected_platform": variant.runtime_platform,
+                                "actual_platform": actual_platform,
+                            }
+                        )
+                if platform_mismatches:
+                    failures.append(
+                        {
+                            "kind": "runtime_image_platform_mismatch",
+                            "images": platform_mismatches,
+                            "message": "Docker runtime image platform does not match configured runtime_platform.",
+                        }
+                    )
 
         missing_prompt = [
             str(task.get("instance_id") or task.get("original_inst_id") or "").strip()
@@ -851,8 +972,75 @@ class RunSuiteRunner:
             return False
         return bool(str(record.get("model_patch") or "").strip())
 
+    def _variant_task_is_resume_complete(self, state: _PreparedVariant, task: dict[str, object]) -> bool:
+        record_path = self._task_record_path(state, task)
+        return (
+            self._record_is_resume_complete(record_path)
+            and self._record_satisfies_output_schema(state, record_path)
+            and self._record_satisfies_required_available_tools(
+                state,
+                record_path,
+            )
+            and self._record_satisfies_required_tool_calls(
+                state,
+                record_path,
+            )
+        )
+
     def _task_is_resume_complete(self, states: list[_PreparedVariant], task: dict[str, object]) -> bool:
-        return all(self._record_is_resume_complete(self._task_record_path(state, task)) for state in states)
+        return all(self._variant_task_is_resume_complete(state, task) for state in states)
+
+    def _record_satisfies_required_available_tools(self, state: _PreparedVariant, record_path: Path) -> bool:
+        patterns = state.variant.required_available_tool_patterns
+        if not patterns:
+            return True
+        try:
+            record = read_json(record_path)
+        except Exception:
+            return False
+        if not isinstance(record, dict):
+            return False
+        available_tools = record.get("available_tools")
+        if not isinstance(available_tools, list):
+            try:
+                parser = get_coding_agent_adapter(state.variant.agent).create_parser()
+                raw_response = parser.load_raw_response(record)
+                available_tools = parser.extract_available_tools(raw_response) if raw_response is not None else []
+            except Exception:
+                available_tools = []
+        return not missing_required_available_tool_patterns(available_tools, patterns)
+
+    def _record_satisfies_required_tool_calls(self, state: _PreparedVariant, record_path: Path) -> bool:
+        patterns = state.variant.required_tool_call_patterns
+        if not patterns:
+            return True
+        try:
+            record = read_json(record_path)
+        except Exception:
+            return False
+        if not isinstance(record, dict):
+            return False
+        tool_calls = record.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            try:
+                parser = get_coding_agent_adapter(state.variant.agent).create_parser()
+                raw_response = parser.load_raw_response(record)
+                tool_calls = parser.extract_tool_calls(raw_response) if raw_response is not None else []
+            except Exception:
+                tool_calls = []
+        return not missing_required_tool_call_patterns(tool_calls, patterns)
+
+    def _record_satisfies_output_schema(self, state: _PreparedVariant, record_path: Path) -> bool:
+        try:
+            record = read_json(record_path)
+        except Exception:
+            return False
+        if not isinstance(record, dict):
+            return False
+        final_output = record.get("final_output")
+        if not isinstance(final_output, dict):
+            return False
+        return structured_output_schema_error(final_output, state.variant.schema_path) is None
 
     def _workspace_key(self, state: _PreparedVariant, task: dict[str, object]) -> str:
         parts = [
@@ -881,8 +1069,17 @@ class RunSuiteRunner:
             workspace_key=self._workspace_key(state, task),
             runtime_backend=state.variant.runtime_backend,
             runtime_image=state.variant.runtime_image,
+            runtime_platform=state.variant.runtime_platform,
             runtime_env=state.variant.runtime_env,
+            runtime_setup_timeout=state.variant.runtime_setup_timeout,
+            runtime_validation_timeout=state.variant.runtime_validation_timeout,
+            runtime_setup_cache=state.variant.runtime_setup_cache,
+            runtime_setup_cache_dir=state.variant.runtime_setup_cache_dir,
             runtime_setup_commands=state.variant.runtime_setup_commands,
+            runtime_validation_commands=state.variant.runtime_validation_commands,
+            diff_exclude_paths=state.variant.diff_exclude_paths,
+            required_tool_call_patterns=state.variant.required_tool_call_patterns,
+            required_available_tool_patterns=state.variant.required_available_tool_patterns,
             runtime_keep_failed=state.variant.runtime_keep_failed,
         )
         cleanup_error: str | None = None
@@ -1468,29 +1665,37 @@ class RunSuiteRunner:
             variant_entries=variant_entries,
         )
 
-        workers = min(self.max_workers, len(states))
         for index, task in enumerate(tasks, start=1):
             task_id = task_key(task) or f"task-{index}"
             bench = str(task.get("bench") or "Verified")
-            if self.resume and self._task_is_resume_complete(states, task):
-                print(f"[task {index}/{len(tasks)}] skip {bench} | {task_id}", flush=True)
-                for state in states:
+            runnable_states = states
+            if self.resume:
+                runnable_states = [
+                    state for state in states if not self._variant_task_is_resume_complete(state, task)
+                ]
+                runnable_state_ids = {id(state) for state in runnable_states}
+                skipped_states = [state for state in states if id(state) not in runnable_state_ids]
+                if not runnable_states:
+                    print(f"[task {index}/{len(tasks)}] skip {bench} | {task_id}", flush=True)
+                    for state in states:
+                        self._record_skipped_task(state, task, task_id)
+                    self._write_manifest(
+                        started_at=started_at,
+                        completed_at=None,
+                        task_set=task_set,
+                        variant_entries=variant_entries,
+                    )
+                    continue
+                for state in skipped_states:
                     self._record_skipped_task(state, task, task_id)
-                self._write_manifest(
-                    started_at=started_at,
-                    completed_at=None,
-                    task_set=task_set,
-                    variant_entries=variant_entries,
-                )
-                continue
 
             print(f"[task {index}/{len(tasks)}] run {bench} | {task_id}", flush=True)
-            for state in states:
+            for state in runnable_states:
                 self._clear_task_outputs(state, task)
 
             future_map = {}
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                for state in states:
+            with ThreadPoolExecutor(max_workers=min(self.max_workers, len(runnable_states))) as executor:
+                for state in runnable_states:
                     future = executor.submit(self._run_variant_task, state, task)
                     future_map[future] = state
 

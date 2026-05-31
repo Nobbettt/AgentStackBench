@@ -131,7 +131,7 @@ export function formatAbsoluteMetricDelta(metric: MetricDefinition, delta: numbe
   if (metric.key === "averageDuration") return formatDurationDelta(delta);
   if (metric.key === "estimatedCost") return `${delta > 0 ? "+" : delta < 0 ? "-" : ""}$${Math.abs(delta).toFixed(2)}`;
   if (metric.key === "totalTokens") return `${delta > 0 ? "+" : delta < 0 ? "-" : ""}${formatCompactMagnitude(delta)}`;
-  if (["toolCalls", "skillInvocations"].includes(metric.key)) {
+  if (["toolCalls", "mcpToolCalls", "commandExecutions", "readToolCalls", "editToolCalls", "skillInvocations"].includes(metric.key)) {
     return Number.isInteger(delta) ? formatSignedFixed(delta, 0) : formatSignedFixed(delta, 2);
   }
   if (["averageSteps", "avgLinesPerStep"].includes(metric.key)) return formatSignedFixed(delta, 2);

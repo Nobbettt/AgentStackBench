@@ -42,7 +42,35 @@ def assert_subsequence(values: list[str], expected: list[str]) -> None:
     assert start is not None, f"{expected!r} not found in {values!r}"
 
 
-def test_claude_wrapper_uses_host_runtime(monkeypatch, tmp_path) -> None:
+def _claude_init_only_raw_response(*, mcp_servers, plugins=None, slash_commands=None) -> dict[str, object]:
+    return {
+        "agent": "claude",
+        "response_format": "json",
+        "response": [
+            {
+                "type": "system",
+                "subtype": "init",
+                "cwd": "/tmp/contextbench-fixture",
+                "session_id": "fixture-session",
+                "tools": ["Bash", "Read", "StructuredOutput"],
+                "mcp_servers": mcp_servers,
+                "model": "claude-opus-4-7",
+                "permissionMode": "default",
+                "slash_commands": slash_commands or [],
+                "apiKeySource": "none",
+                "claude_code_version": "2.1.117",
+                "output_style": "default",
+                "agents": ["general-purpose"],
+                "skills": [],
+                "plugins": plugins or [],
+                "uuid": "fixture-init",
+                "fast_mode_state": "off",
+            }
+        ],
+    }
+
+
+def test_claude_wrapper_uses_docker_runtime(monkeypatch, tmp_path) -> None:
     wrapper_path = _REPO_ROOT / "agent-frameworks" / "claude-code" / "run_bench.py"
     spec = importlib.util.spec_from_file_location("claude_code_run_bench_test", wrapper_path)
     assert spec is not None and spec.loader is not None
@@ -67,6 +95,7 @@ def test_claude_wrapper_uses_host_runtime(monkeypatch, tmp_path) -> None:
             model=None,
             agent_arg=[],
             runtime_env=[],
+            runtime_platform=None,
         ),
     )
     monkeypatch.setattr(
@@ -87,10 +116,10 @@ def test_claude_wrapper_uses_host_runtime(monkeypatch, tmp_path) -> None:
 
     assert module.main() == 0
     assert captured["agent"] == "claude"
-    assert captured["runtime_backend"] == "host"
+    assert captured["runtime_backend"] == "docker"
 
 
-def test_claude_command_uses_verbose_json_mode(tmp_path, schema_path) -> None:
+def test_claude_command_uses_verbose_stream_json_mode(tmp_path, schema_path) -> None:
     settings_path = tmp_path / "claude.settings.json"
     mcp_config_path = tmp_path / "claude.mcp.json"
     settings_path.write_text("{}", encoding="utf-8")
@@ -107,14 +136,57 @@ def test_claude_command_uses_verbose_json_mode(tmp_path, schema_path) -> None:
     )
 
     assert "--verbose" in command
-    assert command[:4] == ["claude", "--print", "--output-format", "json"]
+    assert command[:4] == ["claude", "--print", "--output-format", "stream-json"]
     assert "--settings" in command
     assert "--mcp-config" in command
     assert "--setting-sources" in command
     assert "--disable-slash-commands" in command
     assert "--strict-mcp-config" in command
+    assert "test prompt" not in command
     permission_index = command.index("--permission-mode")
-    assert command[permission_index + 1] == "auto"
+    assert command[permission_index + 1] == "acceptEdits"
+
+
+def test_claude_command_accepts_container_permission_mode(tmp_path, schema_path) -> None:
+    settings_path = tmp_path / "claude.settings.json"
+    mcp_config_path = tmp_path / "claude.mcp.json"
+    settings_path.write_text("{}", encoding="utf-8")
+    mcp_config_path.write_text('{"mcpServers": {}}', encoding="utf-8")
+
+    command, _ = build_claude_command(
+        schema_path=schema_path,
+        prompt="test prompt",
+        model=None,
+        reasoning_effort=None,
+        extra_args=[],
+        settings_path=settings_path,
+        mcp_config_path=mcp_config_path,
+        permission_mode="bypassPermissions",
+    )
+
+    permission_index = command.index("--permission-mode")
+    assert command[permission_index + 1] == "bypassPermissions"
+
+
+def test_claude_command_does_not_append_prompt_after_variadic_extra_args(tmp_path, schema_path) -> None:
+    settings_path = tmp_path / "claude.settings.json"
+    mcp_config_path = tmp_path / "claude.mcp.json"
+    settings_path.write_text("{}", encoding="utf-8")
+    mcp_config_path.write_text('{"mcpServers": {}}', encoding="utf-8")
+
+    command, _ = build_claude_command(
+        schema_path=schema_path,
+        prompt="test prompt",
+        model=None,
+        reasoning_effort=None,
+        extra_args=["--allowedTools", "mcp__cortex__context_get_rules"],
+        settings_path=settings_path,
+        mcp_config_path=mcp_config_path,
+    )
+
+    assert command[-2:] == ["--allowedTools", "mcp__cortex__context_get_rules"]
+    assert "test prompt" not in command
+
 
 def test_claude_command_omits_schema_when_not_requested(tmp_path) -> None:
     settings_path = tmp_path / "claude.settings.json"
@@ -209,6 +281,22 @@ def test_claude_command_maps_xhigh_reasoning_effort_to_max(tmp_path, schema_path
 
     assert "--effort" in command
     assert "max" in command
+
+
+def test_validate_claude_isolation_allows_explicit_mcp_servers() -> None:
+    validate_claude_isolation(
+        _claude_init_only_raw_response(mcp_servers=["cortex"]),
+        allowed_mcp_servers={"cortex"},
+    )
+
+
+def test_validate_claude_isolation_rejects_unexpected_mcp_servers() -> None:
+    with pytest.raises(Exception, match="unexpected MCP servers: extra"):
+        validate_claude_isolation(
+            _claude_init_only_raw_response(mcp_servers=["cortex", "extra"]),
+            allowed_mcp_servers={"cortex"},
+        )
+
 
 def test_codex_command_includes_reasoning_effort_override(tmp_path, schema_path) -> None:
     command, _ = build_codex_command(

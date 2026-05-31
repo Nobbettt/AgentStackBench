@@ -182,6 +182,19 @@ def test_load_predictions_with_summary_from_path_reports_partial_conversion(
     assert summary["coverage_of_attempted_tasks"] == pytest.approx(0.5)
     assert summary["is_partial"] is True
 
+
+def test_failed_record_with_structured_output_is_not_convertible(make_final_output, make_record) -> None:
+    record = make_record(
+        agent="claude",
+        instance_id="task-fail",
+        final_output=make_final_output(task_id="task-fail", retrieved_context_files=["a.py"]),
+    )
+    record["status"] = "failed"
+    record["ok"] = False
+
+    assert record_is_convertible(record, expected_agent="claude") is False
+
+
 def test_unified_extractor_dispatch_supports_codex_record_file(tmp_path, make_final_output, make_record) -> None:
     record_path = tmp_path / "task.codex-record.json"
     record_path.write_text(

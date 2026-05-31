@@ -17,6 +17,8 @@ from contextbench.coding_agents.files import safe_path_component
 from contextbench.coding_agents.constants import (
     CLAUDE_OUTPUT_SCHEMA_PATH,
     CODEX_OUTPUT_SCHEMA_PATH,
+    DEFAULT_CLAUDE_RUNTIME_AMD64_IMAGE,
+    DEFAULT_CLAUDE_RUNTIME_IMAGE,
     DEFAULT_CODEX_RUNTIME_IMAGE,
     DEFAULT_POSTPROCESS_RUNTIME_IMAGE,
     DEFAULT_SUBSET_CSV,
@@ -54,11 +56,147 @@ def test_superpowers_all_benches_smoke_config_selects_one_task_per_bench() -> No
     assert len(tasks) == 4
     assert {str(task["bench"]) for task in tasks} == {"Verified", "Pro", "Poly", "Multi"}
 
+
+def test_claude_cortex_all_benches_smoke_config_selects_one_task_per_bench() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    config = load_run_suite_config(repo_root / "configs/run_suites/claude-cortex-bootstrap-5-all-benches-smoke.json")
+
+    tasks = load_tasks(config.base_run.task_data, subset_csv=config.base_run.task_csv, limit=config.base_run.limit)
+
+    assert config.agent == "claude"
+    assert config.base_run.runtime_backend == "docker"
+    assert config.base_run.runtime_image == DEFAULT_CLAUDE_RUNTIME_AMD64_IMAGE
+    assert config.base_run.runtime_platform == "linux/amd64"
+    assert config.base_run.model == "claude-opus-4-7"
+    assert config.postprocess.resolve is True
+    assert config.postprocess.env_file is None
+    assert config.parallelism.max_workers == 2
+    treatment = next(variant for variant in config.variants if variant.name == "with-cortex-mcp")
+    setup_commands = "\n".join(treatment.runtime_setup_commands_add)
+    validation_commands = "\n".join(treatment.runtime_validation_commands_add)
+
+    assert treatment.runtime_setup_timeout == 10800
+    assert treatment.runtime_validation_timeout == 2400
+    assert treatment.runtime_setup_cache is True
+    assert "./scripts/context.sh bootstrap" in setup_commands
+    assert "ryugraph/ryu_native.js" in setup_commands
+    assert "@danielblomma/cortex-mcp@2.0.13" in setup_commands
+    assert "@danielblomma/cortex-mcp@latest" not in setup_commands
+    assert treatment.runtime_validation_commands_add
+    assert "cortex-version.txt" in validation_commands
+    assert "pkg.version !== '2.0.13'" in validation_commands
+    assert ".context/cache/manifest.json" in validation_commands
+    assert ".context/cache/graph-manifest.json" in validation_commands
+    assert ".context/embeddings/manifest.json" in validation_commands
+    assert "git clean -fdx --" in validation_commands
+    assert treatment.agent_args_add == []
+    assert treatment.diff_exclude_paths_add == [".context/**", "AGENTS.md", "CLAUDE.md"]
+    assert "Before using built-in" not in (treatment.setup.prompt_preamble or "")
+    assert "Use Cortex as the primary repository-navigation workflow" in (treatment.setup.prompt_preamble or "")
+    assert treatment.required_available_tool_patterns_add == [
+        "^mcp__cortex__context_search$",
+        "^mcp__cortex__context_get_related$",
+        "^mcp__cortex__context_impact$",
+        "^mcp__cortex__context_get_rules$",
+        "^mcp__cortex__context_reload$",
+    ]
+    assert len(tasks) == 4
+    assert {str(task["bench"]) for task in tasks} == {"Verified", "Pro", "Poly", "Multi"}
+
+
+def test_claude_cortex_main_config_bootstraps_and_validates_cortex() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    config = load_run_suite_config(repo_root / "configs/run_suites/claude-cortex-bootstrap.json")
+    assert config.base_run.runtime_backend == "docker"
+    assert config.base_run.runtime_image == DEFAULT_CLAUDE_RUNTIME_AMD64_IMAGE
+    assert config.base_run.runtime_platform == "linux/amd64"
+    assert config.parallelism.max_workers == 2
+    treatment = next(variant for variant in config.variants if variant.name == "with-cortex-mcp")
+    setup_commands = "\n".join(treatment.runtime_setup_commands_add)
+    validation_commands = "\n".join(treatment.runtime_validation_commands_add)
+
+    assert treatment.runtime_setup_timeout == 10800
+    assert treatment.runtime_validation_timeout == 2700
+    assert treatment.runtime_setup_cache is True
+    assert "./scripts/context.sh bootstrap" in setup_commands
+    assert "ryugraph/ryu_native.js" in setup_commands
+    assert "@danielblomma/cortex-mcp@2.0.13" in setup_commands
+    assert "@danielblomma/cortex-mcp@latest" not in setup_commands
+    assert "cortex-version.txt" in validation_commands
+    assert "pkg.version !== '2.0.13'" in validation_commands
+    assert ".context/cache/manifest.json" in validation_commands
+    assert ".context/cache/graph-manifest.json" in validation_commands
+    assert ".context/embeddings/manifest.json" in validation_commands
+    assert "git clean -fdx --" in validation_commands
+    assert treatment.agent_args_add == []
+    assert treatment.diff_exclude_paths_add == [".context/**", "AGENTS.md", "CLAUDE.md"]
+    assert "Before using built-in" not in (treatment.setup.prompt_preamble or "")
+    assert "Use Cortex as the primary repository-navigation workflow" in (treatment.setup.prompt_preamble or "")
+    assert treatment.required_available_tool_patterns_add == [
+        "^mcp__cortex__context_search$",
+        "^mcp__cortex__context_get_related$",
+        "^mcp__cortex__context_impact$",
+        "^mcp__cortex__context_get_rules$",
+        "^mcp__cortex__context_reload$",
+    ]
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude"])
+def test_agents_claude_md_exclusions_are_not_agent_defaults(tmp_path, agent) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": f"{agent}-default-diff-policy",
+            "agent": agent,
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "runtime_backend": "host",
+            },
+            "variants": [{"name": "baseline"}],
+            "postprocess": {"convert": False, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    effective = build_run_suite_variant(config, config.variants[0])
+
+    assert effective.diff_exclude_paths == []
+
+
+def test_codex_run_suite_rejects_claude_specific_setup_fields(tmp_path) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+
+    with pytest.raises(ValueError, match="does not support Claude-specific setup fields"):
+        RunSuiteConfig.model_validate(
+            {
+                "experiment_name": "codex-with-claude-mcp-config",
+                "agent": "codex",
+                "base_run": {
+                    "task_data": str(task_data),
+                    "task_csv": str(task_csv),
+                    "output_root": str(tmp_path / "results"),
+                    "repo_cache": str(tmp_path / "cache"),
+                    "setup": {
+                        "claude_mcp_config": {
+                            "mcpServers": {
+                                "cortex": {"command": "cortex", "args": ["mcp"]},
+                            },
+                        },
+                    },
+                },
+                "variants": [{"name": "baseline"}],
+                "postprocess": {"convert": False, "evaluate": False},
+            }
+        )
+
+
 def test_build_run_suite_variant_merges_base_and_variant_overrides(tmp_path) -> None:
     task_data, task_csv = _write_task_inputs(tmp_path, count=1)
     config = RunSuiteConfig.model_validate(
         {
-                "experiment_name": "suite-codex",
+            "experiment_name": "suite-codex",
             "agent": "codex",
             "base_run": {
                 "task_data": str(task_data),
@@ -68,6 +206,16 @@ def test_build_run_suite_variant_merges_base_and_variant_overrides(tmp_path) -> 
                 "agent_args": ["--base"],
                 "env": {"BASE": "1"},
                 "reasoning_effort": "medium",
+                "runtime_platform": "linux/arm64",
+                "runtime_setup_timeout": 120,
+                "runtime_validation_timeout": 30,
+                "runtime_setup_cache": True,
+                "runtime_setup_cache_dir": str(tmp_path / "setup-cache"),
+                "runtime_setup_commands": ["base-setup"],
+                "runtime_validation_commands": ["base-validation"],
+                "diff_exclude_paths": [".base-cache/**"],
+                "required_tool_call_patterns": ["^base_tool$"],
+                "required_available_tool_patterns": ["^base_available_tool$"],
                 "setup": {
                     "copy_paths": [
                         {
@@ -82,8 +230,17 @@ def test_build_run_suite_variant_merges_base_and_variant_overrides(tmp_path) -> 
                 {
                     "name": "with-plugin",
                     "reasoning_effort": "high",
+                    "runtime_platform": "linux/amd64",
+                    "runtime_setup_timeout": 240,
+                    "runtime_validation_timeout": 60,
+                    "runtime_setup_cache": False,
                     "agent_args_add": ["--plugin"],
                     "env_add": {"PLUGIN": "1"},
+                    "runtime_setup_commands_add": ["plugin-setup"],
+                    "runtime_validation_commands_add": ["plugin-validation"],
+                    "diff_exclude_paths_add": [".plugin-cache/**"],
+                    "required_tool_call_patterns_add": ["^plugin_tool$"],
+                    "required_available_tool_patterns_add": ["^plugin_available_tool$"],
                     "setup": {
                         "prompt_preamble": "Enable plugin",
                         "setup_prompt": "Bootstrap tools first",
@@ -108,11 +265,21 @@ def test_build_run_suite_variant_merges_base_and_variant_overrides(tmp_path) -> 
     assert effective.agent_args == ["--base", "--plugin"]
     assert effective.env == {"BASE": "1", "PLUGIN": "1"}
     assert effective.reasoning_effort == "high"
+    assert effective.runtime_platform == "linux/amd64"
+    assert effective.runtime_setup_timeout == 240
+    assert effective.runtime_validation_timeout == 60
+    assert effective.runtime_setup_cache is False
+    assert effective.runtime_setup_cache_dir == tmp_path / "setup-cache"
     assert effective.setup.prompt_preamble == "Enable plugin"
     assert effective.setup.setup_prompt == "Bootstrap tools first"
     assert effective.setup.setup_prompt_timeout == 90
     assert len(effective.setup.copy_paths) == 1
     assert len(effective.setup.files_to_materialize) == 1
+    assert effective.runtime_setup_commands == ["base-setup", "plugin-setup"]
+    assert effective.runtime_validation_commands == ["base-validation", "plugin-validation"]
+    assert effective.diff_exclude_paths == [".base-cache/**", ".plugin-cache/**"]
+    assert effective.required_tool_call_patterns == ["^base_tool$", "^plugin_tool$"]
+    assert effective.required_available_tool_patterns == ["^base_available_tool$", "^plugin_available_tool$"]
 
 
 def test_run_suite_selection_kind_only_marks_default_csv_as_representative(tmp_path) -> None:
@@ -205,19 +372,134 @@ def test_run_suite_config_rejects_host_runtime_with_image(tmp_path) -> None:
         )
 
 
-def test_checked_in_run_suite_configs_use_pinned_docker_runtimes() -> None:
+def test_run_suite_config_rejects_host_runtime_with_platform(tmp_path) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+
+    with pytest.raises(ValueError, match="runtime_platform can only be set"):
+        RunSuiteConfig.model_validate(
+            {
+                "experiment_name": "host-with-platform",
+                "agent": "claude",
+                "base_run": {
+                    "task_data": str(task_data),
+                    "task_csv": str(task_csv),
+                    "output_root": str(tmp_path / "results"),
+                    "repo_cache": str(tmp_path / "cache"),
+                    "runtime_backend": "host",
+                    "runtime_platform": "linux/amd64",
+                },
+                "variants": [{"name": "baseline"}],
+                "postprocess": {"convert": False, "evaluate": False},
+            }
+        )
+
+
+def test_checked_in_run_suite_configs_use_expected_base_runtimes() -> None:
     config_paths = sorted(Path("configs/run_suites").glob("*.json"))
 
     assert config_paths
     for config_path in config_paths:
         config = load_run_suite_config(config_path)
 
-        assert config.base_run.runtime_backend == "docker", config_path
         if config.agent == "codex":
+            assert config.base_run.runtime_backend == "docker", config_path
             assert config.base_run.runtime_image == DEFAULT_CODEX_RUNTIME_IMAGE, config_path
+        if config.agent == "claude":
+            assert config.base_run.runtime_backend == "docker", config_path
+            if config.base_run.runtime_platform == "linux/amd64":
+                assert config.base_run.runtime_image == DEFAULT_CLAUDE_RUNTIME_AMD64_IMAGE, config_path
+            else:
+                assert config.base_run.runtime_image == DEFAULT_CLAUDE_RUNTIME_IMAGE, config_path
         if config.postprocess.convert or config.postprocess.evaluate or config.postprocess.resolve:
             assert config.postprocess.runtime_backend == "docker", config_path
             assert config.postprocess.runtime_image == DEFAULT_POSTPROCESS_RUNTIME_IMAGE, config_path
+
+
+def test_setup_claude_runtime_image_uses_pinned_claude_code_version(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(run_suites_setup, "_docker_build", lambda **kwargs: calls.append(kwargs))
+
+    assert run_suites_setup.setup_claude_runtime_image() == 0
+
+    assert calls == [
+        {
+            "image": DEFAULT_CLAUDE_RUNTIME_IMAGE,
+            "dockerfile": run_suites_setup.CLAUDE_RUNTIME_DOCKERFILE,
+            "force": False,
+            "build_args": {"CLAUDE_CODE_VERSION": run_suites_setup.CLAUDE_CODE_VERSION},
+            "platform": None,
+        }
+    ]
+
+
+def test_setup_claude_runtime_image_accepts_explicit_platform_and_image(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(run_suites_setup, "_docker_build", lambda **kwargs: calls.append(kwargs))
+
+    assert (
+        run_suites_setup.setup_claude_runtime_image(
+            image="contextbench-claude-runtime:test-amd64",
+            platform="linux/amd64",
+        )
+        == 0
+    )
+
+    assert calls == [
+        {
+            "image": "contextbench-claude-runtime:test-amd64",
+            "dockerfile": run_suites_setup.CLAUDE_RUNTIME_DOCKERFILE,
+            "force": False,
+            "build_args": {"CLAUDE_CODE_VERSION": run_suites_setup.CLAUDE_CODE_VERSION},
+            "platform": "linux/amd64",
+        }
+    ]
+
+
+def test_setup_claude_runtime_image_uses_native_deps_flavor_for_pinned_amd64_image(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(run_suites_setup, "_docker_build", lambda **kwargs: calls.append(kwargs))
+
+    assert (
+        run_suites_setup.setup_claude_runtime_image(
+            image=DEFAULT_CLAUDE_RUNTIME_AMD64_IMAGE,
+            platform="linux/amd64",
+        )
+        == 0
+    )
+
+    assert calls == [
+        {
+            "image": DEFAULT_CLAUDE_RUNTIME_AMD64_IMAGE,
+            "dockerfile": run_suites_setup.CLAUDE_RUNTIME_NATIVE_DEPS_DOCKERFILE,
+            "force": False,
+            "build_args": {"CLAUDE_CODE_VERSION": run_suites_setup.CLAUDE_CODE_VERSION},
+            "platform": "linux/amd64",
+        }
+    ]
+
+
+def test_setup_claude_runtime_image_accepts_explicit_native_deps_flavor(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(run_suites_setup, "_docker_build", lambda **kwargs: calls.append(kwargs))
+
+    assert (
+        run_suites_setup.setup_claude_runtime_image(
+            image="contextbench-claude-runtime:custom-native-deps",
+            platform="linux/amd64",
+            flavor="native-deps",
+        )
+        == 0
+    )
+
+    assert calls == [
+        {
+            "image": "contextbench-claude-runtime:custom-native-deps",
+            "dockerfile": run_suites_setup.CLAUDE_RUNTIME_NATIVE_DEPS_DOCKERFILE,
+            "force": False,
+            "build_args": {"CLAUDE_CODE_VERSION": run_suites_setup.CLAUDE_CODE_VERSION},
+            "platform": "linux/amd64",
+        }
+    ]
 
 
 def test_run_suite_config_rejects_claude_only_invalid_target_roots(tmp_path) -> None:
@@ -239,7 +521,7 @@ def test_run_suite_config_rejects_claude_only_invalid_target_roots(tmp_path) -> 
                                 "path": "settings/plugin.json",
                                 "content": {"enabled": True},
                                 "format": "json",
-                                "target_root": "xdg_config_home",
+                                "target_root": "codex_home",
                             }
                         ]
                     },
@@ -248,6 +530,78 @@ def test_run_suite_config_rejects_claude_only_invalid_target_roots(tmp_path) -> 
                 "postprocess": {"convert": False, "evaluate": False},
             }
         )
+
+
+def test_run_suite_config_defaults_claude_docker_runtime_image(tmp_path) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "claude-docker-default",
+            "agent": "claude",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "runtime_backend": "docker",
+            },
+            "variants": [{"name": "baseline"}],
+            "postprocess": {"convert": False, "evaluate": False},
+        }
+    )
+
+    assert config.base_run.runtime_backend == "docker"
+    assert config.base_run.runtime_image == DEFAULT_CLAUDE_RUNTIME_IMAGE
+
+
+def test_run_suite_config_defaults_codex_docker_runtime_image(tmp_path) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "codex-docker-default",
+            "agent": "codex",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "runtime_backend": "docker",
+            },
+            "variants": [{"name": "baseline"}],
+            "postprocess": {"convert": False, "evaluate": False},
+        }
+    )
+
+    assert config.base_run.runtime_backend == "docker"
+    assert config.base_run.runtime_image == DEFAULT_CODEX_RUNTIME_IMAGE
+
+
+def test_run_suite_variant_switching_to_docker_uses_agent_default_image(tmp_path) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "claude-host-base-docker-variant",
+            "agent": "claude",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "runtime_backend": "host",
+            },
+            "variants": [{"name": "docker-baseline", "runtime_backend": "docker"}],
+            "postprocess": {"convert": False, "evaluate": False},
+        }
+    )
+
+    effective = build_run_suite_variant(config, config.variants[0])
+
+    assert config.base_run.runtime_image is None
+    assert effective.runtime_backend == "docker"
+    assert effective.runtime_image == DEFAULT_CLAUDE_RUNTIME_IMAGE
 
 
 def test_run_suite_config_rejects_unsupported_claude_reasoning_effort(tmp_path) -> None:

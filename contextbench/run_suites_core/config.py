@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..coding_agents.constants import DEFAULT_AGENT_RUNTIME_IMAGES
 from ..coding_agents.files import safe_path_component
 from .env_files import read_env_file
 from .helpers import deep_merge
@@ -59,8 +60,12 @@ def build_run_suite_variant(
     env = dict(variant.env_replace) if variant.env_replace is not None else {**base.env, **variant.env_add}
     runtime_backend = variant.runtime_backend if variant.runtime_backend is not None else base.runtime_backend
     runtime_image = variant.runtime_image if variant.runtime_image is not None else base.runtime_image
+    runtime_platform = variant.runtime_platform if variant.runtime_platform is not None else base.runtime_platform
+    if runtime_backend == "docker" and runtime_image is None:
+        runtime_image = DEFAULT_AGENT_RUNTIME_IMAGES.get(run_suite.agent)
     if runtime_backend == "host" and variant.runtime_backend == "host" and variant.runtime_image is None:
         runtime_image = None
+        runtime_platform = None
     base_runtime_env = {**read_env_file(base.runtime_env_file), **base.runtime_env}
     runtime_env = (
         dict(variant.runtime_env_replace)
@@ -75,6 +80,26 @@ def build_run_suite_variant(
         list(variant.runtime_setup_commands_replace)
         if variant.runtime_setup_commands_replace is not None
         else [*base.runtime_setup_commands, *variant.runtime_setup_commands_add]
+    )
+    runtime_validation_commands = (
+        list(variant.runtime_validation_commands_replace)
+        if variant.runtime_validation_commands_replace is not None
+        else [*base.runtime_validation_commands, *variant.runtime_validation_commands_add]
+    )
+    diff_exclude_paths = (
+        list(variant.diff_exclude_paths_replace)
+        if variant.diff_exclude_paths_replace is not None
+        else [*base.diff_exclude_paths, *variant.diff_exclude_paths_add]
+    )
+    required_tool_call_patterns = (
+        list(variant.required_tool_call_patterns_replace)
+        if variant.required_tool_call_patterns_replace is not None
+        else [*base.required_tool_call_patterns, *variant.required_tool_call_patterns_add]
+    )
+    required_available_tool_patterns = (
+        list(variant.required_available_tool_patterns_replace)
+        if variant.required_available_tool_patterns_replace is not None
+        else [*base.required_available_tool_patterns, *variant.required_available_tool_patterns_add]
     )
     setup = merge_setup_config(base.setup, variant.setup)
     return EffectiveVariantConfig(
@@ -104,8 +129,33 @@ def build_run_suite_variant(
         setup=setup,
         runtime_backend=runtime_backend,
         runtime_image=runtime_image,
+        runtime_platform=runtime_platform,
         runtime_env=runtime_env,
+        runtime_setup_timeout=(
+            variant.runtime_setup_timeout
+            if variant.runtime_setup_timeout is not None
+            else base.runtime_setup_timeout
+        ),
+        runtime_validation_timeout=(
+            variant.runtime_validation_timeout
+            if variant.runtime_validation_timeout is not None
+            else base.runtime_validation_timeout
+        ),
+        runtime_setup_cache=(
+            variant.runtime_setup_cache
+            if variant.runtime_setup_cache is not None
+            else base.runtime_setup_cache
+        ),
+        runtime_setup_cache_dir=(
+            variant.runtime_setup_cache_dir
+            if variant.runtime_setup_cache_dir is not None
+            else base.runtime_setup_cache_dir
+        ),
         runtime_setup_commands=runtime_setup_commands,
+        runtime_validation_commands=runtime_validation_commands,
+        diff_exclude_paths=diff_exclude_paths,
+        required_tool_call_patterns=required_tool_call_patterns,
+        required_available_tool_patterns=required_available_tool_patterns,
         runtime_keep_failed=(
             variant.runtime_keep_failed
             if variant.runtime_keep_failed is not None

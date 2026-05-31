@@ -68,6 +68,7 @@ def test_convert_run_record_rejects_conflicting_agent_task_id(make_final_output,
         final_output=make_final_output(
             task_id="task-b",
             retrieved_context_files=["a.py"],
+            include_legacy_fields=True,
         ),
     )
     record["original_inst_id"] = "task-a-original"
@@ -229,6 +230,48 @@ def test_convert_run_record_normalizes_public_worktree_placeholder_paths() -> No
     assert converted["traj_data"]["pred_files"] == ["pkg/mod.py"]
     assert converted["traj_data"]["pred_spans"] == {"pkg/mod.py": [{"start": 1, "end": 3}]}
     assert converted["traj_data"]["pred_symbols"] == {"pkg/mod.py": ["Thing"]}
+
+
+def test_convert_run_record_normalizes_absolute_paths_in_raw_trace(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    record = {
+        "agent": "codex",
+        "instance_id": "task-1",
+        "workspace_path": str(workspace),
+        "repo_url": "https://github.com/example/repo.git",
+        "commit": "abc123",
+        "raw_response": {
+            "agent": "codex",
+            "response_format": "jsonl-events",
+            "events": [
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item_1",
+                        "type": "command_execution",
+                        "command": f"/bin/zsh -lc 'sed -n 1,5p {workspace / 'pkg' / 'mod.py'}'",
+                        "aggregated_output": "line 1\nline 2\n",
+                        "exit_code": 0,
+                        "status": "completed",
+                    },
+                }
+            ],
+        },
+        "model_patch": "",
+        "final_output": {
+            "task_id": "task-1",
+            "status": "completed",
+            "retrieved_context_files": [],
+            "retrieved_context_spans": [],
+            "retrieved_context_symbols": [],
+        },
+    }
+
+    converted = convert_run_record(record)
+
+    assert converted["traj_data"]["pred_files"] == []
+    assert converted["traj_data"]["pred_files_source"] == []
+    assert converted["traj_data"]["pred_steps"][0]["files"] == ["pkg/mod.py"]
 
 
 def test_convert_records_with_summary_fails_outside_workspace_context(tmp_path) -> None:
