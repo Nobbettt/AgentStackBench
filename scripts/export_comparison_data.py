@@ -73,6 +73,11 @@ def _titleize(value: str | None) -> str:
     return raw.title() if raw else "Unknown"
 
 
+def _display_name(value: str | None) -> str:
+    name = _titleize(value)
+    return "With Superpowers" if name == "With Superpowers Mounted" else name
+
+
 def _format_percent(value: float) -> str:
     return f"{value * 100:.1f}%"
 
@@ -2052,7 +2057,7 @@ def _build_instance_payloads(
             "repoUrl": record.get("repo_url"),
             "commit": record.get("commit"),
             "variant": {
-                "name": _titleize(str(effective_config.get("name") or variant_manifest["name"])),
+                "name": _display_name(str(effective_config.get("name") or variant_manifest["name"])),
                 "model": effective_config.get("model"),
                 "effort": _titleize(str(effective_config.get("reasoning_effort") or "unknown")),
                 "status": status,
@@ -2545,14 +2550,14 @@ def _load_variant_payload(
         if resolution_partial:
             stages.append("resolution")
         stage_text = ", ".join(stages) if stages else "postprocess"
-        variant_notes.append(f"{_titleize(str(variant_manifest['name']))}: partial {stage_text} coverage across selected tasks.")
+        variant_notes.append(f"{_display_name(str(variant_manifest['name']))}: partial {stage_text} coverage across selected tasks.")
     if warnings_text:
         variant_notes.append(warnings_text)
 
     return {
         "slug": str(variant_manifest["name"]),
         "model": str(effective_config.get("model") or "Unknown"),
-        "name": _titleize(str(effective_config.get("name") or variant_manifest["name"])),
+        "name": _display_name(str(effective_config.get("name") or variant_manifest["name"])),
         "effort": _titleize(str(effective_config.get("reasoning_effort") or "unknown")),
         "contextF1": quality["contextF1"],
         "notes": variant_notes,

@@ -6,19 +6,47 @@ import type { ComparisonCard, ComparisonInstance } from "@/data/comparisons";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { buildInstanceRows, instanceContextF1 } from "@/components/comparison/instance-data";
+import { compactInstanceName } from "@/components/comparison/instance-naming";
 import {
+  coveragePrecision,
+  f1,
   formatDurationMs,
   formatLanguageLabel,
   formatMetric,
+  formatPatternMetric,
   formatResolutionStatus,
   formatTokens,
   resolutionStatusClassName,
-  sortBench,
 } from "@/components/comparison/format";
-import type { ComparisonResultsViewMode, DeltaDisplayMode } from "@/components/comparison/types";
+import type { ComparisonResultsViewMode, DeltaDisplayMode, InstanceRow } from "@/components/comparison/types";
 import { cn } from "@/lib/utils";
 
 const INSTANCE_PAGE_SIZE = 20;
+const RESOLUTION_STATUS_ORDER = ["resolved", "unresolved", "error", "missing"];
+
+type SortKey = "contextF1" | "fileF1" | "blockF1" | "steps";
+type SortDirection = "asc" | "desc";
+type SortState = {
+  key: SortKey;
+  direction: SortDirection;
+} | null;
+
+function resolutionStatusValue(instance: ComparisonInstance | undefined): string {
+  return (instance?.artifacts?.resolutionStatus ?? "missing").trim().toLowerCase() || "missing";
+}
+
+function sortResolutionStatuses(left: string, right: string): number {
+  const leftIndex = RESOLUTION_STATUS_ORDER.indexOf(left);
+  const rightIndex = RESOLUTION_STATUS_ORDER.indexOf(right);
+  if (leftIndex >= 0 || rightIndex >= 0) {
+    return (leftIndex >= 0 ? leftIndex : Number.MAX_SAFE_INTEGER) - (rightIndex >= 0 ? rightIndex : Number.MAX_SAFE_INTEGER);
+  }
+  return left.localeCompare(right);
+}
+
+function resolutionFilterOptions(statuses: string[]): Array<{ value: string; label: string }> {
+  return statuses.map((status) => ({ value: status, label: formatResolutionStatus(status) }));
+}
 
 function InlineHeaderFilter({
   label,
@@ -104,9 +132,42 @@ function FilterOption({ label, selected, onClick }: { label: string; selected: b
   );
 }
 
+function SortableHeader({
+  label,
+  sortKey,
+  sort,
+  onSort,
+}: {
+  label: string;
+  sortKey: SortKey;
+  sort: SortState;
+  onSort: (sortKey: SortKey) => void;
+}) {
+  const active = sort?.key === sortKey;
+  const ariaSort = active ? (sort.direction === "asc" ? "ascending" : "descending") : "none";
+
+  return (
+    <TableHead className="text-right" aria-sort={ariaSort}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className="ml-auto inline-flex items-center gap-1 rounded-sm text-right transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <span>{label}</span>
+        <ChevronDown
+          className={cn(
+            "h-3.5 w-3.5 transition-transform",
+            active ? "opacity-100" : "opacity-35",
+            active && sort.direction === "asc" ? "rotate-180" : "",
+          )}
+        />
+      </button>
+    </TableHead>
+  );
+}
+
 export function InstanceResultsSection({
   comparison,
-  viewMode,
   deltaDisplayMode,
 }: {
   comparison: ComparisonCard;
@@ -114,69 +175,109 @@ export function InstanceResultsSection({
   deltaDisplayMode: DeltaDisplayMode;
 }) {
   const rows = useMemo(() => buildInstanceRows(comparison), [comparison]);
-  const availableBenches = useMemo(() => Array.from(new Set(rows.map((row) => row.bench))).sort(sortBench), [rows]);
-  const availableLanguages = useMemo(() => Array.from(new Set(rows.map((row) => row.language))).sort(), [rows]);
-  const [selectedBenches, setSelectedBenches] = useState<string[]>(availableBenches);
-  const [selectedLanguages, setSelectedLanguages] = useState<string[]>(availableLanguages);
+  const comparisonPair = useMemo(
+    () => (comparison.variants.length >= 2 ? { baseline: comparison.variants[0], treatment: comparison.variants[1] } : null),
+    [comparison.variants],
+  );
+  const availableBaselineStatuses = useMemo(
+    () => Array.from(new Set(rows.map((row) => resolutionStatusValue(row.baseline)))).sort(sortResolutionStatuses),
+    [rows],
+  );
+  const availableTreatmentStatuses = useMemo(
+    () => Array.from(new Set(rows.map((row) => resolutionStatusValue(row.treatment)))).sort(sortResolutionStatuses),
+    [rows],
+  );
+  const [selectedBaselineStatuses, setSelectedBaselineStatuses] = useState<string[]>(availableBaselineStatuses);
+  const [selectedTreatmentStatuses, setSelectedTreatmentStatuses] = useState<string[]>(availableTreatmentStatuses);
+  const [sort, setSort] = useState<SortState>(null);
   const [page, setPage] = useState(1);
   const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
   const filteredRows = useMemo(
-    () => rows.filter((row) => selectedBenches.includes(row.bench) && selectedLanguages.includes(row.language)),
-    [rows, selectedBenches, selectedLanguages],
+    () =>
+      rows.filter(
+        (row) =>
+          selectedBaselineStatuses.includes(resolutionStatusValue(row.baseline)) &&
+          (!comparisonPair || selectedTreatmentStatuses.includes(resolutionStatusValue(row.treatment))),
+      ),
+    [comparisonPair, rows, selectedBaselineStatuses, selectedTreatmentStatuses],
   );
-  const pageCount = Math.max(1, Math.ceil(filteredRows.length / INSTANCE_PAGE_SIZE));
+  const sortedRows = useMemo(
+    () => (sort ? [...filteredRows].sort((left, right) => compareRowsBySortKey(left, right, sort, Boolean(comparisonPair))) : filteredRows),
+    [comparisonPair, filteredRows, sort],
+  );
+  const pageCount = Math.max(1, Math.ceil(sortedRows.length / INSTANCE_PAGE_SIZE));
   const pageStart = (page - 1) * INSTANCE_PAGE_SIZE;
-  const visibleRows = filteredRows.slice(pageStart, pageStart + INSTANCE_PAGE_SIZE);
+  const visibleRows = sortedRows.slice(pageStart, pageStart + INSTANCE_PAGE_SIZE);
 
   useEffect(() => {
-    setSelectedBenches(availableBenches);
-    setSelectedLanguages(availableLanguages);
+    setSelectedBaselineStatuses(availableBaselineStatuses);
+    setSelectedTreatmentStatuses(availableTreatmentStatuses);
     setPage(1);
     setExpandedRowId(null);
-  }, [comparison.id, availableBenches, availableLanguages]);
+  }, [comparison.id, availableBaselineStatuses, availableTreatmentStatuses]);
 
   useEffect(() => {
     setPage(1);
     setExpandedRowId((currentId) => currentId && filteredRows.some((row) => row.instanceId === currentId) ? currentId : null);
-  }, [filteredRows, selectedBenches, selectedLanguages]);
+  }, [filteredRows]);
 
-  const comparisonPair = comparison.variants.length >= 2 ? { baseline: comparison.variants[0], treatment: comparison.variants[1] } : null;
-  const showTreatmentDelta = viewMode === "treatment-delta" && comparisonPair;
-  const columnCount = showTreatmentDelta ? 5 : comparisonPair ? 6 : 5;
+  const tableViewMode: ComparisonResultsViewMode = "side-by-side";
+  const columnCount = comparisonPair ? 8 : 7;
+  const handleSort = (sortKey: SortKey) => {
+    setSort((currentSort) => {
+      if (currentSort?.key === sortKey) {
+        return { key: sortKey, direction: currentSort.direction === "asc" ? "desc" : "asc" };
+      }
+      return { key: sortKey, direction: sortKey === "steps" ? "asc" : "desc" };
+    });
+  };
 
   return (
     <section className="space-y-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h2 className="text-xl font-semibold tracking-tight">Issue Results</h2>
         <div className="text-sm text-muted-foreground">
-          Showing {filteredRows.length === 0 ? 0 : pageStart + 1}-{Math.min(pageStart + INSTANCE_PAGE_SIZE, filteredRows.length)} of {filteredRows.length}
+          Showing {sortedRows.length === 0 ? 0 : pageStart + 1}-{Math.min(pageStart + INSTANCE_PAGE_SIZE, sortedRows.length)} of {sortedRows.length}
         </div>
       </div>
-      <div className="rounded-lg bg-background">
-        <Table className="min-h-[24rem]">
+      <div className="overflow-x-auto rounded-lg bg-background">
+        <Table className="min-h-[24rem] min-w-[72rem]">
           <TableHeader>
             <TableRow>
               <TableHead>Instance</TableHead>
               <TableHead>
-                <InlineHeaderFilter label="Dataset" ariaLabel="Filter issue results by dataset" values={selectedBenches} onChange={setSelectedBenches} options={availableBenches.map((bench) => ({ value: bench, label: bench }))} />
+                <InlineHeaderFilter
+                  label={comparisonPair ? comparisonPair.baseline.name : comparison.variants[0]?.name}
+                  ariaLabel="Filter issue results by baseline resolution status"
+                  values={selectedBaselineStatuses}
+                  onChange={setSelectedBaselineStatuses}
+                  options={resolutionFilterOptions(availableBaselineStatuses)}
+                />
+                <div className="text-[11px] font-normal text-muted-foreground">Pass@1</div>
               </TableHead>
-              <TableHead>
-                <InlineHeaderFilter label="Language" ariaLabel="Filter issue results by language" values={selectedLanguages} onChange={setSelectedLanguages} options={availableLanguages.map((language) => ({ value: language, label: formatLanguageLabel(language) }))} />
-              </TableHead>
-              {showTreatmentDelta ? (
-                <TableHead>{comparisonPair.treatment.name}<div className="text-[11px] font-normal text-muted-foreground">Pass@1 vs baseline</div></TableHead>
-              ) : (
-                <>
-                  <TableHead>{comparisonPair ? comparisonPair.baseline.name : comparison.variants[0]?.name}<div className="text-[11px] font-normal text-muted-foreground">Pass@1</div></TableHead>
-                  {comparisonPair ? <TableHead>{comparisonPair.treatment.name}<div className="text-[11px] font-normal text-muted-foreground">Pass@1</div></TableHead> : null}
-                </>
-              )}
+              {comparisonPair ? (
+                <TableHead>
+                  <InlineHeaderFilter
+                    label={comparisonPair.treatment.name}
+                    ariaLabel="Filter issue results by treatment resolution status"
+                    values={selectedTreatmentStatuses}
+                    onChange={setSelectedTreatmentStatuses}
+                    options={resolutionFilterOptions(availableTreatmentStatuses)}
+                  />
+                  <div className="text-[11px] font-normal text-muted-foreground">Pass@1</div>
+                </TableHead>
+              ) : null}
+              <SortableHeader label="Context F1" sortKey="contextF1" sort={sort} onSort={handleSort} />
+              <SortableHeader label="File F1" sortKey="fileF1" sort={sort} onSort={handleSort} />
+              <SortableHeader label="Block F1" sortKey="blockF1" sort={sort} onSort={handleSort} />
+              <SortableHeader label="Steps" sortKey="steps" sort={sort} onSort={handleSort} />
               <TableHead className="w-[6rem]">Open</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {visibleRows.map((row) => {
               const isExpanded = expandedRowId === row.instanceId;
+              const name = compactInstanceName(row);
               return (
                 <Fragment key={row.instanceId}>
                   <TableRow key={row.instanceId}>
@@ -185,25 +286,29 @@ export function InstanceResultsSection({
                         <button type="button" aria-expanded={isExpanded} onClick={() => setExpandedRowId(isExpanded ? null : row.instanceId)} className="mt-0.5 inline-flex h-6 w-6 items-center justify-center rounded-md border text-muted-foreground">
                           {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                         </button>
-                        <div>
-                          <div className="font-medium">{row.instanceId}</div>
-                          {row.originalInstanceId ? <div className="mt-1 text-xs text-muted-foreground">{row.originalInstanceId}</div> : null}
+                        <div className="min-w-0" title={name.fullId}>
+                          <div className="font-mono text-sm font-semibold tabular-nums text-foreground">{name.shortId}</div>
+                          <div className="mt-1 truncate text-sm text-muted-foreground">{name.repo}</div>
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] uppercase tracking-wide text-muted-foreground/80">
+                            <span>{row.bench}</span>
+                            <span aria-hidden="true">/</span>
+                            <span>{formatLanguageLabel(row.language)}</span>
+                            {name.taskType ? (
+                              <>
+                                <span aria-hidden="true">/</span>
+                                <span>{name.taskType}</span>
+                              </>
+                            ) : null}
+                          </div>
                         </div>
                       </div>
                     </TableCell>
-                    <TableCell>{row.bench}</TableCell>
-                    <TableCell>{formatLanguageLabel(row.language)}</TableCell>
-                    {showTreatmentDelta ? (
-                      <TableCell>
-                        <div className={cn("font-medium", resolutionStatusClassName(row.treatment?.artifacts?.resolutionStatus))}>{formatResolutionStatus(row.treatment?.artifacts?.resolutionStatus)}</div>
-                        <div className="mt-1 text-[11px] text-muted-foreground">Baseline {formatResolutionStatus(row.baseline?.artifacts?.resolutionStatus)}</div>
-                      </TableCell>
-                    ) : (
-                      <>
-                        <TableCell className={cn("font-medium", resolutionStatusClassName(row.baseline?.artifacts?.resolutionStatus))}>{formatResolutionStatus(row.baseline?.artifacts?.resolutionStatus)}</TableCell>
-                        {comparisonPair ? <TableCell className={cn("font-medium", resolutionStatusClassName(row.treatment?.artifacts?.resolutionStatus))}>{formatResolutionStatus(row.treatment?.artifacts?.resolutionStatus)}</TableCell> : null}
-                      </>
-                    )}
+                    <TableCell className={cn("font-medium", resolutionStatusClassName(resolutionStatusValue(row.baseline)))}>{formatResolutionStatus(resolutionStatusValue(row.baseline))}</TableCell>
+                    {comparisonPair ? <TableCell className={cn("font-medium", resolutionStatusClassName(resolutionStatusValue(row.treatment)))}>{formatResolutionStatus(resolutionStatusValue(row.treatment))}</TableCell> : null}
+                    <SortableMetricCell value={rowMetricValue(row, "contextF1", Boolean(comparisonPair))} metricKey="contextF1" />
+                    <SortableMetricCell value={rowMetricValue(row, "fileF1", Boolean(comparisonPair))} metricKey="fileF1" />
+                    <SortableMetricCell value={rowMetricValue(row, "blockF1", Boolean(comparisonPair))} metricKey="blockF1" />
+                    <SortableMetricCell value={rowMetricValue(row, "steps", Boolean(comparisonPair))} metricKey="steps" />
                     <TableCell>
                       <Button variant="outline" size="icon" className="h-8 w-8" aria-label={`View details for ${row.instanceId}`} onClick={() => { window.location.hash = `#/comparisons/${comparison.id}/instances/${encodeURIComponent(row.instanceId)}`; }}>
                         <Eye className="h-4 w-4" />
@@ -217,7 +322,7 @@ export function InstanceResultsSection({
                           comparison={comparison}
                           row={row}
                           comparisonPair={comparisonPair}
-                          viewMode={viewMode}
+                          viewMode={tableViewMode}
                           deltaDisplayMode={deltaDisplayMode}
                         />
                       </TableCell>
@@ -236,6 +341,42 @@ export function InstanceResultsSection({
       </div>
     </section>
   );
+}
+
+function SortableMetricCell({ value, metricKey }: { value: number | null; metricKey: SortKey }) {
+  return <TableCell className="text-right font-mono text-sm tabular-nums">{formatSortableMetricValue(value, metricKey)}</TableCell>;
+}
+
+function compareRowsBySortKey(left: InstanceRow, right: InstanceRow, sort: Exclude<SortState, null>, preferTreatment: boolean): number {
+  const leftValue = rowMetricValue(left, sort.key, preferTreatment);
+  const rightValue = rowMetricValue(right, sort.key, preferTreatment);
+  if (leftValue === null && rightValue === null) return left.instanceId.localeCompare(right.instanceId);
+  if (leftValue === null) return 1;
+  if (rightValue === null) return -1;
+  const delta = leftValue - rightValue;
+  if (delta === 0) return left.instanceId.localeCompare(right.instanceId);
+  return sort.direction === "asc" ? delta : -delta;
+}
+
+function rowMetricValue(row: InstanceRow, sortKey: SortKey, preferTreatment: boolean): number | null {
+  const instance = preferTreatment ? row.treatment ?? row.baseline : row.baseline;
+  if (!instance) return null;
+  if (sortKey === "contextF1") return instanceContextF1(instance);
+  if (sortKey === "fileF1") return instanceLevelF1(instance, "file");
+  if (sortKey === "blockF1") return instanceLevelF1(instance, "span");
+  return typeof instance.trajectory.steps === "number" && Number.isFinite(instance.trajectory.steps) ? instance.trajectory.steps : null;
+}
+
+function instanceLevelF1(instance: ComparisonInstance, key: "file" | "span"): number | null {
+  if (instance.artifacts && instance.artifacts.evaluationStatus !== "valid") return null;
+  const metric = instance.quality[key];
+  const values = coveragePrecision(metric.predSize, metric.goldSize, metric.intersection);
+  return f1(values.coverage, values.precision);
+}
+
+function formatSortableMetricValue(value: number | null, metricKey: SortKey): string {
+  if (value === null) return "-";
+  return metricKey === "steps" ? formatPatternMetric(value) : formatMetric(value);
 }
 
 function CompactInstanceExpansion({

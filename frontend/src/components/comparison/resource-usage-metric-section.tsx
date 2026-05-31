@@ -54,7 +54,11 @@ const resourceDistributionColors = [
   "hsl(var(--chart-5))",
 ];
 
-export function ResourceUsageMetricSection(props: MetricSectionProps) {
+type ResourceUsageMetricSectionProps = MetricSectionProps & {
+  metricDefinitions?: MetricDefinition[];
+};
+
+export function ResourceUsageMetricSection(props: ResourceUsageMetricSectionProps) {
   return <CombinedResourceUsageSection {...props} />;
 }
 
@@ -173,21 +177,23 @@ function CombinedResourceUsageSection({
   nonGraphDisplay = false,
   collapsible = false,
   defaultOpen = true,
-}: MetricSectionProps) {
+  metricDefinitions = resourceMetricDefinitions,
+}: ResourceUsageMetricSectionProps) {
   const comparisonPair = getComparisonPair(comparison);
   const showDeltas = viewMode === "treatment-delta" && comparisonPair;
   const showVersus = showDeltas && treatmentDeltaDisplay === "versus";
-  const variants = showDeltas && !showVersus ? [comparisonPair.treatment] : comparison.variants;
+  const summaryVariants = showDeltas && !showVersus ? [comparisonPair.treatment] : comparison.variants;
+  const graphVariants = comparison.variants;
   const panels = resourceDistributionMetrics
     .map((distributionMetric) => ({
       distributionMetric,
-      metricDefinition: resourceMetricDefinitions.find((metric) => metric.key === distributionMetric.metricKey),
+      metricDefinition: metricDefinitions.find((metric) => metric.key === distributionMetric.metricKey),
     }))
     .filter((panel): panel is { distributionMetric: ResourceDistributionMetric; metricDefinition: MetricDefinition } =>
       Boolean(panel.metricDefinition),
     )
     .filter(({ distributionMetric, metricDefinition }) =>
-      variants.some((variant) => metricDefinition.value(variant) !== "—" || getResourceValues(variant, distributionMetric).length > 0),
+      graphVariants.some((variant) => metricDefinition.value(variant) !== "—" || getResourceValues(variant, distributionMetric).length > 0),
     );
 
   if (panels.length === 0) return null;
@@ -200,7 +206,7 @@ function CombinedResourceUsageSection({
         treatmentDeltaDisplay={treatmentDeltaDisplay}
         deltaDisplayMode={deltaDisplayMode}
         panels={panels}
-        variants={variants}
+        variants={summaryVariants}
       />
       {nonGraphDisplay ? null : panels.map(({ distributionMetric, metricDefinition }) => (
         <ComparisonSectionShell
@@ -218,7 +224,7 @@ function CombinedResourceUsageSection({
               deltaDisplayMode={deltaDisplayMode}
               distributionMetric={distributionMetric}
               metricDefinition={metricDefinition}
-              variants={variants}
+              variants={graphVariants}
             />
           </div>
         </ComparisonSectionShell>
