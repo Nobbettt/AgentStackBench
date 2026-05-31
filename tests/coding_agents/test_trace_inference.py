@@ -120,6 +120,29 @@ def test_infer_retrieval_step_from_long_quoted_command_ignores_toolchain_paths(t
     assert step is None
     assert meta == {}
 
+
+def test_infer_retrieval_step_ignores_rg_file_lists_without_line_hits(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/zsh -lc 'rg --files | rg \"pkg|tests\"'"
+    output = "pkg/mod.py\ntests/test_mod.py\npkg/extra.py\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step is None
+
+
+def test_infer_retrieval_step_ignores_find_file_lists(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/zsh -lc 'find . -name \"*.py\"'"
+    output = "./pkg/mod.py\n./tests/test_mod.py\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step is None
+
+
 def test_trajectory_from_steps_prefers_grounded_files_over_search_only_files() -> None:
     traj = trajectory_from_steps(
         [

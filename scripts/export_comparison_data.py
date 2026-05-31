@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,7 @@ DEFAULT_SUITE_DIR = REPO_ROOT / "results" / "run_suites" / "codex-superpowers-mo
 DEFAULT_OUTPUT_PATH = REPO_ROOT / "site-data" / "comparison.json"
 DEFAULT_DETAIL_DIR = REPO_ROOT / "site-data" / "instances"
 DEFAULT_VARIANT = "with-superpowers-mounted"
+DEFAULT_REPO_CACHE_DIR = REPO_ROOT / ".cache" / "repos"
 
 
 class ComparisonExportError(RuntimeError):
@@ -51,6 +54,18 @@ def _resolve_path(path_like: str | Path, suite_dir: Path) -> Path:
     if repo_candidate.exists():
         return repo_candidate
     return suite_dir / path
+
+
+def _variant_artifact_path(
+    variant_manifest: dict[str, Any],
+    *,
+    suite_dir: Path,
+    stem: str,
+    artifact_suffix: str | None,
+) -> Path:
+    suffix = str(artifact_suffix or "").strip().strip(".")
+    filename = f"{stem}.{suffix}.jsonl" if suffix else f"{stem}.jsonl"
+    return _resolve_path(Path(variant_manifest["output_dir"]) / filename, suite_dir)
 
 
 def _titleize(value: str | None) -> str:
@@ -103,6 +118,129 @@ def _format_rate(count: int, total: int) -> str:
     if total <= 0:
         return "0.0%"
     return _format_percent(count / total)
+
+
+def _github_repo_slug(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = re.search(r"github\.com[:/]([^/\s]+/[^/\s.]+)(?:\.git)?", text)
+    if match:
+        return match.group(1)
+    if "/" in text and "://" not in text:
+        owner, repo = text.split("/", 1)
+        if owner and repo:
+            return f"{owner}/{repo.removesuffix('.git')}"
+    return None
+
+
+def _repo_slug_from_instance_id(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if "__" not in text:
+        return None
+    owner_raw, repo_raw = text.split("__", 1)
+    owner = owner_raw.removeprefix("instance_")
+    repo = re.sub(r"-[0-9a-f]{40}(?:-v[0-9a-z]+)?$", "", repo_raw, flags=re.IGNORECASE)
+    repo = re.sub(r"-v[0-9a-z]+$", "", repo, flags=re.IGNORECASE)
+    repo = re.sub(r"-\d+$", "", repo)
+    if not owner or not repo:
+        return None
+    return f"{owner}/{repo}"
+
+
+def _repository_slug(task_row: dict[str, Any], record: dict[str, Any]) -> str | None:
+    return (
+        _github_repo_slug(record.get("repo_url"))
+        or _github_repo_slug(task_row.get("repo_url"))
+        or _github_repo_slug(task_row.get("repo"))
+        or _repo_slug_from_instance_id(record.get("original_inst_id"))
+        or _repo_slug_from_instance_id(task_row.get("original_inst_id"))
+        or _repo_slug_from_instance_id(task_row.get("instance_id"))
+    )
+
+
+_REPOSITORY_SIZE_CACHE: dict[tuple[str, str, bool], dict[str, Any]] = {}
+
+
+def _repository_line_count(repo_dir: Path, commit: str) -> int | None:
+    result = subprocess.run(
+        ["git", "-C", str(repo_dir), "grep", "-I", "-c", "-e", "^", commit, "--", "."],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"},
+    )
+    if result.returncode != 0 or result.stderr.strip():
+        return None
+
+    total = 0
+    for line in result.stdout.splitlines():
+        _prefix, separator, count_text = line.rpartition(":")
+        if not separator:
+            return None
+        try:
+            total += int(count_text)
+        except ValueError:
+            return None
+    return total
+
+
+def _repository_size_payload(
+    task_row: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    include_line_counts: bool = False,
+) -> dict[str, Any] | None:
+    repo = _repository_slug(task_row, record)
+    if not repo:
+        return None
+
+    commit = str(record.get("commit") or task_row.get("commit") or task_row.get("base_commit") or "").strip()
+    if not commit:
+        return {"status": "unavailable", "reason": "missing_commit", "repo": repo}
+
+    cache_key = (repo, commit, include_line_counts)
+    if cache_key in _REPOSITORY_SIZE_CACHE:
+        return _REPOSITORY_SIZE_CACHE[cache_key]
+
+    repo_dir = DEFAULT_REPO_CACHE_DIR / f"github.com__{repo.replace('/', '__')}"
+    if not repo_dir.exists():
+        payload = {"status": "unavailable", "reason": "missing_repo_cache", "repo": repo, "commit": commit}
+        _REPOSITORY_SIZE_CACHE[cache_key] = payload
+        return payload
+
+    result = subprocess.run(
+        ["git", "-C", str(repo_dir), "ls-tree", "-r", "--name-only", "-z", commit],
+        check=False,
+        capture_output=True,
+        text=False,
+    )
+    if result.returncode != 0:
+        payload = {"status": "unavailable", "reason": "missing_commit", "repo": repo, "commit": commit}
+        _REPOSITORY_SIZE_CACHE[cache_key] = payload
+        return payload
+
+    tracked_files = 0
+    for raw_entry in result.stdout.split(b"\0"):
+        if not raw_entry:
+            continue
+        tracked_files += 1
+
+    payload = {
+        "status": "available",
+        "repo": repo,
+        "trackedFiles": tracked_files,
+    }
+    if include_line_counts:
+        tracked_lines = _repository_line_count(repo_dir, commit)
+        if tracked_lines is None:
+            payload["lineCountStatus"] = "unavailable"
+            payload["lineCountReason"] = "missing_blob_contents"
+        else:
+            payload["lineCountStatus"] = "available"
+            payload["trackedTextLines"] = tracked_lines
+    _REPOSITORY_SIZE_CACHE[cache_key] = payload
+    return payload
 
 
 def _safe_mean(values: list[float | int | None]) -> float | None:
@@ -748,12 +886,28 @@ def _build_instance_payloads(
     task_rows: list[dict[str, Any]],
     gold_loader: GoldLoader | None,
     resolution_status_lookup: dict[str, str],
+    artifact_suffix: str | None = None,
+    include_repo_line_counts: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     effective_config_path = _resolve_path(variant_manifest["effective_config_path"], suite_dir)
-    pred_path = _resolve_path(Path(variant_manifest["output_dir"]) / "pred.jsonl", suite_dir)
-    eval_path = _resolve_path(
-        variant_manifest.get("eval_results_path") or Path(variant_manifest["output_dir"]) / "eval.jsonl",
-        suite_dir,
+    pred_path = _variant_artifact_path(
+        variant_manifest,
+        suite_dir=suite_dir,
+        stem="pred",
+        artifact_suffix=artifact_suffix,
+    )
+    eval_path = (
+        _variant_artifact_path(
+            variant_manifest,
+            suite_dir=suite_dir,
+            stem="eval",
+            artifact_suffix=artifact_suffix,
+        )
+        if artifact_suffix
+        else _resolve_path(
+            variant_manifest.get("eval_results_path") or Path(variant_manifest["output_dir"]) / "eval.jsonl",
+            suite_dir,
+        )
     )
     effective_config = (_read_json(effective_config_path).get("effective_config", {}) if effective_config_path.exists() else {})
 
@@ -810,6 +964,11 @@ def _build_instance_payloads(
         cost_usd = _extract_cost_usd(raw_response) if isinstance(raw_response, dict) else None
         has_model_patch = bool(str(record.get("model_patch") or "").strip())
         has_prediction = pred_row is not None
+        repository_size = _repository_size_payload(
+            task_row,
+            record,
+            include_line_counts=include_repo_line_counts,
+        )
 
         steps = int((eval_row.get("num_steps") if eval_row is not None else None) or 0)
         line_steps_total = 0
@@ -934,6 +1093,7 @@ def _build_instance_payloads(
                     "toolCalls": len(record.get("tool_calls") or []),
                     "costUsd": cost_usd,
                 },
+                **({"repositorySize": repository_size} if repository_size is not None else {}),
                 "skills": {
                     "totalInvocations": sum(skill_counts.values()),
                     "byType": [
@@ -1014,8 +1174,14 @@ def _aggregate_pattern_metrics(
     variant_manifest: dict[str, Any],
     task_rows: list[dict[str, Any]],
     gold_loader: GoldLoader | None,
+    artifact_suffix: str | None = None,
 ) -> dict[str, str]:
-    pred_path = _resolve_path(Path(variant_manifest["output_dir"]) / "pred.jsonl", suite_dir)
+    pred_path = _variant_artifact_path(
+        variant_manifest,
+        suite_dir=suite_dir,
+        stem="pred",
+        artifact_suffix=artifact_suffix,
+    )
     if not pred_path.exists():
         return {}
 
@@ -1187,16 +1353,42 @@ def _aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, str]:
     symbol_f1 = _f1(symbol_cov, symbol_prec)
     span_f1 = _f1(span_cov, span_prec)
     line_f1 = _f1(line_cov, line_prec)
+    context_recall = (file_cov + symbol_cov + span_cov) / 3
+    context_precision = (file_prec + symbol_prec + span_prec) / 3
     context_f1 = (file_f1 + symbol_f1 + span_f1) / 3
     efficiency = (traj_auc_file + traj_auc_symbol + traj_auc_span) / 3
     redundancy = (traj_redundancy_file + traj_redundancy_symbol + traj_redundancy_span) / 3
 
     return {
         "contextF1": _format_metric(context_f1),
+        "contextRecall": _format_metric(context_recall),
+        "contextPrecision": _format_metric(context_precision),
         "fileF1": _format_metric(file_f1),
         "symbolF1": _format_metric(symbol_f1),
         "spanF1": _format_metric(span_f1),
         "avgLineF1": _format_metric(line_f1),
+        "contextLevels": {
+            "file": {
+                "recall": _format_metric(file_cov),
+                "precision": _format_metric(file_prec),
+                "f1": _format_metric(file_f1),
+            },
+            "symbol": {
+                "recall": _format_metric(symbol_cov),
+                "precision": _format_metric(symbol_prec),
+                "f1": _format_metric(symbol_f1),
+            },
+            "block": {
+                "recall": _format_metric(span_cov),
+                "precision": _format_metric(span_prec),
+                "f1": _format_metric(span_f1),
+            },
+            "line": {
+                "recall": _format_metric(line_cov),
+                "precision": _format_metric(line_prec),
+                "f1": _format_metric(line_f1),
+            },
+        },
         "efficiency": _format_metric(efficiency),
         "redundancy": _format_metric(redundancy),
     }
@@ -1237,12 +1429,23 @@ def _load_variant_payload(
     suite_summary: dict[str, Any],
     variant_manifest: dict[str, Any],
     gold_loader: GoldLoader | None,
+    artifact_suffix: str | None = None,
+    include_repo_line_counts: bool = False,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     effective_config_path = _resolve_path(variant_manifest["effective_config_path"], suite_dir)
     task_results_path = _resolve_path(variant_manifest["task_results_path"], suite_dir)
-    eval_path = _resolve_path(
-        variant_manifest.get("eval_results_path") or Path(variant_manifest["output_dir"]) / "eval.jsonl",
-        suite_dir,
+    eval_path = (
+        _variant_artifact_path(
+            variant_manifest,
+            suite_dir=suite_dir,
+            stem="eval",
+            artifact_suffix=artifact_suffix,
+        )
+        if artifact_suffix
+        else _resolve_path(
+            variant_manifest.get("eval_results_path") or Path(variant_manifest["output_dir"]) / "eval.jsonl",
+            suite_dir,
+        )
     )
     resolution_summary_path = _resolve_path(
         variant_manifest.get("resolution_summary_path") or Path(variant_manifest["output_dir"]) / "resolution-summary.json",
@@ -1254,7 +1457,7 @@ def _load_variant_payload(
     if not task_results_path.exists():
         raise ComparisonExportError(f"Missing task results for variant {variant_manifest['name']}")
     if not eval_path.exists():
-        raise ComparisonExportError(f"Missing eval.jsonl for variant {variant_manifest['name']}")
+        raise ComparisonExportError(f"Missing {eval_path.name} for variant {variant_manifest['name']}")
     effective_wrapper = _read_json(effective_config_path)
     effective_config = effective_wrapper.get("effective_config", {})
     task_rows = _read_jsonl(task_results_path)
@@ -1291,6 +1494,8 @@ def _load_variant_payload(
         task_rows=task_rows,
         gold_loader=gold_loader,
         resolution_status_lookup=resolution_status_lookup,
+        artifact_suffix=artifact_suffix,
+        include_repo_line_counts=include_repo_line_counts,
     )
     patch_producing_runs = sum(1 for row in instance_rows if (row.get("artifacts") or {}).get("hasModelPatch"))
     converted_predictions = sum(1 for row in instance_rows if (row.get("artifacts") or {}).get("hasPrediction"))
@@ -1373,10 +1578,13 @@ def _load_variant_payload(
             },
             "quality": {
                 "contextF1": quality["contextF1"],
+                "contextRecall": quality["contextRecall"],
+                "contextPrecision": quality["contextPrecision"],
                 "fileF1": quality["fileF1"],
                 "symbolF1": quality["symbolF1"],
                 "spanF1": quality["spanF1"],
                 "avgLineF1": quality["avgLineF1"],
+                "contextLevels": quality["contextLevels"],
                 "fixOverlapVsGold": fix_overlap_vs_gold_summary,
             },
             "efficiency": {
@@ -1401,6 +1609,8 @@ def build_comparison_export(
     suite_dir: Path,
     *,
     variant_name: str | None = None,
+    artifact_suffix: str | None = None,
+    include_repo_line_counts: bool = False,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     experiment_path = suite_dir / "experiment.json"
     summary_path = suite_dir / "summary.json"
@@ -1441,6 +1651,8 @@ def build_comparison_export(
             suite_summary=summary_variant,
             variant_manifest=manifest_variant,
             gold_loader=gold_loader,
+            artifact_suffix=artifact_suffix,
+            include_repo_line_counts=include_repo_line_counts,
         )
         variant_payload["label"] = label
         ordered_variants.append(variant_payload)
@@ -1523,6 +1735,10 @@ def build_comparison_export(
     comparison_card["notes"].append(
         "Pass@1 is computed via the SWE-bench harness on generated patches. Completed Run Rate remains a separate fork-specific execution-status metric."
     )
+    if artifact_suffix:
+        comparison_card["notes"].append(
+            f"Context retrieval metrics are exported from {artifact_suffix.strip().strip('.')} postprocess artifacts."
+        )
     for variant in ordered_variants:
         for note in variant.get("notes") or []:
             if note not in comparison_card["notes"]:
@@ -1568,8 +1784,19 @@ def build_comparison_export(
     return payload, detail_payloads
 
 
-def build_comparison_payload(suite_dir: Path, *, variant_name: str | None = None) -> dict[str, Any]:
-    payload, _ = build_comparison_export(suite_dir, variant_name=variant_name)
+def build_comparison_payload(
+    suite_dir: Path,
+    *,
+    variant_name: str | None = None,
+    artifact_suffix: str | None = None,
+    include_repo_line_counts: bool = False,
+) -> dict[str, Any]:
+    payload, _ = build_comparison_export(
+        suite_dir,
+        variant_name=variant_name,
+        artifact_suffix=artifact_suffix,
+        include_repo_line_counts=include_repo_line_counts,
+    )
     return payload
 
 
@@ -1599,6 +1826,20 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_DETAIL_DIR,
         help=f"Directory for per-instance detail JSON files. Default: {DEFAULT_DETAIL_DIR}",
     )
+    parser.add_argument(
+        "--artifact-suffix",
+        type=str,
+        default=None,
+        help="Optional postprocess artifact suffix, e.g. 'aligned' reads pred.aligned.jsonl and eval.aligned.jsonl.",
+    )
+    parser.add_argument(
+        "--include-repo-line-counts",
+        action="store_true",
+        help=(
+            "Include git-tracked text line counts in repository-size metadata. "
+            "This fails closed when blob contents are unavailable locally and never lazy-fetches missing blobs."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1619,7 +1860,12 @@ def _write_instance_detail_files(
 
 def main() -> None:
     args = parse_args()
-    payload, detail_payloads = build_comparison_export(args.suite_dir.resolve(), variant_name=args.variant)
+    payload, detail_payloads = build_comparison_export(
+        args.suite_dir.resolve(),
+        variant_name=args.variant,
+        artifact_suffix=args.artifact_suffix,
+        include_repo_line_counts=args.include_repo_line_counts,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     _write_instance_detail_files(detail_dir=args.detail_dir.resolve(), detail_payloads=detail_payloads)

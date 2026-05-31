@@ -89,6 +89,17 @@ export type ComparisonInstance = {
     toolCalls?: number | null;
     costUsd?: number | null;
   };
+  repositorySize?: {
+    status?: "available" | "unavailable";
+    reason?: string | null;
+    repo?: string | null;
+    commit?: string | null;
+    trackedFiles?: number | null;
+    lineCountStatus?: "available" | "unavailable";
+    lineCountReason?: string | null;
+    trackedTextLines?: number | null;
+    trackedBytes?: number | null;
+  };
   skills?: {
     totalInvocations?: number;
     byType?: Array<{
@@ -243,10 +254,34 @@ export type ComparisonCard = {
       };
       quality: {
         contextF1?: string;
+        contextRecall?: string;
+        contextPrecision?: string;
         fileF1?: string;
         symbolF1?: string;
         spanF1?: string;
         avgLineF1?: string;
+        contextLevels?: {
+          file?: {
+            recall?: string;
+            precision?: string;
+            f1?: string;
+          };
+          symbol?: {
+            recall?: string;
+            precision?: string;
+            f1?: string;
+          };
+          block?: {
+            recall?: string;
+            precision?: string;
+            f1?: string;
+          };
+          line?: {
+            recall?: string;
+            precision?: string;
+            f1?: string;
+          };
+        };
         fixOverlapVsGold?: PatchOverlapSummary;
         fileCoverage?: string;
         spanCoverage?: string;

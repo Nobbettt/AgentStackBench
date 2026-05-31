@@ -1,8 +1,9 @@
-// Fork note: Modified by Norbert Laszlo on 2026-04-24 from upstream ContextBench.
-// Summary of changes: split frontend page and comparison components into smaller modules.
+// SPDX-License-Identifier: Apache-2.0
+// Fork note: Modified by Norbert Laszlo on 2026-05-26 from upstream ContextBench.
+// Summary of changes: split frontend modules and added global navigation.
 
-import { useEffect, useState } from "react";
-import { ArrowLeft } from "lucide-react";
+import { type ReactNode, useEffect, useState } from "react";
+import { Github } from "lucide-react";
 
 import { ComparisonInstanceDetailPage } from "@/components/comparison-results";
 import { ComparisonPage } from "@/components/pages/comparison-page";
@@ -11,6 +12,8 @@ import { type ComparisonData, type ComparisonInstanceDetail, findComparisonById 
 import { loadComparisonData } from "@/data/load-comparison-data";
 import { loadInstanceDetail } from "@/data/load-instance-detail";
 import { parseRoute, type Route } from "@/routes";
+
+const GITHUB_REPO_URL = "https://github.com/Nobbettt/AgentStackBench";
 
 export default function App() {
   const [data, setData] = useState<ComparisonData | null>(null);
@@ -70,29 +73,30 @@ export default function App() {
   }, [route]);
 
   if (loadError) {
-    return <StatusPage title="Unable to load comparison data" message={loadError} />;
+    return (
+      <AppShell>
+        <StatusPage title="Unable to load comparison data" message={loadError} />
+      </AppShell>
+    );
   }
 
   if (!data) {
-    return <StatusPage title="Loading comparison data" />;
+    return (
+      <AppShell>
+        <StatusPage title="Loading comparison data" />
+      </AppShell>
+    );
   }
 
   const comparison = route.page === "comparison" ? findComparisonById(data, route.id) : undefined;
   const detailComparison = route.page === "instanceDetail" ? findComparisonById(data, route.comparisonId) : undefined;
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <AppShell>
       {route.page === "comparison" && comparison ? (
         <ComparisonPage key={comparison.id} comparison={comparison} />
       ) : route.page === "instanceDetail" ? (
-        <main className="mx-auto flex max-w-[96rem] flex-col gap-6 px-4 py-8">
-          <a
-            href={detailComparison ? `#/comparisons/${detailComparison.id}` : "#/"}
-            className="inline-flex items-center gap-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            {detailComparison ? "Back to comparison" : "Back to overview"}
-          </a>
+        <main className="mx-auto flex max-w-[96rem] flex-col gap-4 px-4 pb-8 pt-4">
           {detailComparison ? (
             <ComparisonInstanceDetailPage
               comparison={detailComparison}
@@ -109,17 +113,43 @@ export default function App() {
       ) : (
         <OverviewPage data={data} />
       )}
+    </AppShell>
+  );
+}
+
+function AppShell({ children }: { children: ReactNode }) {
+  return (
+    <div className="min-h-screen bg-background text-foreground">
+      <header className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur">
+        <nav className="mx-auto flex h-14 max-w-[96rem] items-center justify-between px-4" aria-label="Primary">
+          <a
+            href="#/"
+            className="inline-flex min-h-9 items-center text-lg font-semibold tracking-tight text-foreground transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            AgentStackBench
+          </a>
+          <a
+            href={GITHUB_REPO_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            aria-label="Open AgentStackBench on GitHub"
+          >
+            <Github className="h-4 w-4" />
+            <span>GitHub</span>
+          </a>
+        </nav>
+      </header>
+      {children}
     </div>
   );
 }
 
 function StatusPage({ title, message }: { title: string; message?: string }) {
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <main className="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-8">
-        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-        {message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
-      </main>
-    </div>
+    <main className="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-8">
+      <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
+      {message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
+    </main>
   );
 }

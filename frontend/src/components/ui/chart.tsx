@@ -1,4 +1,6 @@
 
+// SPDX-License-Identifier: Apache-2.0
+
 import * as React from "react";
 import * as RechartsPrimitive from "recharts";
 
@@ -106,7 +108,7 @@ export const ChartTooltipContent = React.forwardRef<
       formatter,
       labelKey,
       nameKey,
-      ...props
+      ..._props
     },
     ref,
   ) => {
@@ -127,7 +129,6 @@ export const ChartTooltipContent = React.forwardRef<
       <div
         ref={ref}
         className={cn("grid min-w-[12rem] gap-2 rounded-lg border bg-background px-3 py-2 text-xs shadow-xl", className)}
-        {...props}
       >
         {!hideLabel && tooltipLabel != null ? <div className="font-medium text-foreground">{tooltipLabel}</div> : null}
         <div className="grid gap-2">
@@ -174,7 +175,7 @@ export const ChartLegendContent = React.forwardRef<
     payload?: any[];
     nameKey?: string;
   }
->(({ className, payload, nameKey, ...props }, ref) => {
+>(({ className, payload, nameKey, ..._props }, ref) => {
   const { config } = useChart();
 
   if (!payload?.length) {
@@ -182,7 +183,7 @@ export const ChartLegendContent = React.forwardRef<
   }
 
   return (
-    <div ref={ref} className={cn("flex flex-wrap items-center gap-4 text-sm", className)} {...props}>
+    <div ref={ref} className={cn("flex flex-wrap items-center gap-4 text-sm", className)}>
       {payload.map((item, index) => {
         const chartKey = resolveChartKey(item, nameKey);
         const chartConfig = chartKey ? config[chartKey] : undefined;

@@ -1,27 +1,16 @@
 
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Columns2, Percent, TrendingUpDown } from "lucide-react";
+import { ChevronDown, Columns2, Percent, SlidersHorizontal, TrendingUpDown } from "lucide-react";
+import { Label, Pie, PieChart } from "recharts";
 
-import { ComparisonResults } from "@/components/comparison-results";
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
+import { ComparisonResults, type ComparisonResultsTab } from "@/components/comparison-results";
 import { Button } from "@/components/ui/button";
+import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { buildFilteredComparison, comparisonHasInstanceData, getAvailableBenches, getAvailableLanguages } from "@/data/comparison-aggregation";
 import type { ComparisonCard } from "@/data/comparisons";
 import { formatLanguageLabel } from "@/components/comparison/format";
 import type { ComparisonResultsViewMode, DeltaDisplayMode } from "@/components/comparison/types";
-
-function formatAgentName(agent: ComparisonCard["agent"]): string {
-  return agent === "codex" ? "Codex" : "Claude Code";
-}
-
-function getComparisonModels(comparison: ComparisonCard): string[] {
-  return Array.from(new Set(
-    comparison.variants
-      .map((variant) => variant.model ?? variant.parameters.find((parameter) => parameter.label.toLowerCase() === "model")?.value)
-      .filter((value): value is string => Boolean(value?.trim())),
-  ));
-}
 
 function formatComparisonRunDate(comparison: ComparisonCard): string | null {
   const timestamp = comparison.completedAt ?? comparison.startedAt;
@@ -31,19 +20,182 @@ function formatComparisonRunDate(comparison: ComparisonCard): string | null {
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(date);
 }
 
-function getDatasetSliceSummary(comparison: ComparisonCard): string | null {
+const sliceColors = [
+  "hsl(var(--chart-1))",
+  "hsl(var(--chart-2))",
+  "hsl(var(--chart-3))",
+  "hsl(var(--chart-4))",
+  "hsl(var(--chart-5))",
+];
+const TOP_REPOSITORY_SLICE_LIMIT = 8;
+const repositorySizeBuckets = [
+  { id: "repo-size-lt-1k", label: "<1k files", min: 0, max: 1_000 },
+  { id: "repo-size-1k-5k", label: "1k-5k files", min: 1_000, max: 5_000 },
+  { id: "repo-size-5k-20k", label: "5k-20k files", min: 5_000, max: 20_000 },
+  { id: "repo-size-20k-50k", label: "20k-50k files", min: 20_000, max: 50_000 },
+  { id: "repo-size-50k-plus", label: "50k+ files", min: 50_000, max: Number.POSITIVE_INFINITY },
+] as const;
+
+type DistributionSliceEntry = {
+  id: string;
+  label: string;
+  count: number;
+  fill: string;
+};
+
+type DistributionSliceData = {
+  slices: DistributionSliceEntry[];
+  distinctCount: number;
+};
+
+function getDatasetSliceData(comparison: ComparisonCard): DistributionSliceEntry[] {
   const benchCounts = comparison.taskSet?.benchCounts;
-  if (!benchCounts || Object.keys(benchCounts).length === 0) return null;
+  if (!benchCounts || Object.keys(benchCounts).length === 0) return [];
   return Object.entries(benchCounts)
     .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-    .map(([bench, count]) => `${count} ${bench}`)
-    .join(" / ");
+    .map(([bench, count], index) => ({
+      id: `bench-${bench}`,
+      label: bench,
+      count,
+      fill: sliceColors[index % sliceColors.length],
+    }));
+}
+
+function getLanguageSliceData(comparison: ComparisonCard): DistributionSliceEntry[] {
+  const languagesByInstanceId = new Map<string, string>();
+  for (const variant of comparison.variants) {
+    for (const instance of variant.instances ?? []) {
+      if (!languagesByInstanceId.has(instance.instanceId)) {
+        languagesByInstanceId.set(instance.instanceId, instance.language);
+      }
+    }
+  }
+
+  const languageCounts = new Map<string, number>();
+  for (const language of languagesByInstanceId.values()) {
+    languageCounts.set(language, (languageCounts.get(language) ?? 0) + 1);
+  }
+
+  return Array.from(languageCounts.entries())
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([language, count], index) => ({
+      id: `language-${language}`,
+      label: formatLanguageLabel(language),
+      count,
+      fill: sliceColors[index % sliceColors.length],
+    }));
+}
+
+function getRepositorySliceData(comparison: ComparisonCard): DistributionSliceData {
+  const repositoriesByInstanceId = new Map<string, string>();
+  for (const variant of comparison.variants) {
+    for (const instance of variant.instances ?? []) {
+      if (!repositoriesByInstanceId.has(instance.instanceId)) {
+        repositoriesByInstanceId.set(instance.instanceId, getRepositoryLabel(instance.originalInstanceId ?? instance.instanceId));
+      }
+    }
+  }
+
+  const repositoryCounts = new Map<string, number>();
+  for (const repository of repositoriesByInstanceId.values()) {
+    repositoryCounts.set(repository, (repositoryCounts.get(repository) ?? 0) + 1);
+  }
+
+  const sortedRepositories = Array.from(repositoryCounts.entries())
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+  const topRepositories = sortedRepositories.slice(0, TOP_REPOSITORY_SLICE_LIMIT);
+  const otherCount = sortedRepositories
+    .slice(TOP_REPOSITORY_SLICE_LIMIT)
+    .reduce((sum, [, count]) => sum + count, 0);
+  const entries = otherCount > 0 ? [...topRepositories, ["Other", otherCount] as [string, number]] : topRepositories;
+
+  return {
+    distinctCount: repositoryCounts.size,
+    slices: entries.map(([repository, count], index) => ({
+      id: repository === "Other" ? "repo-other" : `repo-${index}`,
+      label: repository,
+      count,
+      fill: sliceColors[index % sliceColors.length],
+    })),
+  };
+}
+
+function getRepositorySizeSliceData(comparison: ComparisonCard): DistributionSliceEntry[] {
+  const sizeByInstanceId = new Map<string, number | null>();
+  for (const variant of comparison.variants) {
+    for (const instance of variant.instances ?? []) {
+      if (sizeByInstanceId.has(instance.instanceId)) continue;
+      const trackedFiles = instance.repositorySize?.trackedFiles;
+      sizeByInstanceId.set(instance.instanceId, typeof trackedFiles === "number" ? trackedFiles : null);
+    }
+  }
+
+  const bucketCounts = new Map<string, number>(repositorySizeBuckets.map((bucket) => [bucket.id, 0]));
+  let unavailableCount = 0;
+  for (const trackedFiles of sizeByInstanceId.values()) {
+    if (trackedFiles === null) {
+      unavailableCount += 1;
+      continue;
+    }
+
+    const bucket = repositorySizeBuckets.find((candidate) => trackedFiles >= candidate.min && trackedFiles < candidate.max);
+    if (bucket) {
+      bucketCounts.set(bucket.id, (bucketCounts.get(bucket.id) ?? 0) + 1);
+    }
+  }
+
+  const bucketEntries = repositorySizeBuckets
+    .map((bucket, index) => ({
+      id: bucket.id,
+      label: bucket.label,
+      count: bucketCounts.get(bucket.id) ?? 0,
+      fill: sliceColors[index % sliceColors.length],
+    }))
+    .filter((entry) => entry.count > 0);
+
+  return unavailableCount > 0
+    ? [
+        ...bucketEntries,
+        {
+          id: "repo-size-unavailable",
+          label: "No size data",
+          count: unavailableCount,
+          fill: sliceColors[bucketEntries.length % sliceColors.length],
+        },
+      ]
+    : bucketEntries;
+}
+
+function getRepositoryLabel(instanceId: string): string {
+  const [ownerRaw, repoRaw] = instanceId.split("__");
+  if (!ownerRaw || !repoRaw) return instanceId;
+  const owner = ownerRaw.replace(/^instance_/, "");
+  const repo = repoRaw
+    .replace(/-[0-9a-f]{40}(?:-v[0-9a-z]+)?$/i, "")
+    .replace(/-v[0-9a-z]+$/i, "")
+    .replace(/-\d+$/i, "");
+  return `${owner}/${repo}`;
 }
 
 function getComparisonPair(comparison: ComparisonCard) {
   if (comparison.variants.length < 2) return null;
   return { baseline: comparison.variants[0], treatment: comparison.variants[1] };
 }
+
+const segmentedControlClassName = "gap-0 rounded-md shadow-lg backdrop-blur";
+const segmentedControlItemClassName = "w-14 rounded-none bg-background px-0 data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
+type ComparisonPageTab = "setup" | ComparisonResultsTab;
+const comparisonTabs: Array<{ id: ComparisonPageTab; label: string }> = [
+  { id: "overview", label: "Overview" },
+  { id: "setup", label: "Setup & Dataset" },
+  { id: "execution", label: "Resource Usage" },
+  { id: "resolution", label: "Resolution" },
+  { id: "context", label: "Context" },
+  { id: "languages", label: "Metric Breakdowns" },
+  { id: "usage", label: "Skills" },
+  { id: "tools", label: "Tools" },
+  { id: "issues", label: "All Tasks" },
+];
 
 export function ComparisonPage({ comparison }: { comparison: ComparisonCard }) {
   const hasInstanceFilters = comparisonHasInstanceData(comparison);
@@ -52,23 +204,20 @@ export function ComparisonPage({ comparison }: { comparison: ComparisonCard }) {
   const [selectedLanguages, setSelectedLanguages] = useState<string[]>(availableLanguages);
   const [selectedBenches, setSelectedBenches] = useState<string[]>(availableBenches);
   const [viewMode, setViewMode] = useState<ComparisonResultsViewMode>("treatment-delta");
-  const [deltaDisplayMode, setDeltaDisplayMode] = useState<DeltaDisplayMode>("absolute");
+  const [deltaDisplayMode, setDeltaDisplayMode] = useState<DeltaDisplayMode>("percent");
+  const [activeTab, setActiveTab] = useState<ComparisonPageTab>("overview");
   const activeComparison = useMemo(
     () => hasInstanceFilters && selectedLanguages.length > 0 && selectedBenches.length > 0
       ? buildFilteredComparison(comparison, { languages: selectedLanguages, benches: selectedBenches })
       : comparison,
     [comparison, hasInstanceFilters, selectedBenches, selectedLanguages],
   );
-  const models = getComparisonModels(activeComparison);
   const runDate = formatComparisonRunDate(comparison);
-  const datasetSlice = getDatasetSliceSummary(activeComparison);
+  const datasetSliceData = getDatasetSliceData(activeComparison);
+  const languageSliceData = getLanguageSliceData(activeComparison);
+  const repositorySliceData = getRepositorySliceData(activeComparison);
+  const repositorySizeSliceData = getRepositorySizeSliceData(activeComparison);
   const comparisonPair = getComparisonPair(activeComparison);
-  const summaryCards = [
-    { label: "Coding Agent", value: formatAgentName(activeComparison.agent) },
-    { label: models.length > 1 ? "LLM Models" : "LLM Model", value: models.join(" / ") || "Unknown" },
-    ...(runDate ? [{ label: "Run Date", value: runDate }] : []),
-    ...(datasetSlice ? [{ label: "Dataset Slice", value: datasetSlice }] : []),
-  ];
 
   useEffect(() => {
     if (!hasInstanceFilters) return;
@@ -77,22 +226,18 @@ export function ComparisonPage({ comparison }: { comparison: ComparisonCard }) {
   }, [comparison.id, hasInstanceFilters, availableLanguages, availableBenches]);
 
   return (
-    <main className="mx-auto flex max-w-[88rem] flex-col gap-6 px-4 py-8">
-      <a href="#/" className="inline-flex items-center gap-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground">
-        <ArrowLeft className="h-4 w-4" /> Back to overview
-      </a>
-      <section className="rounded-lg bg-background p-6">
+    <main className="mx-auto flex max-w-[88rem] flex-col gap-4 px-4 pb-40 pt-4">
+      <section className="rounded-lg bg-background px-4 py-3">
         <div className="flex items-center gap-3">
           <img src={comparison.icon} alt="" className="h-6 w-6 shrink-0" />
           <div>
             <h1 className="text-3xl font-semibold tracking-tight">{comparison.title}</h1>
-            <p className="mt-2 text-sm text-muted-foreground">{comparison.summary}</p>
+            <p className="mt-1 text-sm text-muted-foreground">{comparison.summary}</p>
+            {runDate ? <p className="mt-1 text-sm text-muted-foreground">Run Date: {runDate}</p> : null}
           </div>
         </div>
-        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {summaryCards.map((card) => <SummaryCard key={card.label} label={card.label} value={card.value} />)}
-        </div>
       </section>
+      <ComparisonTabs activeTab={activeTab} onChange={setActiveTab} />
       {(hasInstanceFilters || comparisonPair) ? (
         <ComparisonControls
           comparisonPair={comparisonPair}
@@ -106,21 +251,49 @@ export function ComparisonPage({ comparison }: { comparison: ComparisonCard }) {
           hasInstanceFilters={hasInstanceFilters}
         />
       ) : null}
-      <SetupParameters comparison={comparison} comparisonPair={comparisonPair} viewMode={viewMode} />
-      {activeComparison.tasks > 0 ? (
-        <ComparisonResults comparison={activeComparison} viewMode={viewMode} deltaDisplayMode={deltaDisplayMode} />
+      {activeTab === "setup" ? (
+        <SetupParameters
+          comparison={activeComparison}
+          comparisonPair={comparisonPair}
+          viewMode={viewMode}
+          datasetSliceData={datasetSliceData}
+          languageSliceData={languageSliceData}
+          repositorySliceData={repositorySliceData}
+          repositorySizeSliceData={repositorySizeSliceData}
+        />
+      ) : activeComparison.tasks > 0 ? (
+        <ComparisonResults comparison={activeComparison} viewMode={viewMode} deltaDisplayMode={deltaDisplayMode} activeTab={activeTab} />
       ) : (
-        <section className="rounded-lg border bg-background p-6 text-sm text-muted-foreground">No tasks match the selected language and dataset filters.</section>
+        <section className="rounded-lg bg-background p-6 text-sm text-muted-foreground">No tasks match the selected language and dataset filters.</section>
       )}
     </main>
   );
 }
 
-function SummaryCard({ label, value }: { label: string; value: string }) {
+function ComparisonTabs({ activeTab, onChange }: { activeTab: ComparisonPageTab; onChange: (tab: ComparisonPageTab) => void }) {
   return (
-    <div className="rounded-md border p-4">
-      <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className="mt-2 break-words text-sm font-medium">{value}</div>
+    <div className="overflow-x-auto border-b" role="tablist" aria-label="Comparison result sections">
+      <div className="flex min-w-max gap-1">
+        {comparisonTabs.map((tab) => {
+          const selected = tab.id === activeTab;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              className={`border-b-2 px-4 py-3 text-sm font-medium transition-colors ${
+                selected
+                  ? "border-primary text-foreground"
+                  : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
+              }`}
+              onClick={() => onChange(tab.id)}
+            >
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -146,26 +319,100 @@ function ComparisonControls({
   taskCount: number;
   hasInstanceFilters: boolean;
 }) {
+  const [filtersOpen, setFiltersOpen] = useState(false);
+
   return (
-    <section className="rounded-lg border bg-background px-4 py-4">
-      <div className="space-y-4">
-        <div className="text-xs uppercase tracking-wide text-muted-foreground">Comparison Controls</div>
-        {comparisonPair ? (
-          <div className="flex flex-col items-center gap-3">
-            <ToggleGroup type="single" variant="outline" value={viewMode} onValueChange={(value) => value && setViewMode(value as ComparisonResultsViewMode)}>
-              <ToggleGroupItem value="treatment-delta" className="gap-2"><TrendingUpDown className="h-4 w-4" />Treatment Delta</ToggleGroupItem>
-              <ToggleGroupItem value="side-by-side" className="gap-2"><Columns2 className="h-4 w-4" />Side by Side</ToggleGroupItem>
-            </ToggleGroup>
-            {viewMode === "treatment-delta" ? (
-              <ToggleGroup type="single" variant="outline" value={deltaDisplayMode} onValueChange={(value) => value && setDeltaDisplayMode(value as DeltaDisplayMode)}>
-                <ToggleGroupItem value="absolute" aria-label="Numerical Diff"><span className="font-semibold tabular-nums">1.2→</span></ToggleGroupItem>
-                <ToggleGroupItem value="percent" aria-label="Percent Diff"><Percent className="h-4 w-4" /></ToggleGroupItem>
-              </ToggleGroup>
-            ) : null}
+    <section className="flex w-full flex-col items-end gap-2 sm:fixed sm:bottom-4 sm:right-4 sm:z-40 sm:w-[min(40rem,calc(100vw-2rem))]">
+      {hasInstanceFilters ? (
+        <div
+          id="comparison-filter-controls"
+          className={
+            filtersOpen
+              ? "max-h-[min(26rem,60vh)] w-full overflow-y-auto rounded-lg border bg-background/95 p-3 shadow-lg backdrop-blur"
+              : "hidden"
+          }
+        >
+          <FilterControls languages={languages} benches={benches} />
+          <div className="mt-3 flex justify-end text-sm text-muted-foreground">
+            Showing <span className="mx-1 font-medium text-foreground">{taskCount}</span> matching tasks.
           </div>
+        </div>
+      ) : null}
+      <div className="flex flex-col items-end gap-2">
+        {hasInstanceFilters ? (
+          <Button
+            variant="outline"
+            className="h-9 gap-2 bg-background px-3 shadow-lg backdrop-blur"
+            onClick={() => setFiltersOpen((isOpen) => !isOpen)}
+            aria-expanded={filtersOpen}
+            aria-controls="comparison-filter-controls"
+          >
+            <SlidersHorizontal className="h-4 w-4" />
+            Filters
+            <ChevronDown className={`h-4 w-4 transition-transform ${filtersOpen ? "rotate-180" : ""}`} />
+          </Button>
         ) : null}
-        {hasInstanceFilters ? <FilterControls languages={languages} benches={benches} /> : null}
-        <div className="flex justify-end text-sm text-muted-foreground">Showing <span className="mx-1 font-medium text-foreground">{taskCount}</span> matching tasks.</div>
+        {comparisonPair ? (
+          <>
+            <div
+              className={`overflow-hidden transition-all duration-200 ${
+                viewMode === "treatment-delta"
+                  ? "max-h-10 translate-y-0 opacity-100"
+                  : "max-h-0 translate-y-1 opacity-0"
+              }`}
+              aria-hidden={viewMode !== "treatment-delta"}
+            >
+              <ToggleGroup
+                type="single"
+                variant="outline"
+                value={deltaDisplayMode}
+                onValueChange={(value) => value && setDeltaDisplayMode(value as DeltaDisplayMode)}
+                className={segmentedControlClassName}
+              >
+                <ToggleGroupItem
+                  value="percent"
+                  aria-label="Percent diff"
+                  title="Percent diff"
+                  className={`${segmentedControlItemClassName} rounded-l-md border-r-0`}
+                >
+                  <Percent className="h-4 w-4" />
+                </ToggleGroupItem>
+                <ToggleGroupItem
+                  value="absolute"
+                  aria-label="Numerical diff"
+                  title="Numerical diff"
+                  className={`${segmentedControlItemClassName} rounded-r-md`}
+                >
+                  <span className="font-semibold tabular-nums">1.2→</span>
+                </ToggleGroupItem>
+              </ToggleGroup>
+            </div>
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              value={viewMode}
+              onValueChange={(value) => value && setViewMode(value as ComparisonResultsViewMode)}
+              className={segmentedControlClassName}
+            >
+              <ToggleGroupItem
+                value="treatment-delta"
+                aria-label="Treatment delta view"
+                title="Treatment delta view"
+                className={`${segmentedControlItemClassName} rounded-l-md border-r-0`}
+              >
+                <TrendingUpDown className="h-4 w-4" />
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="side-by-side"
+                aria-label="Side by side view"
+                title="Side by side view"
+                className={`${segmentedControlItemClassName} rounded-r-md`}
+              >
+                <Columns2 className="h-4 w-4" />
+              </ToggleGroupItem>
+            </ToggleGroup>
+          </>
+        ) : null}
       </div>
     </section>
   );
@@ -208,36 +455,248 @@ function SetupParameters({
   comparison,
   comparisonPair,
   viewMode,
+  datasetSliceData,
+  languageSliceData,
+  repositorySliceData,
+  repositorySizeSliceData,
 }: {
   comparison: ComparisonCard;
   comparisonPair: ReturnType<typeof getComparisonPair>;
   viewMode: ComparisonResultsViewMode;
+  datasetSliceData: DistributionSliceEntry[];
+  languageSliceData: DistributionSliceEntry[];
+  repositorySliceData: DistributionSliceData;
+  repositorySizeSliceData: DistributionSliceEntry[];
 }) {
   return (
-    <Accordion type="single" collapsible className="w-full rounded-lg border bg-background px-6">
-      <AccordionItem value="setup-parameters" className="border-b-0">
-        <AccordionTrigger className="text-xl font-semibold tracking-tight hover:no-underline">Setup Parameters</AccordionTrigger>
-        <AccordionContent>
-          {viewMode === "treatment-delta" && comparisonPair ? (
-            <div className="grid gap-2.5 sm:grid-cols-2">
-              {comparisonPair.treatment.parameters.map((parameter) => {
-                const baselineValue = comparisonPair.baseline.parameters.find((baselineParameter) => baselineParameter.label === parameter.label)?.value;
-                return <ParameterCard key={parameter.label} label={parameter.label} value={parameter.value} note={baselineValue === parameter.value ? "Matches baseline" : `Baseline: ${baselineValue ?? "—"}`} />;
-              })}
-            </div>
-          ) : (
-            <div className="grid gap-3 md:grid-cols-2">
-              {comparison.variants.map((variant) => (
-                <div key={variant.label} className="rounded-lg bg-background p-5">
-                  <div className="mb-4 text-sm font-medium text-muted-foreground">{variant.name}</div>
-                  <div className="space-y-3">{variant.parameters.map((parameter) => <ParameterCard key={parameter.label} label={parameter.label} value={parameter.value} />)}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </AccordionContent>
-      </AccordionItem>
-    </Accordion>
+    <section className="space-y-6">
+      <RunSummary
+        datasetSliceData={datasetSliceData}
+        languageSliceData={languageSliceData}
+        repositorySliceData={repositorySliceData}
+        repositorySizeSliceData={repositorySizeSliceData}
+      />
+      <div className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">Setup Parameters</h2>
+        <div className="rounded-lg bg-background p-5">
+        {viewMode === "treatment-delta" && comparisonPair ? (
+          <div className="grid gap-2.5 sm:grid-cols-2">
+            {comparisonPair.treatment.parameters.map((parameter) => {
+              const baselineValue = comparisonPair.baseline.parameters.find((baselineParameter) => baselineParameter.label === parameter.label)?.value;
+              return <ParameterCard key={parameter.label} label={parameter.label} value={parameter.value} note={baselineValue === parameter.value ? "Matches baseline" : `Baseline: ${baselineValue ?? "—"}`} />;
+            })}
+          </div>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2">
+            {comparison.variants.map((variant) => (
+              <div key={variant.label} className="rounded-lg bg-background p-5">
+                <div className="mb-4 text-sm font-medium text-muted-foreground">{variant.name}</div>
+                <div className="space-y-3">{variant.parameters.map((parameter) => <ParameterCard key={parameter.label} label={parameter.label} value={parameter.value} />)}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function RunSummary({
+  datasetSliceData,
+  languageSliceData,
+  repositorySliceData,
+  repositorySizeSliceData,
+}: {
+  datasetSliceData: DistributionSliceEntry[];
+  languageSliceData: DistributionSliceEntry[];
+  repositorySliceData: DistributionSliceData;
+  repositorySizeSliceData: DistributionSliceEntry[];
+}) {
+  if (
+    datasetSliceData.length === 0 &&
+    languageSliceData.length === 0 &&
+    repositorySliceData.slices.length === 0 &&
+    repositorySizeSliceData.length === 0
+  ) return null;
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-xl font-semibold tracking-tight">Dataset</h2>
+      <div className="grid gap-6 lg:grid-cols-2 xl:grid-cols-4">
+        {datasetSliceData.length > 0 ? (
+          <DistributionDonutChart
+            title="Dataset Slice"
+            description="Task distribution by benchmark"
+            data={datasetSliceData}
+            variant="donut"
+          />
+        ) : null}
+        {languageSliceData.length > 0 ? (
+          <DistributionDonutChart
+            title="Languages"
+            description="Task distribution by language"
+            data={languageSliceData}
+            variant="label"
+          />
+        ) : null}
+        {repositorySliceData.slices.length > 0 ? (
+          <DistributionDonutChart
+            title="Repositories"
+            description="Top repos plus Other"
+            data={repositorySliceData.slices}
+            variant="donut"
+            centerValue={repositorySliceData.distinctCount}
+            centerLabel="repos"
+          />
+        ) : null}
+        {repositorySizeSliceData.length > 0 ? (
+          <DistributionDonutChart
+            title="Repository Size"
+            description="Tracked file count buckets"
+            data={repositorySizeSliceData}
+            variant="label"
+          />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function DistributionDonutChart({
+  title,
+  description,
+  data,
+  variant,
+  centerValue,
+  centerLabel,
+}: {
+  title: string;
+  description: string;
+  data: DistributionSliceEntry[];
+  variant: "donut" | "label";
+  centerValue?: number;
+  centerLabel?: string;
+}) {
+  const total = data.reduce((sum, entry) => sum + entry.count, 0);
+  const displayedCenterValue = centerValue ?? total;
+  const displayedCenterLabel = centerLabel ?? "tasks";
+  const chartConfig = data.reduce<ChartConfig>((config, entry) => {
+    config[entry.id] = { label: entry.label, color: entry.fill };
+    return config;
+  }, {});
+  const chartSize = variant === "label"
+    ? { width: 360, height: 220, className: "mx-auto h-[13.75rem] w-[22.5rem] max-w-full", outerRadius: 66 }
+    : { width: 192, height: 192, className: "mx-auto aspect-square h-52 w-52", outerRadius: 84 };
+
+  return (
+    <div className="flex min-w-0 flex-col p-4">
+      <div className="text-center">
+        <div className="text-xs uppercase tracking-wide text-muted-foreground">{title}</div>
+        <div className="mt-1 text-sm text-muted-foreground">{description}</div>
+      </div>
+      <div className="mt-3">
+        <ChartContainer config={chartConfig} className={chartSize.className}>
+          <PieChart width={chartSize.width} height={chartSize.height}>
+            <ChartTooltip
+              content={
+                <ChartTooltipContent
+                  hideLabel
+                  nameKey="id"
+                  formatter={(value) => {
+                    const count = Number(value);
+                    const percent = total > 0 ? (count / total) * 100 : 0;
+                    return `${count.toLocaleString()} tasks (${percent.toFixed(1)}%)`;
+                  }}
+                />
+              }
+            />
+            <Pie
+              data={data}
+              dataKey="count"
+              nameKey="id"
+              innerRadius={variant === "donut" ? 58 : 0}
+              outerRadius={chartSize.outerRadius}
+              cx={chartSize.width / 2}
+              cy={chartSize.height / 2}
+              stroke="none"
+              strokeWidth={0}
+              labelLine={false}
+              label={variant === "label" ? renderPieLabel : false}
+            >
+              {variant === "donut" ? (
+                <Label
+                  content={({ viewBox }) => {
+                    if (!viewBox || !("cx" in viewBox) || !("cy" in viewBox)) return null;
+                    return (
+                      <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle" dominantBaseline="middle">
+                        <tspan x={viewBox.cx} y={viewBox.cy} className="fill-foreground text-3xl font-semibold">
+                          {displayedCenterValue.toLocaleString()}
+                        </tspan>
+                        <tspan x={viewBox.cx} y={(viewBox.cy ?? 0) + 23} className="fill-muted-foreground text-xs">
+                          {displayedCenterLabel}
+                        </tspan>
+                      </text>
+                    );
+                  }}
+                />
+              ) : null}
+            </Pie>
+          </PieChart>
+        </ChartContainer>
+        <div className="mx-auto mt-3 flex max-w-xl flex-wrap justify-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
+          {data.map((entry) => {
+            return (
+              <div key={entry.id} className="inline-flex items-center gap-2">
+                <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: entry.fill }} />
+                <span>{entry.label}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function renderPieLabel({
+  cx,
+  cy,
+  midAngle,
+  outerRadius,
+  payload,
+}: {
+  cx?: number;
+  cy?: number;
+  midAngle?: number;
+  outerRadius?: number;
+  payload?: DistributionSliceEntry;
+}) {
+  if (
+    !payload ||
+    typeof cx !== "number" ||
+    typeof cy !== "number" ||
+    typeof midAngle !== "number" ||
+    typeof outerRadius !== "number"
+  ) {
+    return null;
+  }
+
+  const radius = outerRadius + 26;
+  const angle = -midAngle * (Math.PI / 180);
+  const x = cx + radius * Math.cos(angle);
+  const y = cy + radius * Math.sin(angle);
+
+  return (
+    <text
+      x={x}
+      y={y}
+      textAnchor={typeof cx === "number" && x > cx ? "start" : "end"}
+      dominantBaseline="central"
+      className="fill-foreground text-xs"
+    >
+      {payload.label}
+    </text>
   );
 }
 

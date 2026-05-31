@@ -2,12 +2,19 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, ChevronRight, Eye, Filter } from "lucide-react";
 
-import type { ComparisonCard } from "@/data/comparisons";
+import type { ComparisonCard, ComparisonInstance } from "@/data/comparisons";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { buildInstanceComparison, buildInstanceRows } from "@/components/comparison/instance-data";
-import { ComparisonMetricSections } from "@/components/comparison/metric-sections";
-import { formatLanguageLabel, formatResolutionStatus, resolutionStatusClassName, sortBench } from "@/components/comparison/format";
+import { buildInstanceRows, instanceContextF1 } from "@/components/comparison/instance-data";
+import {
+  formatDurationMs,
+  formatLanguageLabel,
+  formatMetric,
+  formatResolutionStatus,
+  formatTokens,
+  resolutionStatusClassName,
+  sortBench,
+} from "@/components/comparison/format";
 import type { ComparisonResultsViewMode, DeltaDisplayMode } from "@/components/comparison/types";
 import { cn } from "@/lib/utils";
 
@@ -134,7 +141,8 @@ export function InstanceResultsSection({
   }, [filteredRows, selectedBenches, selectedLanguages]);
 
   const comparisonPair = comparison.variants.length >= 2 ? { baseline: comparison.variants[0], treatment: comparison.variants[1] } : null;
-  const columnCount = comparisonPair ? 6 : 5;
+  const showTreatmentDelta = viewMode === "treatment-delta" && comparisonPair;
+  const columnCount = showTreatmentDelta ? 5 : comparisonPair ? 6 : 5;
 
   return (
     <section className="space-y-4">
@@ -144,7 +152,7 @@ export function InstanceResultsSection({
           Showing {filteredRows.length === 0 ? 0 : pageStart + 1}-{Math.min(pageStart + INSTANCE_PAGE_SIZE, filteredRows.length)} of {filteredRows.length}
         </div>
       </div>
-      <div className="rounded-lg border bg-background">
+      <div className="rounded-lg bg-background">
         <Table className="min-h-[24rem]">
           <TableHeader>
             <TableRow>
@@ -155,15 +163,20 @@ export function InstanceResultsSection({
               <TableHead>
                 <InlineHeaderFilter label="Language" ariaLabel="Filter issue results by language" values={selectedLanguages} onChange={setSelectedLanguages} options={availableLanguages.map((language) => ({ value: language, label: formatLanguageLabel(language) }))} />
               </TableHead>
-              <TableHead>{comparisonPair ? comparisonPair.baseline.name : comparison.variants[0]?.name}<div className="text-[11px] font-normal text-muted-foreground">Pass@1</div></TableHead>
-              {comparisonPair ? <TableHead>{comparisonPair.treatment.name}<div className="text-[11px] font-normal text-muted-foreground">Pass@1</div></TableHead> : null}
+              {showTreatmentDelta ? (
+                <TableHead>{comparisonPair.treatment.name}<div className="text-[11px] font-normal text-muted-foreground">Pass@1 vs baseline</div></TableHead>
+              ) : (
+                <>
+                  <TableHead>{comparisonPair ? comparisonPair.baseline.name : comparison.variants[0]?.name}<div className="text-[11px] font-normal text-muted-foreground">Pass@1</div></TableHead>
+                  {comparisonPair ? <TableHead>{comparisonPair.treatment.name}<div className="text-[11px] font-normal text-muted-foreground">Pass@1</div></TableHead> : null}
+                </>
+              )}
               <TableHead className="w-[6rem]">Open</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {visibleRows.map((row) => {
               const isExpanded = expandedRowId === row.instanceId;
-              const instanceComparison = buildInstanceComparison(comparison, row);
               return (
                 <Fragment key={row.instanceId}>
                   <TableRow key={row.instanceId}>
@@ -180,8 +193,17 @@ export function InstanceResultsSection({
                     </TableCell>
                     <TableCell>{row.bench}</TableCell>
                     <TableCell>{formatLanguageLabel(row.language)}</TableCell>
-                    <TableCell className={cn("font-medium", resolutionStatusClassName(row.baseline?.artifacts?.resolutionStatus))}>{formatResolutionStatus(row.baseline?.artifacts?.resolutionStatus)}</TableCell>
-                    {comparisonPair ? <TableCell className={cn("font-medium", resolutionStatusClassName(row.treatment?.artifacts?.resolutionStatus))}>{formatResolutionStatus(row.treatment?.artifacts?.resolutionStatus)}</TableCell> : null}
+                    {showTreatmentDelta ? (
+                      <TableCell>
+                        <div className={cn("font-medium", resolutionStatusClassName(row.treatment?.artifacts?.resolutionStatus))}>{formatResolutionStatus(row.treatment?.artifacts?.resolutionStatus)}</div>
+                        <div className="mt-1 text-[11px] text-muted-foreground">Baseline {formatResolutionStatus(row.baseline?.artifacts?.resolutionStatus)}</div>
+                      </TableCell>
+                    ) : (
+                      <>
+                        <TableCell className={cn("font-medium", resolutionStatusClassName(row.baseline?.artifacts?.resolutionStatus))}>{formatResolutionStatus(row.baseline?.artifacts?.resolutionStatus)}</TableCell>
+                        {comparisonPair ? <TableCell className={cn("font-medium", resolutionStatusClassName(row.treatment?.artifacts?.resolutionStatus))}>{formatResolutionStatus(row.treatment?.artifacts?.resolutionStatus)}</TableCell> : null}
+                      </>
+                    )}
                     <TableCell>
                       <Button variant="outline" size="icon" className="h-8 w-8" aria-label={`View details for ${row.instanceId}`} onClick={() => { window.location.hash = `#/comparisons/${comparison.id}/instances/${encodeURIComponent(row.instanceId)}`; }}>
                         <Eye className="h-4 w-4" />
@@ -191,9 +213,13 @@ export function InstanceResultsSection({
                   {isExpanded ? (
                     <TableRow key={`${row.instanceId}-expanded`}>
                       <TableCell colSpan={columnCount} className="bg-muted/20 p-0">
-                        <div className="space-y-6 p-6">
-                          <ComparisonMetricSections comparison={instanceComparison} viewMode={viewMode} deltaDisplayMode={deltaDisplayMode} showExecutionMetrics={false} />
-                        </div>
+                        <CompactInstanceExpansion
+                          comparison={comparison}
+                          row={row}
+                          comparisonPair={comparisonPair}
+                          viewMode={viewMode}
+                          deltaDisplayMode={deltaDisplayMode}
+                        />
                       </TableCell>
                     </TableRow>
                   ) : null}
@@ -210,4 +236,216 @@ export function InstanceResultsSection({
       </div>
     </section>
   );
+}
+
+function CompactInstanceExpansion({
+  comparison,
+  row,
+  comparisonPair,
+  viewMode,
+  deltaDisplayMode,
+}: {
+  comparison: ComparisonCard;
+  row: ReturnType<typeof buildInstanceRows>[number];
+  comparisonPair: { baseline: ComparisonCard["variants"][number]; treatment: ComparisonCard["variants"][number] } | null;
+  viewMode: ComparisonResultsViewMode;
+  deltaDisplayMode: DeltaDisplayMode;
+}) {
+  const showTreatmentDelta = viewMode === "treatment-delta" && comparisonPair;
+  const variants = showTreatmentDelta
+    ? [{ variant: comparisonPair.treatment, instance: row.treatment, baselineInstance: row.baseline }]
+    : comparisonPair
+      ? [
+          { variant: comparisonPair.baseline, instance: row.baseline, baselineInstance: undefined },
+          { variant: comparisonPair.treatment, instance: row.treatment, baselineInstance: undefined },
+        ]
+      : [{ variant: comparison.variants[0], instance: row.baseline, baselineInstance: undefined }];
+
+  return (
+    <div className="space-y-3 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="text-xs text-muted-foreground">
+          {row.bench} / {formatLanguageLabel(row.language)}
+          {row.originalInstanceId ? <span> / {row.originalInstanceId}</span> : null}
+        </div>
+        <Button
+          variant="outline"
+          className="h-8 gap-2"
+          onClick={() => { window.location.hash = `#/comparisons/${comparison.id}/instances/${encodeURIComponent(row.instanceId)}`; }}
+        >
+          <Eye className="h-3.5 w-3.5" />
+          Full detail
+        </Button>
+      </div>
+      <div className={showTreatmentDelta ? "grid gap-2" : "grid gap-2 lg:grid-cols-2"}>
+        {variants.map(({ variant, instance, baselineInstance }) => (
+          <CompactVariantSummary
+            key={variant.label}
+            name={variant.name}
+            instance={instance}
+            baselineInstance={baselineInstance}
+            deltaDisplayMode={deltaDisplayMode}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CompactVariantSummary({
+  name,
+  instance,
+  baselineInstance,
+  deltaDisplayMode,
+}: {
+  name: string;
+  instance?: ComparisonInstance;
+  baselineInstance?: ComparisonInstance;
+  deltaDisplayMode: DeltaDisplayMode;
+}) {
+  const contextF1 = instanceContextF1(instance);
+  const baselineContextF1 = instanceContextF1(baselineInstance);
+  const status = instance?.artifacts?.resolutionStatus;
+  return (
+    <div className="rounded-md border bg-background px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0 truncate text-sm font-medium">{name}</div>
+        <div className="flex items-center gap-2">
+          <div className={cn("text-xs font-medium", resolutionStatusClassName(status))}>{formatResolutionStatus(status)}</div>
+          {baselineInstance ? <BaselineNote value={`Baseline: ${formatResolutionStatus(baselineInstance.artifacts?.resolutionStatus)}`} /> : null}
+        </div>
+      </div>
+      <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-3">
+        <CompactStat
+          label="Context F1"
+          value={contextF1 === null ? "-" : formatMetric(contextF1)}
+          delta={formatNumericDelta(contextF1, baselineContextF1, deltaDisplayMode, "higher", (value) => value.toFixed(3))}
+        />
+        <CompactStat
+          label="Steps"
+          value={formatNullableNumber(instance?.trajectory.steps)}
+          delta={formatNumericDelta(instance?.trajectory.steps, baselineInstance?.trajectory.steps, deltaDisplayMode, "lower", formatStepDeltaValue)}
+        />
+        <CompactStat
+          label="Runtime"
+          value={formatNullableDuration(instance?.resources.durationMs)}
+          delta={formatNumericDelta(instance?.resources.durationMs, baselineInstance?.resources.durationMs, deltaDisplayMode, "lower", formatDurationDeltaValue)}
+        />
+        <CompactStat
+          label="Tokens"
+          value={formatNullableTokens(instance?.resources.totalTokens)}
+          delta={formatNumericDelta(instance?.resources.totalTokens, baselineInstance?.resources.totalTokens, deltaDisplayMode, "lower", formatTokenDeltaValue)}
+        />
+        <CompactStat
+          label="Patch"
+          value={instance ? (instance.artifacts?.hasModelPatch ? "Yes" : "No") : "-"}
+          note={baselineInstance ? `Baseline: ${baselineInstance.artifacts?.hasModelPatch ? "Yes" : "No"}` : undefined}
+        />
+        <CompactStat
+          label="Eval"
+          value={formatEvaluationStatus(instance?.artifacts?.evaluationStatus)}
+          note={baselineInstance ? `Baseline: ${formatEvaluationStatus(baselineInstance.artifacts?.evaluationStatus)}` : undefined}
+        />
+      </dl>
+    </div>
+  );
+}
+
+type CompactDelta = {
+  label: string;
+  tone: "success" | "danger" | "neutral";
+};
+
+function CompactStat({ label, value, delta, note }: { label: string; value: string; delta?: CompactDelta; note?: string }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="flex min-w-0 items-baseline gap-2">
+        <span className="truncate font-medium text-foreground">{value}</span>
+        {delta ? <span className={cn("shrink-0 text-[11px] font-medium", compactDeltaClassName(delta.tone))}>{delta.label}</span> : null}
+      </dd>
+      {!delta && note ? <dd className="truncate text-[11px] text-muted-foreground">{note}</dd> : null}
+    </div>
+  );
+}
+
+function BaselineNote({ value }: { value: string }) {
+  return <span className="text-[11px] font-normal text-muted-foreground">{value}</span>;
+}
+
+function formatNullableNumber(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1);
+}
+
+function formatNullableDuration(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? formatDurationMs(value) : "-";
+}
+
+function formatNullableTokens(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? formatTokens(value) : "-";
+}
+
+function formatEvaluationStatus(status: string | undefined): string {
+  if (!status) return "-";
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+function formatNumericDelta(
+  value: number | null | undefined,
+  baseline: number | null | undefined,
+  displayMode: DeltaDisplayMode,
+  direction: "higher" | "lower",
+  formatAbsoluteValue: (value: number) => string,
+): CompactDelta | undefined {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    typeof baseline !== "number" ||
+    !Number.isFinite(baseline)
+  ) {
+    return undefined;
+  }
+
+  const delta = value - baseline;
+  const tone = compactDeltaTone(delta, direction);
+  if (displayMode === "percent") {
+    if (baseline === 0) return undefined;
+    return { label: `${formatSignedNumber((delta / Math.abs(baseline)) * 100, 1)}%`, tone };
+  }
+  return { label: formatSignedDelta(delta, formatAbsoluteValue), tone };
+}
+
+function compactDeltaTone(delta: number, direction: "higher" | "lower"): CompactDelta["tone"] {
+  if (delta === 0) return "neutral";
+  const improved = direction === "higher" ? delta > 0 : delta < 0;
+  return improved ? "success" : "danger";
+}
+
+function compactDeltaClassName(tone: CompactDelta["tone"]): string {
+  if (tone === "success") return "text-emerald-700";
+  if (tone === "danger") return "text-rose-700";
+  return "text-muted-foreground";
+}
+
+function formatSignedDelta(value: number, formatAbsoluteValue: (value: number) => string): string {
+  if (value === 0) return formatAbsoluteValue(0);
+  return `${value > 0 ? "+" : "-"}${formatAbsoluteValue(Math.abs(value))}`;
+}
+
+function formatSignedNumber(value: number, decimals: number): string {
+  if (value === 0) return value.toFixed(decimals);
+  return `${value > 0 ? "+" : "-"}${Math.abs(value).toFixed(decimals)}`;
+}
+
+function formatStepDeltaValue(value: number): string {
+  return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1);
+}
+
+function formatDurationDeltaValue(value: number): string {
+  return formatDurationMs(value);
+}
+
+function formatTokenDeltaValue(value: number): string {
+  return formatTokens(value);
 }
