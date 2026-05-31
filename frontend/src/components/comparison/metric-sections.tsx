@@ -141,7 +141,7 @@ function PassAt1ResolutionSection({
             const percentValue = numericValue === null ? 0 : Math.min(Math.max(numericValue, 0), 100);
             const isTreatment = comparisonPair ? variant.label === comparisonPair.treatment.label : index > 0;
             return (
-              <div key={variant.label} className="grid gap-2 md:grid-cols-[12rem_1fr_4.5rem] md:items-center">
+              <div key={variant.label} className="grid gap-2 md:grid-cols-[12rem_1fr_8rem] md:items-center">
                 <div className="text-sm font-medium text-muted-foreground">{variant.name}</div>
                 <div className="relative h-8 overflow-hidden rounded-md bg-muted">
                   <div
@@ -149,7 +149,10 @@ function PassAt1ResolutionSection({
                     style={{ width: `${percentValue}%` }}
                   />
                 </div>
-                <div className="text-right text-sm font-medium tabular-nums">{rawValue}</div>
+                <div className="text-right tabular-nums">
+                  <div className="text-sm font-medium">{rawValue}</div>
+                  <div className="text-xs text-muted-foreground">{resolutionSuccessCountLabel(variant)}</div>
+                </div>
               </div>
             );
           })}
@@ -175,6 +178,7 @@ function ResolutionStatusCard({
         <MetricDirectionBadge direction={metric.direction} />
       </div>
       <div className={cn("mt-3 text-sm font-medium", resolutionStatusClassName(status))}>{formatResolutionStatus(status)}</div>
+      <div className="mt-1 text-xs text-muted-foreground">{resolutionSuccessCountLabel(variant)}</div>
     </div>
   );
 }
@@ -208,8 +212,24 @@ function ResolutionStatusVersusCard({
         baselineClassName={resolutionStatusClassName(baselineStatus)}
         treatmentClassName={resolutionStatusClassName(treatmentStatus)}
       />
+      <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+        <div>
+          <span className="font-medium text-foreground">{baseline.name}:</span> {resolutionSuccessCountLabel(baseline)}
+        </div>
+        <div>
+          <span className="font-medium text-foreground">{treatment.name}:</span> {resolutionSuccessCountLabel(treatment)}
+        </div>
+      </div>
     </div>
   );
+}
+
+function resolutionSuccessCountLabel(variant: ComparisonCard["variants"][number]): string {
+  const resolvedTasks = variant.results.integrity?.resolvedTasks;
+  const totalTasks = variant.results.outcome.expectedTasks ?? variant.instances?.length;
+  if (typeof resolvedTasks !== "number") return "Resolved count unavailable";
+  if (typeof totalTasks !== "number" || totalTasks <= 0) return `${resolvedTasks.toLocaleString()} resolved`;
+  return `${resolvedTasks.toLocaleString()} / ${totalTasks.toLocaleString()} resolved`;
 }
 
 function resolutionStatusScore(status: string | undefined): number | null {
@@ -763,7 +783,7 @@ function ContextBenchContextMetricSection({
       defaultOpen={defaultOpen}
     >
       <div className="rounded-lg bg-background p-5">
-        <div className="grid gap-5 md:grid-cols-2">
+        <div className={cn("grid gap-5", summaryVariants.length > 1 ? "md:grid-cols-2" : "grid-cols-1")}>
           {summaryVariants.map((variant) => (
             <div key={variant.label}>
               {!showDeltas && comparison.variants.length > 1 ? (

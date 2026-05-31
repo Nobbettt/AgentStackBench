@@ -87,8 +87,8 @@ def test_build_comparison_payload_single_variant_mode(tmp_path: Path) -> None:
 
     payload = build_comparison_payload(suite_dir, variant_name="with-superpowers-mounted")
 
-    assert payload["comparisonCards"][0]["title"] == "With Superpowers Mounted"
+    assert payload["comparisonCards"][0]["title"] == "With Superpowers"
     assert payload["comparisonCards"][0]["completedAt"] == "2026-03-24T02:29:10Z"
     assert len(payload["comparisonCards"][0]["variants"]) == 1
     assert payload["leaderboardRows"][0]["model"] == "gpt-5.4"
-    assert payload["leaderboardRows"][0]["suite"] == "With Superpowers Mounted"
+    assert payload["leaderboardRows"][0]["suite"] == "With Superpowers"

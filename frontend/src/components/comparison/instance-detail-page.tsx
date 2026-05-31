@@ -1,6 +1,7 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { Fragment, useMemo, useState, type ReactNode } from "react";
 import {
   Columns2,
+  ExternalLink,
   Minus,
   Percent,
   TrendingDown,
@@ -15,6 +16,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { TrajectoryTableHead } from "@/components/comparison/detail-section";
 import { FinalAnswerSection, ModelPatchSection } from "@/components/comparison/instance-detail-panels";
 import { buildInstanceComparison, buildInstanceRows } from "@/components/comparison/instance-data";
+import { compactBenchLabel, compactInstanceName } from "@/components/comparison/instance-naming";
 import {
   ContextRetrievalMetricSection,
   PatchOverlapBetweenVariantsSection,
@@ -36,16 +38,17 @@ import {
 } from "@/components/comparison/metrics";
 import { HelpIcon, MetricDirectionBadge } from "@/components/comparison/shared";
 import { TraceSection } from "@/components/comparison/trace-section";
-import type { ComparisonResultsViewMode, DeltaDisplayMode } from "@/components/comparison/types";
+import type { ComparisonResultsViewMode, DeltaDisplayMode, MetricDefinition } from "@/components/comparison/types";
 import { cn } from "@/lib/utils";
 
-type InstanceDetailTab = "overview" | "resolution" | "context" | "resources" | "mcp" | "answer" | "trajectory" | "patch" | "trace";
+type InstanceDetailTab = "overview" | "resolution" | "context" | "resources" | "skills" | "mcp" | "answer" | "trajectory" | "patch" | "trace";
 
 const instanceDetailTabs: Array<{ id: InstanceDetailTab; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "resolution", label: "Resolution" },
   { id: "context", label: "Context" },
   { id: "resources", label: "Resources" },
+  { id: "skills", label: "Skills" },
   { id: "mcp", label: "MCP" },
   { id: "answer", label: "Final Answer" },
   { id: "trajectory", label: "Trajectory" },
@@ -56,10 +59,41 @@ const instanceDetailTabs: Array<{ id: InstanceDetailTab; label: string }> = [
 const segmentedControlClassName = "gap-0 rounded-md shadow-lg backdrop-blur";
 const segmentedControlItemClassName = "w-14 rounded-none bg-background px-0 data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
 const trajectoryExplanation = "Shows how cumulative retrieved context coverage changes over retrieval steps. Each row is a step, and the columns measure file, block, line, and symbol-level overlap with the gold context.";
+const instanceResourceMetricDefinitions: MetricDefinition[] = resourceMetricDefinitions.map((metric) => {
+  if (metric.key === "averageSteps") {
+    return {
+      ...metric,
+      label: "Steps",
+      explanation: "Inferred retrieval steps for this run.",
+    };
+  }
+  if (metric.key === "averageDuration") {
+    return {
+      ...metric,
+      label: "Scored Task Duration",
+      explanation: "Scored agent task runtime for this run; excludes setup, bootstrap, and validation.",
+    };
+  }
+  if (metric.key === "totalTokens") {
+    return {
+      ...metric,
+      label: "Tokens",
+      explanation: "Tokens consumed by this run.",
+    };
+  }
+  if (metric.key === "estimatedCost") {
+    return {
+      ...metric,
+      explanation: "Inference cost for this run when metadata is available.",
+    };
+  }
+  return metric;
+});
+
 const overviewMetricDefinitions = [
   ...resolutionMetricDefinitions.filter((metric) => ["fixOverlapVsGoldF1"].includes(metric.key)),
   ...contextRetrievalMetricDefinitions.filter((metric) => ["contextF1", "fileF1", "spanF1"].includes(metric.key)),
-  ...resourceMetricDefinitions.filter((metric) => ["averageSteps", "averageDuration", "totalTokens", "estimatedCost"].includes(metric.key)),
+  ...instanceResourceMetricDefinitions.filter((metric) => ["averageSteps", "averageDuration", "totalTokens", "estimatedCost"].includes(metric.key)),
 ];
 
 export function ComparisonInstanceDetailPage({
@@ -164,9 +198,14 @@ function renderInstanceDetailTab({
         viewMode={viewMode}
         deltaDisplayMode={deltaDisplayMode}
         treatmentDeltaDisplay="versus"
+        metricDefinitions={instanceResourceMetricDefinitions}
         nonGraphDisplay
       />
     );
+  }
+
+  if (activeTab === "skills") {
+    return <SkillUseSection comparison={instanceComparison} viewMode={viewMode} />;
   }
 
   return renderDetailBackedTab(activeTab, detail, detailError, viewMode);
@@ -537,20 +576,77 @@ function SetupDatasetSection({
   const setupVariants = setupVariantsForViewMode(instanceComparison, viewMode);
   const comparisonPair = getComparisonPair(instanceComparison);
   const setupBaseline = viewMode === "treatment-delta" && comparisonPair ? comparisonPair.baseline : undefined;
+  const name = compactInstanceName(row);
 
   return (
     <section className="space-y-4">
       <h2 className="text-xl font-semibold tracking-tight">Setup & Dataset</h2>
       <div className="rounded-lg bg-background p-5">
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <SummaryCard label="Dataset" value={row.bench} />
-          <SummaryCard label="Language" value={formatLanguageLabel(row.language)} />
-          <SummaryCard label="Instance" value={row.instanceId} />
-          <SummaryCard label="Original Issue" value={row.originalInstanceId ?? "—"} />
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <div className="text-xs uppercase tracking-wide text-muted-foreground">Task</div>
+            <div className="mt-2 font-mono text-2xl font-semibold tabular-nums text-foreground">{name.shortId}</div>
+            <div className="mt-1 text-lg font-semibold [overflow-wrap:anywhere]">{name.repo}</div>
+            <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs uppercase tracking-wide text-muted-foreground">
+              <span>{compactBenchLabel(row.bench)}</span>
+              <span aria-hidden="true">/</span>
+              <span>{formatLanguageLabel(row.language)}</span>
+              {name.taskTypeParts.map((part) => (
+                <Fragment key={part}>
+                  <span aria-hidden="true">/</span>
+                  <span>{part}</span>
+                </Fragment>
+              ))}
+            </div>
+          </div>
+          <div className="grid gap-3 text-sm lg:min-w-[24rem]">
+            <TaskIdentityRow
+              label="Original Issue"
+              value={row.originalInstanceId ?? "—"}
+              links={[
+                ...(name.pullRequestUrl ? [{ label: `PR #${name.pullRequestNumber}`, href: name.pullRequestUrl }] : []),
+                ...(name.relatedIssuesUrl ? [{ label: "Related Issues", href: name.relatedIssuesUrl }] : []),
+              ]}
+            />
+            <TaskIdentityRow label="Instance ID" value={row.instanceId} />
+          </div>
         </div>
       </div>
       <RunSetupSection variants={setupVariants} baseline={setupBaseline} />
     </section>
+  );
+}
+
+function TaskIdentityRow({
+  label,
+  value,
+  links = [],
+}: {
+  label: string;
+  value: string;
+  links?: Array<{ label: string; href: string }>;
+}) {
+  return (
+    <div className="min-w-0 rounded-md border bg-muted/20 px-3 py-2">
+      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="mt-1 font-medium [overflow-wrap:anywhere]">{value}</div>
+      {links.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {links.map((link) => (
+            <a
+              key={link.label}
+              href={link.href}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-md border bg-background px-2 py-1 text-xs font-medium text-primary transition-colors hover:bg-muted"
+            >
+              {link.label}
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -811,6 +907,162 @@ function McpUseSection({ variants }: { variants: ComparisonInstanceDetail["varia
       </div>
     </section>
   );
+}
+
+function SkillUseSection({
+  comparison,
+  viewMode,
+}: {
+  comparison: ComparisonCard;
+  viewMode: ComparisonResultsViewMode;
+}) {
+  const hasSkillData = comparison.variants.some((variant) => {
+    const usage = variant.results.skills;
+    return (usage?.totalInvocations ?? 0) > 0 || (usage?.byType?.length ?? 0) > 0;
+  });
+  if (!hasSkillData) {
+    return <StatusPanel message="No skill invocation data was exported for this instance." />;
+  }
+
+  const comparisonPair = getComparisonPair(comparison);
+  if (viewMode === "treatment-delta" && comparisonPair) {
+    return <SkillUseVersusSection baseline={comparisonPair.baseline} treatment={comparisonPair.treatment} />;
+  }
+
+  return (
+    <section className="space-y-4">
+      <SectionTitleWithHelp
+        title="Skill Usage"
+        explanation="Summarizes skill file invocations detected during this instance run, including total count and per-skill breakdown."
+      />
+      <div className={comparison.variants.length > 1 ? "grid gap-6 xl:grid-cols-2" : "grid gap-6"}>
+        {comparison.variants.map((variant) => (
+          <div key={variant.label} className="h-full rounded-lg bg-background p-5">
+            <h3 className="text-lg font-semibold">{variant.name}</h3>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <SummaryCard label="Skill Invocations" value={formatSkillCount(variant.results.skills?.totalInvocations ?? 0)} />
+              <SummaryCard label="Skill Types" value={String(variant.results.skills?.byType?.length ?? 0)} />
+            </div>
+            <SkillBreakdownList entries={variant.results.skills?.byType ?? []} />
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SkillUseVersusSection({
+  baseline,
+  treatment,
+}: {
+  baseline: ComparisonCard["variants"][number];
+  treatment: ComparisonCard["variants"][number];
+}) {
+  const rows = mergedSkillRows(baseline, treatment);
+  return (
+    <section className="space-y-4">
+      <SectionTitleWithHelp
+        title="Skill Usage"
+        explanation="Compares skill file invocations detected for this instance. The values show baseline to treatment, not an aggregate benchmark delta."
+      />
+      <div className="rounded-lg bg-background p-5">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-md border p-4">
+            <div className="text-xs uppercase tracking-wide text-muted-foreground">Skill Invocations</div>
+            <SkillVersusValue
+              baselineValue={baseline.results.skills?.totalInvocations ?? 0}
+              treatmentValue={treatment.results.skills?.totalInvocations ?? 0}
+            />
+          </div>
+          <div className="rounded-md border p-4">
+            <div className="text-xs uppercase tracking-wide text-muted-foreground">Skill Types</div>
+            <SkillVersusValue
+              baselineValue={baseline.results.skills?.byType?.length ?? 0}
+              treatmentValue={treatment.results.skills?.byType?.length ?? 0}
+            />
+          </div>
+        </div>
+        {rows.length > 0 ? (
+          <div className="mt-4 divide-y rounded-md border">
+            {rows.map((row) => (
+              <div key={row.name} className="grid gap-3 px-3 py-2 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                <span className="min-w-0 [overflow-wrap:anywhere]">{row.name}</span>
+                <SkillVersusValue baselineValue={row.baselineValue} treatmentValue={row.treatmentValue} compact />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-4 text-sm text-muted-foreground">No per-skill invocation breakdown available.</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function SkillBreakdownList({ entries }: { entries: Array<{ name: string; averagePerRun: number }> }) {
+  if (entries.length === 0) {
+    return <p className="mt-4 text-sm text-muted-foreground">No per-skill invocation breakdown available.</p>;
+  }
+
+  return (
+    <div className="mt-4 divide-y rounded-md border">
+      {[...entries]
+        .sort((left, right) => right.averagePerRun - left.averagePerRun || left.name.localeCompare(right.name))
+        .map((entry) => (
+          <div key={entry.name} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
+            <span className="min-w-0 [overflow-wrap:anywhere]">{entry.name}</span>
+            <span className="font-medium tabular-nums">{formatSkillCount(entry.averagePerRun)}</span>
+          </div>
+        ))}
+    </div>
+  );
+}
+
+function SkillVersusValue({
+  baselineValue,
+  treatmentValue,
+  compact = false,
+}: {
+  baselineValue: number;
+  treatmentValue: number;
+  compact?: boolean;
+}) {
+  const baselineLabel = formatSkillCount(baselineValue);
+  const treatmentLabel = formatSkillCount(treatmentValue);
+  return (
+    <div className={cn("grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2", compact ? "mt-0 min-w-32" : "mt-3")}>
+      <span className="truncate text-right font-medium tabular-nums">{baselineLabel}</span>
+      <OverviewDirectionSeparator
+        direction="neutral"
+        baselineValue={baselineLabel}
+        treatmentValue={treatmentLabel}
+        baselineNumericValue={baselineValue}
+        treatmentNumericValue={treatmentValue}
+        className={compact ? "h-6 w-6" : undefined}
+        iconClassName={compact ? "h-4 w-4" : undefined}
+      />
+      <span className="truncate font-medium tabular-nums">{treatmentLabel}</span>
+    </div>
+  );
+}
+
+function mergedSkillRows(
+  baseline: ComparisonCard["variants"][number],
+  treatment: ComparisonCard["variants"][number],
+) {
+  const baselineByName = new Map((baseline.results.skills?.byType ?? []).map((entry) => [entry.name, entry.averagePerRun]));
+  const treatmentByName = new Map((treatment.results.skills?.byType ?? []).map((entry) => [entry.name, entry.averagePerRun]));
+  return Array.from(new Set([...baselineByName.keys(), ...treatmentByName.keys()]))
+    .map((name) => ({
+      name,
+      baselineValue: baselineByName.get(name) ?? 0,
+      treatmentValue: treatmentByName.get(name) ?? 0,
+    }))
+    .sort((left, right) => Math.max(right.baselineValue, right.treatmentValue) - Math.max(left.baselineValue, left.treatmentValue) || left.name.localeCompare(right.name));
+}
+
+function formatSkillCount(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
 function McpList({ label, values }: { label: string; values?: string[] }) {

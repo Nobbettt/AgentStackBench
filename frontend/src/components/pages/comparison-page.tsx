@@ -207,7 +207,7 @@ export function ComparisonPage({ comparison }: { comparison: ComparisonCard }) {
   const [deltaDisplayMode, setDeltaDisplayMode] = useState<DeltaDisplayMode>("percent");
   const [activeTab, setActiveTab] = useState<ComparisonPageTab>("overview");
   const activeComparison = useMemo(
-    () => hasInstanceFilters && selectedLanguages.length > 0 && selectedBenches.length > 0
+    () => hasInstanceFilters
       ? buildFilteredComparison(comparison, { languages: selectedLanguages, benches: selectedBenches })
       : comparison,
     [comparison, hasInstanceFilters, selectedBenches, selectedLanguages],
@@ -435,6 +435,7 @@ function FilterControls({ languages, benches }: { languages: FilterState; benche
 
 function FilterRow({ label, state, formatter = (value) => value }: { label: string; state: FilterState; formatter?: (value: string) => string }) {
   const allSelected = state.available.length > 0 && state.selected.length === state.available.length;
+  const toggleAll = () => state.setSelected(allSelected ? [] : state.available);
   const filterToggleClassName = "border border-input bg-background text-muted-foreground shadow-sm hover:border-primary/30 hover:bg-accent/60 hover:text-foreground data-[state=on]:border-primary data-[state=on]:bg-primary data-[state=on]:text-primary-foreground data-[state=on]:shadow";
   return (
     <div className="flex flex-col gap-2 lg:flex-row lg:items-start">
@@ -442,8 +443,16 @@ function FilterRow({ label, state, formatter = (value) => value }: { label: stri
         {label}<div className="mt-1 text-[11px] normal-case tracking-normal text-muted-foreground/80">{state.selected.length}/{state.available.length} selected</div>
       </div>
       <div className="flex flex-1 flex-wrap gap-2">
-        <Button variant={allSelected ? "default" : "outline"} className={!allSelected ? "text-muted-foreground" : undefined} onClick={() => state.setSelected(state.available)}>All</Button>
-        <ToggleGroup type="multiple" variant="outline" value={state.selected} onValueChange={(value) => state.setSelected(value.length > 0 ? value : state.available)} className="flex flex-wrap justify-start gap-2">
+        <Button
+          variant={allSelected ? "default" : "outline"}
+          className={!allSelected ? "text-muted-foreground" : undefined}
+          onClick={toggleAll}
+          aria-pressed={allSelected}
+          title={allSelected ? `Deselect all ${label.toLowerCase()}` : `Select all ${label.toLowerCase()}`}
+        >
+          All
+        </Button>
+        <ToggleGroup type="multiple" variant="outline" value={state.selected} onValueChange={state.setSelected} className="flex flex-wrap justify-start gap-2">
           {state.available.map((value) => <ToggleGroupItem key={value} value={value} className={filterToggleClassName}>{formatter(value)}</ToggleGroupItem>)}
         </ToggleGroup>
       </div>

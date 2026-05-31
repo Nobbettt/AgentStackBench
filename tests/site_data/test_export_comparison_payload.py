@@ -295,7 +295,7 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
     payload, detail_payloads = build_comparison_export(suite_dir)
 
     assert payload["filterOrder"] == ["all", "codex"]
-    assert payload["comparisonCards"][0]["title"] == "Baseline vs With Superpowers Mounted"
+    assert payload["comparisonCards"][0]["title"] == "Baseline vs With Superpowers"
     assert payload["comparisonCards"][0]["startedAt"] == "2026-03-23T21:30:54Z"
     assert payload["comparisonCards"][0]["completedAt"] == "2026-03-24T02:29:10Z"
     assert payload["comparisonCards"][0]["taskSet"]["count"] == 10
