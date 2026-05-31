@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import NotRequired, TypedDict
+from typing import NotRequired, Required, TypedDict
 
 
 class ServerToolUseCounts(TypedDict, total=False):
@@ -38,6 +38,36 @@ class ToolCall(TypedDict):
     payload: dict[str, object]
 
 
+class ToolCallRequirementResult(TypedDict):
+    patterns: list[str]
+    missing: list[str]
+    ok: bool
+
+
+class PersistedToolResult(TypedDict):
+    source_path: str
+    artifact_path: str | None
+    status: str
+    size_bytes: int | None
+    label: str | None
+
+
+class RetryMetadata(TypedDict, total=False):
+    attempts: int
+    max_attempts: int
+    retried: bool
+    suppressed: bool
+    suppression_reason: str | None
+    events: list[dict[str, object]]
+
+
+class RuntimeFailureRecord(TypedDict):
+    phase: str
+    command: str
+    stdout_path: str
+    stderr_path: str
+
+
 class LineSpan(TypedDict):
     start: int
     end: int
@@ -51,6 +81,17 @@ class RetrievalStep(TypedDict):
     files: list[str]
     spans: SpanMap
     symbols: SymbolMap
+
+
+class StructuredContextSpan(TypedDict):
+    file: str
+    start: int
+    end: int
+
+
+class StructuredContextSymbol(TypedDict):
+    file: str
+    name: str
 
 
 class FileProvenanceMap(TypedDict, total=False):
@@ -82,16 +123,13 @@ class TraceInferenceMeta(TypedDict, total=False):
     file_list_cap_hits: int
 
 
-class StructuredOutput(TypedDict):
-    task_id: str
-    status: str
-    final_answer: str
-    touched_files: list[str]
-    retrieval_steps: list[RetrievalStep]
-    retrieved_context_files: list[str]
-    retrieved_context_spans: SpanMap
-    retrieved_context_symbols: SymbolMap
-    notes: str
+class StructuredOutput(TypedDict, total=False):
+    status: Required[str]
+    final_answer: Required[str]
+    retrieved_context_files: Required[list[str]]
+    retrieved_context_spans: Required[list[StructuredContextSpan] | SpanMap]
+    retrieved_context_symbols: Required[list[StructuredContextSymbol] | SymbolMap]
+    notes: Required[str]
 
 
 class TrajectoryData(TypedDict):
@@ -138,6 +176,8 @@ class SetupRunRecord(TypedDict):
     raw_response_path: str | None
     token_usage: TokenUsage | None
     tool_calls: list[ToolCall]
+    persisted_tool_results: NotRequired[list[PersistedToolResult]]
+    retry: NotRequired[RetryMetadata]
 
 
 class TaskRecord(TypedDict):
@@ -168,6 +208,15 @@ class TaskRecord(TypedDict):
     model_patch: str
     setup_run: NotRequired[SetupRunRecord | None]
     runtime: NotRequired[dict[str, object]]
+    notes: NotRequired[str]
+    available_tools: NotRequired[list[str]]
+    persisted_tool_results: NotRequired[list[PersistedToolResult]]
+    tool_call_summary: NotRequired[dict[str, object]]
+    tool_call_requirements: NotRequired[ToolCallRequirementResult]
+    tool_availability_requirements: NotRequired[ToolCallRequirementResult]
+    retry: NotRequired[RetryMetadata]
+    runtime_failure: NotRequired[RuntimeFailureRecord]
+    runtime_setup_cache: NotRequired[dict[str, object]]
 
 
 class LoadedTask(TypedDict):

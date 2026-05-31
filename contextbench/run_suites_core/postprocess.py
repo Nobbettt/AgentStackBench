@@ -381,6 +381,24 @@ def _docker_image_id(image: str | None) -> str | None:
     return image_id or None
 
 
+def _docker_image_platform(image: str | None) -> str | None:
+    if not image:
+        return None
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    platform = (result.stdout or "").strip()
+    return platform or None
+
+
 def _postprocess_image_supports_evaluation(image: str | None) -> tuple[bool, str]:
     if not image:
         return False, "Postprocess Docker image is not configured."

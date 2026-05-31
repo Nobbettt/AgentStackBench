@@ -1,5 +1,5 @@
 
-"""Deterministic setup helpers for run-suite postprocess backends."""
+"""Deterministic setup helpers for run-suite backend dependencies."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 
 from contextbench.coding_agents.constants import (
+    DEFAULT_CLAUDE_RUNTIME_IMAGE,
+    DEFAULT_CLAUDE_RUNTIME_AMD64_IMAGE,
     DEFAULT_CODEX_RUNTIME_IMAGE,
     DEFAULT_POSTPROCESS_RUNTIME_IMAGE,
 )
@@ -47,10 +49,19 @@ PRO_BENCH_COMMIT = "0c64e26f00b9c190432de7fc520c8ceed5c25518"
 PRO_BENCH_CONSTRAINTS = REPO_ROOT / "contextbench" / "run_suites_constraints" / "probench.txt"
 PRO_BENCH_PIP_VERSION = "26.0.1"
 CODEX_CLI_VERSION = "0.122.0"
+CLAUDE_CODE_VERSION = "2.1.126"
 CODEX_RUNTIME_IMAGE = DEFAULT_CODEX_RUNTIME_IMAGE
+CLAUDE_RUNTIME_IMAGE = DEFAULT_CLAUDE_RUNTIME_IMAGE
+CLAUDE_RUNTIME_AMD64_IMAGE = DEFAULT_CLAUDE_RUNTIME_AMD64_IMAGE
 POSTPROCESS_IMAGE = DEFAULT_POSTPROCESS_RUNTIME_IMAGE
 POSTPROCESS_DOCKERFILE = REPO_ROOT / "docker" / "postprocess" / "Dockerfile"
 CODEX_RUNTIME_DOCKERFILE = REPO_ROOT / "docker" / "codex-runtime.Dockerfile"
+CLAUDE_RUNTIME_DOCKERFILE = REPO_ROOT / "docker" / "claude-runtime.Dockerfile"
+CLAUDE_RUNTIME_NATIVE_DEPS_DOCKERFILE = REPO_ROOT / "docker" / "claude-runtime-native-deps.Dockerfile"
+CLAUDE_RUNTIME_DOCKERFILES = {
+    "default": CLAUDE_RUNTIME_DOCKERFILE,
+    "native-deps": CLAUDE_RUNTIME_NATIVE_DEPS_DOCKERFILE,
+}
 
 
 def _run(command: list[str]) -> None:
@@ -58,10 +69,19 @@ def _run(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
-def _docker_build(*, image: str, dockerfile: Path, force: bool = False, build_args: dict[str, str] | None = None) -> None:
+def _docker_build(
+    *,
+    image: str,
+    dockerfile: Path,
+    force: bool = False,
+    build_args: dict[str, str] | None = None,
+    platform: str | None = None,
+) -> None:
     command = ["docker", "build"]
     if force:
         command.append("--no-cache")
+    if platform:
+        command.extend(["--platform", platform])
     for key, value in sorted((build_args or {}).items()):
         command.extend(["--build-arg", f"{key}={value}"])
     command.extend(["-f", str(dockerfile), "-t", image, str(REPO_ROOT)])
@@ -393,14 +413,38 @@ def setup_postprocess_image(*, force: bool = False) -> int:
     return 0
 
 
-def setup_codex_runtime_image(*, force: bool = False) -> int:
+def setup_codex_runtime_image(*, force: bool = False, image: str = CODEX_RUNTIME_IMAGE, platform: str | None = None) -> int:
     _docker_build(
-        image=CODEX_RUNTIME_IMAGE,
+        image=image,
         dockerfile=CODEX_RUNTIME_DOCKERFILE,
         force=force,
         build_args={"CODEX_CLI_VERSION": CODEX_CLI_VERSION},
+        platform=platform,
     )
-    print(f"Codex runtime image ready: {CODEX_RUNTIME_IMAGE}")
+    print(f"Codex runtime image ready: {image}")
+    return 0
+
+
+def setup_claude_runtime_image(
+    *,
+    force: bool = False,
+    image: str = CLAUDE_RUNTIME_IMAGE,
+    platform: str | None = None,
+    flavor: str | None = None,
+) -> int:
+    selected_flavor = flavor or ("native-deps" if image == CLAUDE_RUNTIME_AMD64_IMAGE else "default")
+    dockerfile = CLAUDE_RUNTIME_DOCKERFILES.get(selected_flavor)
+    if dockerfile is None:
+        allowed = ", ".join(sorted(CLAUDE_RUNTIME_DOCKERFILES))
+        raise ValueError(f"Unsupported Claude runtime image flavor {selected_flavor!r}; expected one of [{allowed}]")
+    _docker_build(
+        image=image,
+        dockerfile=dockerfile,
+        force=force,
+        build_args={"CLAUDE_CODE_VERSION": CLAUDE_CODE_VERSION},
+        platform=platform,
+    )
+    print(f"Claude runtime image ready: {image}")
     return 0
 
 
@@ -442,6 +486,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     postprocess_image.add_argument("--force", action="store_true", help="Build without Docker layer cache")
     codex_runtime_image = subparsers.add_parser("codex-runtime-image", help="Build the Docker image for Codex task runs")
     codex_runtime_image.add_argument("--force", action="store_true", help="Build without Docker layer cache")
+    codex_runtime_image.add_argument("--image", default=CODEX_RUNTIME_IMAGE, help="Docker image tag to build")
+    codex_runtime_image.add_argument("--platform", default=None, help="Docker build platform, e.g. linux/amd64")
+    claude_runtime_image = subparsers.add_parser("claude-runtime-image", help="Build the Docker image for Claude Code task runs")
+    claude_runtime_image.add_argument("--force", action="store_true", help="Build without Docker layer cache")
+    claude_runtime_image.add_argument("--image", default=CLAUDE_RUNTIME_IMAGE, help="Docker image tag to build")
+    claude_runtime_image.add_argument("--platform", default=None, help="Docker build platform, e.g. linux/amd64")
+    claude_runtime_image.add_argument(
+        "--flavor",
+        choices=sorted(CLAUDE_RUNTIME_DOCKERFILES),
+        default=None,
+        help=(
+            "Claude runtime image flavor to build. Defaults to 'native-deps' for the pinned linux-amd64 image "
+            "and 'default' otherwise."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -460,7 +519,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "postprocess-image":
         return setup_postprocess_image(force=bool(args.force))
     if args.command == "codex-runtime-image":
-        return setup_codex_runtime_image(force=bool(args.force))
+        return setup_codex_runtime_image(force=bool(args.force), image=str(args.image), platform=args.platform)
+    if args.command == "claude-runtime-image":
+        return setup_claude_runtime_image(
+            force=bool(args.force),
+            image=str(args.image),
+            platform=args.platform,
+            flavor=args.flavor,
+        )
     print(f"ERROR: unsupported setup command: {args.command}", file=sys.stderr)
     return 2
 

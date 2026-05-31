@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import scripts.export_comparison_data as export_comparison_data
-from scripts.export_comparison_data import ComparisonExportError, build_comparison_payload
+from scripts.export_comparison_data import ComparisonExportError, build_comparison_export, build_comparison_payload
 
 from .helpers import _record, _write
 
@@ -202,7 +202,20 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
     )
     baseline_record = _record(baseline_task_dir, 1000, 1200, 2, model_patch=baseline_patch)
     baseline_partial_record = _record(baseline_partial_task_dir, 1000, 1200, 2, status="partial")
-    treatment_record = _record(treatment_task_dir, 2000, 1500, 3, model_patch=treatment_patch)
+    treatment_record = _record(
+        treatment_task_dir,
+        2000,
+        1500,
+        3,
+        model_patch=treatment_patch,
+        retry={
+            "attempts": 2,
+            "max_attempts": 3,
+            "retried": True,
+            "suppressed": False,
+            "events": [{"attempt": 1, "action": "retry", "reason": "transient_failure"}],
+        },
+    )
 
     _write(
         baseline_dir / "task-results.jsonl",
@@ -279,7 +292,7 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
         ),
     )
 
-    payload = build_comparison_payload(suite_dir)
+    payload, detail_payloads = build_comparison_export(suite_dir)
 
     assert payload["filterOrder"] == ["all", "codex"]
     assert payload["comparisonCards"][0]["title"] == "Baseline vs With Superpowers Mounted"
@@ -322,6 +335,11 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
         "unavailableInstances": 1,
     }
     assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["efficiency"] == "0.633"
+    assert payload["comparisonCards"][0]["variants"][1]["results"]["retries"] == {
+        "totalAttempts": 4,
+        "retriedRuns": 2,
+        "suppressedRetries": 0,
+    }
     assert payload["comparisonCards"][0]["variants"][0]["results"]["outcome"]["completedRuns"] == 1
     assert payload["comparisonCards"][0]["variants"][0]["results"]["outcome"]["completedRunRate"] == "10.0%"
     assert payload["comparisonCards"][0]["variants"][0]["results"]["outcome"]["officialPassAt1"] == "10.0%"
@@ -338,6 +356,11 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
     assert payload["leaderboardRows"][0]["officialPassAt1"] == "10.0%"
     assert payload["leaderboardRows"][0]["passAt1"] == "10.0%"
     assert payload["leaderboardRows"][0]["contextF1"] == "0.639"
+    assert payload["comparisonCards"][0]["variants"][1]["instances"][0]["resources"]["retryAttempts"] == 2
+    assert payload["comparisonCards"][0]["variants"][1]["instances"][0]["resources"]["retried"] is True
+    assert payload["comparisonCards"][0]["variants"][1]["instances"][0]["resources"]["retrySuppressed"] is False
+    assert detail_payloads["task-a"]["variants"][1]["retry"]["attempts"] == 2
+    assert detail_payloads["task-a"]["variants"][1]["retry"]["events"][0]["action"] == "retry"
 
 
 def test_build_comparison_payload_can_export_aligned_postprocess_artifacts(tmp_path: Path) -> None:

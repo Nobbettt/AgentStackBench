@@ -47,6 +47,34 @@ def test_swebench_wrapper_loads_codex_report_from_parent_directory(tmp_path: Pat
 
     assert report["resolved_ids"] == ["task-a"]
     assert report["report_path"] == str(parent_report)
+def test_swebench_wrapper_loads_claude_report_from_instance_directory(tmp_path: Path) -> None:
+    module = _load_module("contextbench/run_suites_resolution_wrappers/swebench_wrapper.py", "swebench_resolution_wrapper_claude_report")
+    report_root = tmp_path / "run-root" / "instances" / "task-a"
+    report_root.mkdir(parents=True)
+    claude_report = report_root / "claude.demo-run--task-a.json"
+    claude_report.write_text(
+        '{"resolved_ids":["task-a"],"unresolved_ids":[],"error_ids":[],"completed_ids":["task-a"],"submitted_ids":["task-a"],"total_instances":1,"completed_instances":1,"error_instances":0}\n',
+        encoding="utf-8",
+    )
+
+    report = module._load_instance_report_for_id(report_root, "task-a")
+
+    assert report["resolved_ids"] == ["task-a"]
+    assert report["report_path"] == str(claude_report)
+def test_swebench_wrapper_keeps_nested_report_payload_fallback(tmp_path: Path) -> None:
+    module = _load_module("contextbench/run_suites_resolution_wrappers/swebench_wrapper.py", "swebench_resolution_wrapper_nested_report")
+    report_root = tmp_path / "run-root" / "instances" / "task-a"
+    report_root.mkdir(parents=True)
+    nested_report = report_root / "wrapped-report.json"
+    nested_report.write_text(
+        '{"metadata":{"report":{"resolved_ids":[],"unresolved_ids":["task-a"],"error_ids":[],"completed_ids":["task-a"],"submitted_ids":["task-a"],"total_instances":1,"completed_instances":1,"error_instances":0}}}\n',
+        encoding="utf-8",
+    )
+
+    report = module._load_instance_report_for_id(report_root, "task-a")
+
+    assert report["unresolved_ids"] == ["task-a"]
+    assert report["report_path"] == str(nested_report)
 def test_swebench_wrapper_reuses_matching_existing_instance_report(tmp_path: Path) -> None:
     module = _load_module("contextbench/run_suites_resolution_wrappers/swebench_wrapper.py", "swebench_resolution_wrapper_reuse")
     report_root = tmp_path / "run-root" / "instances" / "task-a"
@@ -61,6 +89,23 @@ def test_swebench_wrapper_reuses_matching_existing_instance_report(tmp_path: Pat
 
     assert report["resolved_ids"] == ["task-a"]
     assert report["report_path"] == str(parent_report)
+
+
+def test_swebench_wrapper_rejects_fresh_non_matching_instance_report(tmp_path: Path, monkeypatch) -> None:
+    module = _load_module("contextbench/run_suites_resolution_wrappers/swebench_wrapper.py", "swebench_resolution_wrapper_wrong_report")
+    report_root = tmp_path / "run-root" / "instances" / "task-a"
+    report_root.mkdir(parents=True)
+    wrong_report = report_root / "claude.demo-run--task-b.json"
+    wrong_report.write_text(
+        '{"resolved_ids":["task-b"],"unresolved_ids":[],"error_ids":[],"completed_ids":["task-b"],"submitted_ids":["task-b"],"total_instances":1,"completed_instances":1,"error_instances":0}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(module.time, "monotonic", iter([0.0, 6.0]).__next__)
+
+    with pytest.raises(RuntimeError, match="for instance 'task-a'"):
+        module._load_instance_report_for_id(report_root, "task-a")
+
 def test_swebench_wrapper_reruns_when_invoked_with_stale_existing_report(monkeypatch, tmp_path: Path) -> None:
     module = _load_module("contextbench/run_suites_resolution_wrappers/swebench_wrapper.py", "swebench_resolution_wrapper_rerun_stale")
 
@@ -70,7 +115,7 @@ def test_swebench_wrapper_reruns_when_invoked_with_stale_existing_report(monkeyp
     def fake_run_evaluation_main(**kwargs):
         calls["count"] += 1
         report_dir = Path(str(kwargs["report_dir"]))
-        (report_dir / "codex.new-run.json").write_text(
+        (report_dir / "claude.new-run.json").write_text(
             '{"resolved_ids":[],"unresolved_ids":["task-a"],"error_ids":[],"completed_ids":["task-a"],"submitted_ids":["task-a"],"total_instances":1,"completed_instances":1,"error_instances":0}\n',
             encoding="utf-8",
         )

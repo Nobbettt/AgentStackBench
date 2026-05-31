@@ -143,6 +143,11 @@ export function buildInstanceVariant(variant: ComparisonVariant, instance: Compa
         avgLinesPerStep: typeof instance?.trajectory.linesPerStep === "number" ? formatPatternMetric(instance.trajectory.linesPerStep) : undefined,
         totalTokens: typeof instance?.resources.totalTokens === "number" ? formatTokens(instance.resources.totalTokens) : undefined,
         toolCalls: typeof instance?.resources.toolCalls === "number" ? String(instance.resources.toolCalls) : undefined,
+        mcpToolCalls: typeof instance?.resources.mcpToolCalls === "number" ? String(instance.resources.mcpToolCalls) : undefined,
+        successfulMcpToolCalls: typeof instance?.resources.successfulMcpToolCalls === "number" ? String(instance.resources.successfulMcpToolCalls) : undefined,
+        commandExecutions: typeof instance?.resources.commandExecutions === "number" ? String(instance.resources.commandExecutions) : undefined,
+        readToolCalls: typeof instance?.resources.readToolCalls === "number" ? String(instance.resources.readToolCalls) : undefined,
+        editToolCalls: typeof instance?.resources.editToolCalls === "number" ? String(instance.resources.editToolCalls) : undefined,
         cost: typeof instance?.resources.costUsd === "number" ? formatCurrency(instance.resources.costUsd) : undefined,
       },
       skills: {

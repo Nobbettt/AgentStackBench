@@ -145,20 +145,11 @@ def _make_fake_agent_record(
         "ok": completed,
         "status": status,
         "final_output": {
-            "task_id": task.get("instance_id"),
             "status": status,
             "final_answer": "done",
-            "touched_files": ["requests/api.py"],
-            "retrieval_steps": [
-                {
-                    "files": ["requests/api.py"],
-                    "spans": {"requests/api.py": [{"start": 1, "end": 4}]},
-                    "symbols": {"requests/api.py": ["request"]},
-                }
-            ],
             "retrieved_context_files": ["requests/api.py"],
-            "retrieved_context_spans": {"requests/api.py": [{"start": 1, "end": 4}]},
-            "retrieved_context_symbols": {"requests/api.py": ["request"]},
+            "retrieved_context_spans": [{"file": "requests/api.py", "start": 1, "end": 4}],
+            "retrieved_context_symbols": [{"file": "requests/api.py", "name": "request"}],
             "notes": "",
         }
         if completed
@@ -189,8 +180,17 @@ def _fake_run_coding_agent_task(call_log: list[dict[str, object]]):
         workspace_key=None,
         runtime_backend="host",
         runtime_image=None,
+        runtime_platform=None,
         runtime_env=None,
+        runtime_setup_timeout=None,
+        runtime_validation_timeout=None,
+        runtime_setup_cache=False,
+        runtime_setup_cache_dir=None,
         runtime_setup_commands=(),
+        runtime_validation_commands=(),
+        diff_exclude_paths=(),
+        required_tool_call_patterns=(),
+        required_available_tool_patterns=(),
         runtime_keep_failed=False,
     ):
         del cache_dir, schema_path, timeout, model
@@ -217,8 +217,17 @@ def _fake_run_coding_agent_task(call_log: list[dict[str, object]]):
                 "workspace_key": workspace_key,
                 "runtime_backend": runtime_backend,
                 "runtime_image": runtime_image,
+                "runtime_platform": runtime_platform,
                 "runtime_env": dict(runtime_env or {}),
+                "runtime_setup_timeout": runtime_setup_timeout,
+                "runtime_validation_timeout": runtime_validation_timeout,
+                "runtime_setup_cache": runtime_setup_cache,
+                "runtime_setup_cache_dir": runtime_setup_cache_dir,
                 "runtime_setup_commands": list(runtime_setup_commands or []),
+                "runtime_validation_commands": list(runtime_validation_commands or []),
+                "diff_exclude_paths": list(diff_exclude_paths or []),
+                "required_tool_call_patterns": list(required_tool_call_patterns or []),
+                "required_available_tool_patterns": list(required_available_tool_patterns or []),
                 "runtime_keep_failed": runtime_keep_failed,
             }
         )

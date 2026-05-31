@@ -53,6 +53,13 @@ def _finalize_conversion_summary(summary: dict[str, object]) -> dict[str, object
 def record_is_convertible(record: dict[str, object], expected_agent: str | None = None) -> bool:
     if not isinstance(record, dict):
         return False
+    status = str(record.get("status") or "").strip().lower()
+    if status and status != "completed":
+        return False
+    if bool(record.get("timeout")):
+        return False
+    if "ok" in record and record.get("ok") is not True:
+        return False
     raw_agent = str(record.get("agent") or "").strip().lower()
     agent = normalize_coding_agent_name(raw_agent) or raw_agent
     if expected_agent:

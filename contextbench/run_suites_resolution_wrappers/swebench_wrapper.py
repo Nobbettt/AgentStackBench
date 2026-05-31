@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import time
 from pathlib import Path
 
 
@@ -84,7 +85,7 @@ def _snapshot_report_mtimes(report_root: Path) -> dict[Path, int]:
     for root in search_roots:
         if not root.exists():
             continue
-        for candidate in root.glob("codex*.json"):
+        for candidate in root.glob("*.json"):
             try:
                 report_mtimes[candidate.resolve()] = candidate.stat().st_mtime_ns
             except OSError:
@@ -98,27 +99,66 @@ def _snapshot_report_mtimes(report_root: Path) -> dict[Path, int]:
     return report_mtimes
 
 
-def _load_instance_report(
-    report_root: Path,
-    *,
-    previous_report_mtimes: dict[Path, int] | None = None,
-) -> dict[str, object]:
+def _report_candidates(report_root: Path) -> list[Path]:
     search_roots = [report_root]
     if report_root.parent != report_root:
         search_roots.append(report_root.parent)
     if report_root.parent.parent != report_root.parent:
         search_roots.append(report_root.parent.parent)
 
-    codex_reports: list[Path] = []
+    candidates: dict[Path, Path] = {}
     for root in search_roots:
-        codex_reports.extend(root.glob("codex*.json"))
-    codex_reports = sorted(
-        {path.resolve(): path for path in codex_reports}.values(),
+        if not root.exists():
+            continue
+        for candidate in root.glob("*.json"):
+            candidates[candidate.resolve()] = candidate
+    if report_root.exists():
+        for candidate in report_root.rglob("*.json"):
+            candidates[candidate.resolve()] = candidate
+    return sorted(
+        candidates.values(),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
 
-    for candidate in codex_reports:
+
+def _report_from_harness_payload(candidate: Path, payload: dict[str, object]) -> dict[str, object] | None:
+    if "resolved_ids" not in payload and "unresolved_ids" not in payload and "error_ids" not in payload:
+        return None
+    report = {
+        "resolved_ids": [str(item).strip() for item in (payload.get("resolved_ids") or []) if str(item).strip()],
+        "unresolved_ids": [str(item).strip() for item in (payload.get("unresolved_ids") or []) if str(item).strip()],
+        "error_ids": [str(item).strip() for item in (payload.get("error_ids") or []) if str(item).strip()],
+        "completed_ids": [str(item).strip() for item in (payload.get("completed_ids") or []) if str(item).strip()],
+        "submitted_ids": [str(item).strip() for item in (payload.get("submitted_ids") or []) if str(item).strip()],
+        "total_instances": int(payload.get("total_instances") or 0),
+        "completed_instances": int(payload.get("completed_instances") or 0),
+        "error_instances": int(payload.get("error_instances") or 0),
+        "report_path": str(candidate),
+    }
+    if report["submitted_ids"] or report["resolved_ids"] or report["unresolved_ids"] or report["error_ids"]:
+        return report
+    return None
+
+
+def _report_from_candidate_payload(candidate: Path, payload: dict[str, object]) -> dict[str, object] | None:
+    report = _report_from_harness_payload(candidate, payload)
+    if report is not None:
+        return report
+    found = _find_resolution_report_payload(payload)
+    if found is None:
+        return None
+    return _report_from_harness_payload(candidate, found)
+
+
+def _load_instance_report(
+    report_root: Path,
+    *,
+    previous_report_mtimes: dict[Path, int] | None = None,
+) -> dict[str, object]:
+    for candidate in _report_candidates(report_root):
+        if candidate.name in {"resolution-error.json", "resolution-result.json"}:
+            continue
         if not _candidate_is_fresh(candidate, previous_report_mtimes):
             continue
         try:
@@ -127,35 +167,10 @@ def _load_instance_report(
             continue
         if not isinstance(payload, dict):
             continue
-        report = {
-            "resolved_ids": [str(item).strip() for item in (payload.get("resolved_ids") or []) if str(item).strip()],
-            "unresolved_ids": [str(item).strip() for item in (payload.get("unresolved_ids") or []) if str(item).strip()],
-            "error_ids": [str(item).strip() for item in (payload.get("error_ids") or []) if str(item).strip()],
-            "completed_ids": [str(item).strip() for item in (payload.get("completed_ids") or []) if str(item).strip()],
-            "submitted_ids": [str(item).strip() for item in (payload.get("submitted_ids") or []) if str(item).strip()],
-            "total_instances": int(payload.get("total_instances") or 0),
-            "completed_instances": int(payload.get("completed_instances") or 0),
-            "error_instances": int(payload.get("error_instances") or 0),
-            "report_path": str(candidate),
-        }
-        if report["submitted_ids"] or report["resolved_ids"] or report["unresolved_ids"] or report["error_ids"]:
+        report = _report_from_candidate_payload(candidate, payload)
+        if report is not None:
             return report
 
-    candidates = sorted(report_root.rglob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
-    for candidate in candidates:
-        if candidate.name == "resolution-error.json":
-            continue
-        if not _candidate_is_fresh(candidate, previous_report_mtimes):
-            continue
-        try:
-            payload = json.loads(candidate.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        found = _find_resolution_report_payload(payload)
-        if found is not None:
-            report = dict(found)
-            report["report_path"] = str(candidate)
-            return report
     raise RuntimeError(f"Unable to locate a SWE-bench resolution report under {report_root}")
 
 
@@ -176,15 +191,12 @@ def _load_instance_report_for_id(
     *,
     previous_report_mtimes: dict[Path, int] | None = None,
 ) -> dict[str, object]:
-    search_roots = [report_root]
-    if report_root.parent != report_root:
-        search_roots.append(report_root.parent)
-    if report_root.parent.parent != report_root.parent:
-        search_roots.append(report_root.parent.parent)
-
-    for root in search_roots:
-        codex_reports = sorted(root.glob("codex*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
-        for candidate in codex_reports:
+    deadline = time.monotonic() + 5.0
+    seen_report_paths: list[str] = []
+    while True:
+        for candidate in _report_candidates(report_root):
+            if candidate.name in {"resolution-error.json", "resolution-result.json"}:
+                continue
             if not _candidate_is_fresh(candidate, previous_report_mtimes):
                 continue
             try:
@@ -193,20 +205,24 @@ def _load_instance_report_for_id(
                 continue
             if not isinstance(payload, dict):
                 continue
-            report = {
-                "resolved_ids": [str(item).strip() for item in (payload.get("resolved_ids") or []) if str(item).strip()],
-                "unresolved_ids": [str(item).strip() for item in (payload.get("unresolved_ids") or []) if str(item).strip()],
-                "error_ids": [str(item).strip() for item in (payload.get("error_ids") or []) if str(item).strip()],
-                "completed_ids": [str(item).strip() for item in (payload.get("completed_ids") or []) if str(item).strip()],
-                "submitted_ids": [str(item).strip() for item in (payload.get("submitted_ids") or []) if str(item).strip()],
-                "total_instances": int(payload.get("total_instances") or 0),
-                "completed_instances": int(payload.get("completed_instances") or 0),
-                "error_instances": int(payload.get("error_instances") or 0),
-                "report_path": str(candidate),
-            }
+            report = _report_from_candidate_payload(candidate, payload)
+            if report is None:
+                continue
             if _report_matches_instance(report, instance_id):
                 return report
-    return _load_instance_report(report_root, previous_report_mtimes=previous_report_mtimes)
+            report_path = str(report.get("report_path") or candidate)
+            if report_path not in seen_report_paths:
+                seen_report_paths.append(report_path)
+        if time.monotonic() >= deadline:
+            detail = ""
+            if seen_report_paths:
+                detail = "; fresh non-matching reports: " + ", ".join(seen_report_paths[:5])
+                if len(seen_report_paths) > 5:
+                    detail += f", ... and {len(seen_report_paths) - 5} more"
+            raise RuntimeError(
+                f"Unable to locate a SWE-bench resolution report for instance {instance_id!r} under {report_root}{detail}"
+            )
+        time.sleep(0.2)
 
 
 def _extend_unique(target: list[str], values: list[str]) -> None:

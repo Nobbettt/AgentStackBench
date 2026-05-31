@@ -27,6 +27,7 @@ RuntimeTargetRoot = Literal[
     "task_dir",
     "runtime_root",
     "home_dir",
+    "claude_home",
     "codex_home",
     "xdg_config_home",
     "xdg_data_home",
@@ -34,6 +35,7 @@ RuntimeTargetRoot = Literal[
 ]
 
 RuntimeBackend = Literal["host", "docker"]
+SelectionAssertion = Literal["full_dataset", "configured_selection"]
 
 ReasoningLevel = Literal[
     "none",
@@ -94,6 +96,7 @@ class BaseRunConfig(BaseModel):
     subset_csv: Path | None = None
     bench: list[str] | None = None
     instances: list[str] | None = None
+    selection_assertion: SelectionAssertion | None = None
     limit: int = Field(default=0, ge=0)
     timeout: int = Field(default=1800, gt=0)
     repo_cache: Path = DEFAULT_CACHE_DIR
@@ -107,9 +110,18 @@ class BaseRunConfig(BaseModel):
     setup: VariantSetupConfig = Field(default_factory=VariantSetupConfig)
     runtime_backend: RuntimeBackend = "docker"
     runtime_image: str | None = None
+    runtime_platform: str | None = None
     runtime_env_file: Path | None = None
     runtime_env: dict[str, str] = Field(default_factory=dict)
+    runtime_setup_timeout: int | None = Field(default=None, gt=0)
+    runtime_validation_timeout: int | None = Field(default=None, gt=0)
+    runtime_setup_cache: bool = False
+    runtime_setup_cache_dir: Path | None = None
     runtime_setup_commands: list[str] = Field(default_factory=list)
+    runtime_validation_commands: list[str] = Field(default_factory=list)
+    diff_exclude_paths: list[str] = Field(default_factory=list)
+    required_tool_call_patterns: list[str] = Field(default_factory=list)
+    required_available_tool_patterns: list[str] = Field(default_factory=list)
     runtime_keep_failed: bool = False
 
     @field_validator("bench", "instances", mode="before")
@@ -144,11 +156,24 @@ class VariantConfig(BaseModel):
     setup: VariantSetupConfig = Field(default_factory=VariantSetupConfig)
     runtime_backend: RuntimeBackend | None = None
     runtime_image: str | None = None
+    runtime_platform: str | None = None
     runtime_env_file: Path | None = None
     runtime_env_add: dict[str, str] = Field(default_factory=dict)
     runtime_env_replace: dict[str, str] | None = None
+    runtime_setup_timeout: int | None = Field(default=None, gt=0)
+    runtime_validation_timeout: int | None = Field(default=None, gt=0)
+    runtime_setup_cache: bool | None = None
+    runtime_setup_cache_dir: Path | None = None
     runtime_setup_commands_add: list[str] = Field(default_factory=list)
     runtime_setup_commands_replace: list[str] | None = None
+    runtime_validation_commands_add: list[str] = Field(default_factory=list)
+    runtime_validation_commands_replace: list[str] | None = None
+    diff_exclude_paths_add: list[str] = Field(default_factory=list)
+    diff_exclude_paths_replace: list[str] | None = None
+    required_tool_call_patterns_add: list[str] = Field(default_factory=list)
+    required_tool_call_patterns_replace: list[str] | None = None
+    required_available_tool_patterns_add: list[str] = Field(default_factory=list)
+    required_available_tool_patterns_replace: list[str] | None = None
     runtime_keep_failed: bool | None = None
 
     @field_validator("name")
@@ -244,25 +269,52 @@ class RunSuiteConfig(BaseModel):
         if len(slugs) != len(set(slugs)):
             raise ValueError("Variant names must remain unique after path normalization")
         self._validate_setup_target_roots(self.base_run.setup, location="base_run.setup")
+        self._validate_agent_specific_setup(self.base_run.setup, location="base_run.setup")
         self._validate_reasoning_effort(self.base_run.reasoning_effort, location="base_run.reasoning_effort")
         self._validate_runtime_config(
             self.base_run.runtime_backend,
             self.base_run.runtime_image,
+            self.base_run.runtime_platform,
             location="base_run",
         )
         for index, variant in enumerate(self.variants):
             self._validate_setup_target_roots(variant.setup, location=f"variants[{index}].setup")
+            self._validate_agent_specific_setup(variant.setup, location=f"variants[{index}].setup")
             self._validate_reasoning_effort(variant.reasoning_effort, location=f"variants[{index}].reasoning_effort")
             effective_backend = variant.runtime_backend or self.base_run.runtime_backend
             effective_image = variant.runtime_image if variant.runtime_image is not None else self.base_run.runtime_image
+            effective_platform = (
+                variant.runtime_platform
+                if variant.runtime_platform is not None
+                else self.base_run.runtime_platform
+            )
+            if effective_backend == "docker" and effective_image is None:
+                effective_image = DEFAULT_AGENT_RUNTIME_IMAGES.get(self.agent)
             if effective_backend == "host" and variant.runtime_backend == "host" and variant.runtime_image is None:
                 effective_image = None
+                effective_platform = None
             self._validate_runtime_config(
                 effective_backend,
                 effective_image,
+                effective_platform,
                 location=f"variants[{index}]",
             )
         return self
+
+    def _validate_agent_specific_setup(self, setup: VariantSetupConfig, *, location: str) -> None:
+        if self.agent == "claude":
+            return
+        invalid_entries = []
+        if setup.claude_settings_overrides:
+            invalid_entries.append(f"{location}.claude_settings_overrides")
+        if setup.claude_mcp_config:
+            invalid_entries.append(f"{location}.claude_mcp_config")
+        if not invalid_entries:
+            return
+        details = ", ".join(invalid_entries)
+        raise ValueError(
+            f"Agent '{self.agent}' does not support Claude-specific setup fields; invalid entries: {details}"
+        )
 
     def _validate_setup_target_roots(self, setup: VariantSetupConfig, *, location: str) -> None:
         allowed_roots = get_coding_agent_adapter(self.agent).supported_runtime_target_roots
@@ -293,13 +345,20 @@ class RunSuiteConfig(BaseModel):
                 f"invalid entry: {location}={reasoning_effort!r}"
             )
 
-    def _validate_runtime_config(self, runtime_backend: RuntimeBackend, runtime_image: str | None, *, location: str) -> None:
-        if self.agent == "claude" and runtime_backend == "docker":
-            raise ValueError(f"{location}.runtime_backend='docker' is not supported for Claude; use runtime_backend='host'")
+    def _validate_runtime_config(
+        self,
+        runtime_backend: RuntimeBackend,
+        runtime_image: str | None,
+        runtime_platform: str | None,
+        *,
+        location: str,
+    ) -> None:
         if runtime_backend == "docker" and not str(runtime_image or "").strip():
             raise ValueError(f"{location}.runtime_image is required when runtime_backend='docker'")
         if runtime_backend == "host" and runtime_image is not None:
             raise ValueError(f"{location}.runtime_image can only be set when runtime_backend='docker'")
+        if runtime_backend == "host" and runtime_platform is not None:
+            raise ValueError(f"{location}.runtime_platform can only be set when runtime_backend='docker'")
 
 
 class EffectiveVariantConfig(BaseModel):
@@ -327,8 +386,17 @@ class EffectiveVariantConfig(BaseModel):
     setup: VariantSetupConfig = Field(default_factory=VariantSetupConfig)
     runtime_backend: RuntimeBackend = "docker"
     runtime_image: str | None = None
+    runtime_platform: str | None = None
     runtime_env: dict[str, str] = Field(default_factory=dict)
+    runtime_setup_timeout: int | None = None
+    runtime_validation_timeout: int | None = None
+    runtime_setup_cache: bool = False
+    runtime_setup_cache_dir: Path | None = None
     runtime_setup_commands: list[str] = Field(default_factory=list)
+    runtime_validation_commands: list[str] = Field(default_factory=list)
+    diff_exclude_paths: list[str] = Field(default_factory=list)
+    required_tool_call_patterns: list[str] = Field(default_factory=list)
+    required_available_tool_patterns: list[str] = Field(default_factory=list)
     runtime_keep_failed: bool = False
 
     @field_validator("agent", mode="before")

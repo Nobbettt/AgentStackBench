@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from pathlib import Path
 
 from .inference_limits import (
     MAX_COMMAND_TOKENIZATION_CHARS as _MAX_COMMAND_TOKENIZATION_CHARS,
+    MAX_COMMAND_OUTPUT_CHARS as _MAX_COMMAND_OUTPUT_CHARS,
     MAX_FILE_LIST_MATCHES as _MAX_FILE_LIST_MATCHES,
     MAX_GREP_LINE_CHARS as _MAX_GREP_LINE_CHARS,
     MAX_GREP_SPAN_MATCHES as _MAX_GREP_SPAN_MATCHES,
@@ -40,6 +42,19 @@ _KNOWN_ROOT_FILENAMES = {
     "WORKSPACE.bazel",
 }
 _KNOWN_ROOT_PREFIXES = ("Dockerfile.", "README.")
+_PATH_KEYS = {
+    "file",
+    "filepath",
+    "file_path",
+    "filename",
+    "path",
+    "relative_path",
+    "uri",
+}
+_LINE_KEYS = {"line", "line_number", "lineno", "start", "start_line"}
+_END_LINE_KEYS = {"end", "end_line", "line_end"}
+_TEXT_KEYS = ("content", "text", "result", "output", "stdout", "stderr", "message")
+_PATH_WITH_LINE_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+)(?::.*)?$")
 
 
 def normalize_workspace_path(path_value: str, workspace_path: Path) -> str:
@@ -149,6 +164,175 @@ def infer_file_list_from_text(
                 meta["file_list_cap_hits"] = int(meta.get("file_list_cap_hits", 0) or 0) + 1
             break
     return sorted(set(files))
+
+
+def _coerce_positive_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float) and value.is_integer() and value > 0:
+        return int(value)
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _strip_path_decoration(value: str) -> tuple[str, int | None]:
+    candidate = value.strip().strip("'\"`")
+    if candidate.startswith("file://"):
+        candidate = candidate[len("file://") :]
+    line_no = None
+    match = _PATH_WITH_LINE_RE.match(candidate)
+    if match:
+        maybe_path = match.group("path").strip()
+        if _looks_like_path_head(maybe_path):
+            candidate = maybe_path
+            line_no = int(match.group("line"))
+    if "#L" in candidate:
+        path_part, _, line_part = candidate.partition("#L")
+        parsed_line = _coerce_positive_int(line_part.split("-", 1)[0])
+        if parsed_line is not None:
+            candidate = path_part
+            line_no = parsed_line
+    return candidate, line_no
+
+
+def _normalize_inferred_file_path(value: object, workspace_path: Path) -> tuple[str | None, int | None]:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None, None
+    candidate, line_no = _strip_path_decoration(raw_value)
+    normalized = normalize_workspace_path(candidate, workspace_path).strip()
+    if not normalized or normalized.startswith("/") or normalized in {".", ".."}:
+        return None, None
+    if normalized.startswith("../") or "/../" in normalized:
+        return None, None
+    if not _looks_like_plain_path(normalized) and not _looks_like_path_head(normalized):
+        return None, None
+    return normalized, line_no
+
+
+def _merge_span(target: SpanMap, file_path: str, start: int, end: int | None = None) -> None:
+    end_value = max(start, end or start)
+    target.setdefault(file_path, []).append({"start": start, "end": end_value})
+
+
+def tool_result_text_from_value(value: object, *, depth: int = 0) -> str:
+    """Extract textual content from common tool-result shapes without using tool names."""
+
+    if value is None or depth > 8:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        parts = [tool_result_text_from_value(item, depth=depth + 1).strip() for item in value]
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key in _TEXT_KEYS:
+            if key in value:
+                text = tool_result_text_from_value(value.get(key), depth=depth + 1).strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(parts)
+    return ""
+
+
+def _collect_json_path_refs(
+    value: object,
+    *,
+    workspace_path: Path,
+    files: set[str],
+    spans: SpanMap,
+    depth: int = 0,
+) -> None:
+    if value is None or depth > 8:
+        return
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                return
+            _collect_json_path_refs(parsed, workspace_path=workspace_path, files=files, spans=spans, depth=depth + 1)
+        return
+    if isinstance(value, list):
+        for item in value[:500]:
+            _collect_json_path_refs(item, workspace_path=workspace_path, files=files, spans=spans, depth=depth + 1)
+        return
+    if not isinstance(value, dict):
+        return
+
+    path_value = None
+    for key, item in value.items():
+        if str(key).strip().lower() in _PATH_KEYS and isinstance(item, str):
+            path_value = item
+            break
+    file_path = None
+    line_from_path = None
+    if path_value is not None:
+        file_path, line_from_path = _normalize_inferred_file_path(path_value, workspace_path)
+        if file_path:
+            files.add(file_path)
+            start = line_from_path
+            end = None
+            for key, item in value.items():
+                key_text = str(key).strip().lower()
+                if key_text in _LINE_KEYS and start is None:
+                    start = _coerce_positive_int(item)
+                elif key_text in _END_LINE_KEYS:
+                    end = _coerce_positive_int(item)
+            if start is not None:
+                _merge_span(spans, file_path, start, end)
+
+    for item in value.values():
+        _collect_json_path_refs(item, workspace_path=workspace_path, files=files, spans=spans, depth=depth + 1)
+
+
+def infer_retrieval_step_from_tool_result(
+    result_value: object,
+    *,
+    output_text: str | None = None,
+    workspace_path: Path,
+    meta: TraceInferenceMeta | None = None,
+) -> RetrievalStep | None:
+    """Infer retrieval context from generic successful tool-result content."""
+
+    text = output_text if output_text is not None else tool_result_text_from_value(result_value)
+    if len(text) > _MAX_COMMAND_OUTPUT_CHARS:
+        if meta is not None:
+            meta["dropped_large_command_outputs"] = int(meta.get("dropped_large_command_outputs", 0) or 0) + 1
+        text = ""
+
+    raw_spans = infer_grep_spans_from_text(text, workspace_path, meta=meta) if text else {}
+    spans: SpanMap = {}
+    for file_path, file_spans in raw_spans.items():
+        normalized, _ = _normalize_inferred_file_path(file_path, workspace_path)
+        if not normalized:
+            continue
+        spans.setdefault(normalized, []).extend(file_spans)
+    files = set(spans)
+    if text:
+        for file_path in infer_file_list_from_text(text, workspace_path, meta=meta):
+            normalized, _ = _normalize_inferred_file_path(file_path, workspace_path)
+            if normalized:
+                files.add(normalized)
+
+    json_files: set[str] = set()
+    json_spans: SpanMap = {}
+    _collect_json_path_refs(result_value, workspace_path=workspace_path, files=json_files, spans=json_spans)
+    files.update(json_files)
+    spans = merge_span_maps(spans, json_spans)
+    if not files and not spans:
+        return None
+    files.update(spans)
+    return {"files": sorted(files), "spans": spans, "symbols": {}}
 
 
 def _looks_like_plain_path(value: str, *, meta: TraceInferenceMeta | None = None) -> bool:

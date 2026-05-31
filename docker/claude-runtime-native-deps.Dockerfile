@@ -1,4 +1,4 @@
-FROM node:22.16.0-bookworm-slim
+FROM node:22-trixie-slim@sha256:55931e785da6feb47a9ed9ee54093b7710f3cbab9962708e5c4c9b5318c66451
 
 ARG CLAUDE_CODE_VERSION
 ENV DEBIAN_FRONTEND=noninteractive

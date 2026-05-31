@@ -39,13 +39,14 @@ import { TraceSection } from "@/components/comparison/trace-section";
 import type { ComparisonResultsViewMode, DeltaDisplayMode } from "@/components/comparison/types";
 import { cn } from "@/lib/utils";
 
-type InstanceDetailTab = "overview" | "resolution" | "context" | "resources" | "answer" | "trajectory" | "patch" | "trace";
+type InstanceDetailTab = "overview" | "resolution" | "context" | "resources" | "mcp" | "answer" | "trajectory" | "patch" | "trace";
 
 const instanceDetailTabs: Array<{ id: InstanceDetailTab; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "resolution", label: "Resolution" },
   { id: "context", label: "Context" },
   { id: "resources", label: "Resources" },
+  { id: "mcp", label: "MCP" },
   { id: "answer", label: "Final Answer" },
   { id: "trajectory", label: "Trajectory" },
   { id: "patch", label: "Model Patch" },
@@ -188,6 +189,7 @@ function renderDetailBackedTab(
   }
 
   const variants = detailVariantsForViewMode(detail, viewMode);
+  if (activeTab === "mcp") return <McpUseSection variants={detail.variants} />;
   if (activeTab === "answer") return <FinalAnswerSection variants={detail.variants} />;
   if (activeTab === "trajectory") return <TrajectorySection variants={viewMode === "treatment-delta" ? detail.variants : variants} viewMode={viewMode} />;
   if (activeTab === "patch") return <ModelPatchSection variants={detail.variants} />;
@@ -741,6 +743,87 @@ function TrajectorySection({
         ))}
       </div>
     </section>
+  );
+}
+
+function McpUseSection({ variants }: { variants: ComparisonInstanceDetail["variants"] }) {
+  const hasMcpData = variants.some((variant) => {
+    const usage = variant.mcpUse;
+    return (usage?.availableTools?.length ?? 0) > 0 || (usage?.toolCalls ?? 0) > 0 || (usage?.calls?.length ?? 0) > 0;
+  });
+  if (!hasMcpData) {
+    return <StatusPanel message="No MCP tool use data was exported for this instance." />;
+  }
+
+  return (
+    <section className="space-y-4">
+      <SectionTitleWithHelp
+        title="MCP Tool Use"
+        explanation="Summarizes MCP tools exposed to the run, tool-call counts, returned context, and whether returned paths were later inspected or used."
+      />
+      <div className={variants.length > 1 ? "grid gap-6 xl:grid-cols-2" : "grid gap-6"}>
+        {variants.map((variant) => {
+          const usage = variant.mcpUse;
+          const calls = usage?.calls ?? [];
+          return (
+            <div key={variant.label} className="h-full rounded-lg bg-background p-5">
+              <h3 className="text-lg font-semibold">{variant.name}</h3>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <SummaryCard label="MCP Calls" value={String(usage?.toolCalls ?? 0)} />
+                <SummaryCard label="Successful" value={String(usage?.successfulToolCalls ?? 0)} />
+                <SummaryCard label="With Results" value={String(usage?.callsWithResults ?? 0)} />
+                <SummaryCard label="Meaningful" value={String(usage?.meaningfulCalls ?? 0)} />
+              </div>
+              {(usage?.byTool?.length ?? 0) > 0 ? (
+                <div className="mt-4 grid gap-2">
+                  {usage?.byTool?.map((entry) => (
+                    <div key={entry.name} className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm">
+                      <span className="min-w-0 break-all">{entry.name}</span>
+                      <span className="font-medium tabular-nums">{entry.calls}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {calls.length > 0 ? (
+                <div className="mt-5 space-y-3">
+                  {calls.map((call, index) => (
+                    <details key={`${variant.label}-mcp-${index}`} className="rounded-md border p-4">
+                      <summary className="cursor-pointer list-none font-medium [overflow-wrap:anywhere]">
+                        {call.toolName || "MCP tool"} · {call.resultCount ?? 0} result{call.resultCount === 1 ? "" : "s"}
+                        {call.meaningful ? <span className="ml-2 rounded bg-emerald-50 px-2 py-0.5 text-xs text-emerald-800">followed</span> : null}
+                      </summary>
+                      {call.query ? <div className="mt-3 text-sm text-muted-foreground [overflow-wrap:anywhere]">Query: {call.query}</div> : null}
+                      <McpList label="Top Paths" values={call.topPaths} />
+                      <McpList label="Final Context Overlap" values={call.overlapFinalContextFiles} />
+                      <McpList label="Patch Overlap" values={call.overlapPatchFiles} />
+                      <McpList label="Later Inspected" values={call.followedReturnedPaths} />
+                    </details>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-4 text-sm text-muted-foreground">
+                  No MCP calls were recorded for this variant on this instance.
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function McpList({ label, values }: { label: string; values?: string[] }) {
+  if (!values || values.length === 0) return null;
+  return (
+    <div className="mt-3">
+      <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
+      <ul className="mt-1 space-y-1 text-sm">
+        {values.map((value) => (
+          <li key={value} className="break-all rounded bg-muted/20 px-2 py-1 font-mono text-xs">{value}</li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

@@ -18,19 +18,21 @@ def _record(
     status: str = "completed",
     ok: bool = True,
     model_patch: str = "",
+    retry: dict[str, object] | None = None,
 ) -> str:
     record_path = task_dir / f"{task_dir.name}.codex-record.json"
+    payload = {
+        "status": status,
+        "ok": ok,
+        "duration_ms": duration_ms,
+        "token_usage": {"total_tokens": total_tokens},
+        "tool_calls": [{} for _ in range(tool_calls)],
+        "model_patch": model_patch,
+    }
+    if retry is not None:
+        payload["retry"] = retry
     _write(
         record_path,
-        json.dumps(
-            {
-                "status": status,
-                "ok": ok,
-                "duration_ms": duration_ms,
-                "token_usage": {"total_tokens": total_tokens},
-                "tool_calls": [{} for _ in range(tool_calls)],
-                "model_patch": model_patch,
-            }
-        ),
+        json.dumps(payload),
     )
     return str(record_path)

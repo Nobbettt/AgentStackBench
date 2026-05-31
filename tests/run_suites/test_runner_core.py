@@ -132,17 +132,18 @@ def test_run_suite_runner_fails_fast_when_evaluation_dependencies_missing(tmp_pa
         RunSuiteRunner(config)
 
 
-def test_run_suite_runner_preflight_rejects_limited_full_suite(tmp_path, monkeypatch) -> None:
-    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+def test_run_suite_runner_preflight_rejects_limited_full_dataset_assertion(tmp_path, monkeypatch) -> None:
+    task_data, _task_csv = _write_task_inputs(tmp_path, count=1)
     monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task([]))
 
     config = RunSuiteConfig.model_validate(
         {
-            "experiment_name": "codex-full-suite",
+            "experiment_name": "codex-explicit-full-suite",
             "agent": "codex",
             "base_run": {
                 "task_data": str(task_data),
-                "task_csv": str(task_csv),
+                "task_csv": None,
+                "selection_assertion": "full_dataset",
                 "output_root": str(tmp_path / "results"),
                 "repo_cache": str(tmp_path / "cache"),
                 "limit": 1,
@@ -156,11 +157,11 @@ def test_run_suite_runner_preflight_rejects_limited_full_suite(tmp_path, monkeyp
     with pytest.raises(RuntimeError, match="Run-suite preflight failed"):
         RunSuiteRunner(config).run()
 
-    proof = json.loads((tmp_path / "results" / "codex-full-suite" / "preflight.failure.json").read_text(encoding="utf-8"))
-    assert proof["failures"][0]["kind"] == "limited_full_suite_config"
+    proof = json.loads((tmp_path / "results" / "codex-explicit-full-suite" / "preflight.failure.json").read_text(encoding="utf-8"))
+    assert proof["failures"][0]["kind"] == "limited_full_dataset_assertion"
 
 
-def test_run_suite_runner_preflight_rejects_selected_full_suite(tmp_path, monkeypatch) -> None:
+def test_run_suite_runner_preflight_rejects_selected_full_dataset_assertion(tmp_path, monkeypatch) -> None:
     task_data, task_csv = _write_task_inputs(tmp_path, count=2)
     monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task([]))
 
@@ -171,6 +172,7 @@ def test_run_suite_runner_preflight_rejects_selected_full_suite(tmp_path, monkey
             "base_run": {
                 "task_data": str(task_data),
                 "task_csv": str(task_csv),
+                "selection_assertion": "full_dataset",
                 "output_root": str(tmp_path / "results"),
                 "repo_cache": str(tmp_path / "cache"),
                 "limit": 0,
@@ -185,8 +187,36 @@ def test_run_suite_runner_preflight_rejects_selected_full_suite(tmp_path, monkey
         RunSuiteRunner(config).run()
 
     proof = json.loads((tmp_path / "results" / "codex-full-suite" / "preflight.failure.json").read_text(encoding="utf-8"))
-    assert proof["failures"][0]["kind"] == "selected_full_suite_config"
+    assert proof["failures"][0]["kind"] == "selected_full_dataset_assertion"
     assert proof["failures"][0]["selectors"]["task_csv"] == str(task_csv)
+
+
+def test_run_suite_runner_does_not_infer_full_dataset_from_prose(tmp_path, monkeypatch) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    call_log: list[dict[str, object]] = []
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task(call_log))
+    monkeypatch.setattr("contextbench.run_suites_core.runner.remove_worktree", lambda *args, **kwargs: None)
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "codex-full-suite-prose-only",
+            "description": "This description mentions a fully configured subset, not an asserted full dataset.",
+            "agent": "codex",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "limit": 1,
+                "runtime_backend": "host",
+            },
+            "variants": [{"name": "baseline", "runtime_backend": "host"}],
+            "postprocess": {"convert": False, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    assert RunSuiteRunner(config).run() == 0
+    assert len(call_log) == 1
 
 
 def test_run_suite_runner_preflight_requires_task_repo_metadata(tmp_path, monkeypatch) -> None:
@@ -220,25 +250,160 @@ def test_run_suite_runner_preflight_requires_task_repo_metadata(tmp_path, monkey
     assert proof["failures"][0]["instance_ids"] == ["psf__requests-1000"]
 
 
-def test_run_suite_config_rejects_claude_docker_until_auth_is_defined(tmp_path) -> None:
+def test_run_suite_runner_preflight_rejects_available_tool_requirements_for_unsupported_adapter(
+    tmp_path,
+    monkeypatch,
+) -> None:
     task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task([]))
 
-    with pytest.raises(ValueError, match="not supported for Claude"):
-        RunSuiteConfig.model_validate(
-            {
-                "experiment_name": "claude-docker-auth",
-                "agent": "claude",
-                "base_run": {
-                    "task_data": str(task_data),
-                    "task_csv": str(task_csv),
-                    "output_root": str(tmp_path / "results"),
-                    "repo_cache": str(tmp_path / "cache"),
-                    "runtime_backend": "docker",
-                },
-                "variants": [{"name": "baseline"}],
-                "postprocess": {"convert": False, "evaluate": False, "runtime_backend": "host"},
-            }
-        )
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "codex-tool-availability",
+            "agent": "codex",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "runtime_backend": "host",
+            },
+            "variants": [
+                {
+                    "name": "requires-tools",
+                    "runtime_backend": "host",
+                    "required_available_tool_patterns_add": [r"^mcp__demo__"],
+                }
+            ],
+            "postprocess": {"convert": True, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="Run-suite preflight failed"):
+        RunSuiteRunner(config).run()
+
+    proof = json.loads((tmp_path / "results" / "codex-tool-availability" / "preflight.failure.json").read_text(encoding="utf-8"))
+    assert proof["failures"][0]["kind"] == "required_available_tools_unsupported"
+    assert proof["failures"][0]["requirements"][0]["agent"] == "codex"
+
+
+def test_run_suite_runner_preflight_rejects_claude_docker_without_portable_auth(tmp_path, monkeypatch) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    empty_claude_dir = tmp_path / "empty-claude"
+    empty_claude_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(empty_claude_dir))
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr("contextbench.run_suites_core.runner._docker_available", lambda: True)
+    monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_available", lambda image: True)
+    monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_platform", lambda image: "linux/amd64")
+    monkeypatch.setattr(
+        "contextbench.run_suites_core.runner._claude_host_auth_status_summary",
+        lambda: {
+            "checked": True,
+            "exit_code": 0,
+            "logged_in": True,
+            "authMethod": "claude.ai",
+            "apiProvider": "firstParty",
+        },
+    )
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task([]))
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "claude-docker-no-portable-auth",
+            "agent": "claude",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "runtime_backend": "docker",
+                "runtime_image": "contextbench-claude-runtime:test",
+                "runtime_platform": "linux/amd64",
+            },
+            "variants": [{"name": "baseline"}],
+            "postprocess": {"convert": True, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="Run-suite preflight failed"):
+        RunSuiteRunner(config).run()
+
+    proof = json.loads((tmp_path / "results" / "claude-docker-no-portable-auth" / "preflight.failure.json").read_text(encoding="utf-8"))
+    failure = proof["failures"][0]
+    assert failure["kind"] == "claude_docker_portable_auth_unavailable"
+    assert failure["variants"][0]["variant"] == "baseline"
+    assert failure["variants"][0]["source_config_dir"] == str(empty_claude_dir)
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in failure["variants"][0]["checked_env_vars"]
+    assert failure["host_auth"]["logged_in"] is True
+    assert "setup-token" in failure["message"]
+
+
+def test_run_suite_runner_preflight_accepts_claude_docker_portable_auth_from_runtime_env(tmp_path, monkeypatch) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty-claude"))
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr("contextbench.run_suites_core.runner._docker_available", lambda: True)
+    monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_available", lambda image: True)
+    monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_platform", lambda image: "linux/amd64")
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "claude-docker-runtime-env-auth",
+            "agent": "claude",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "runtime_backend": "docker",
+                "runtime_image": "contextbench-claude-runtime:test",
+                "runtime_platform": "linux/amd64",
+                "runtime_env": {"CLAUDE_CODE_OAUTH_TOKEN": "configured-token"},
+            },
+            "variants": [{"name": "baseline"}],
+            "postprocess": {"convert": True, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    runner = RunSuiteRunner(config)
+    tasks, _task_set = runner._load_tasks()
+    runner._validate_preflight(tasks, [build_run_suite_variant(config, config.variants[0])])
+
+
+def test_run_suite_runner_preflight_rejects_runtime_platform_mismatch(tmp_path, monkeypatch) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task([]))
+    monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_platform", lambda image: "linux/arm64")
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "runtime-platform-mismatch",
+            "agent": "claude",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "runtime_backend": "docker",
+                "runtime_image": "contextbench-claude-runtime:test-amd64",
+                "runtime_platform": "linux/amd64",
+                "runtime_env": {"CLAUDE_CODE_OAUTH_TOKEN": "configured-token"},
+            },
+            "variants": [{"name": "baseline"}],
+            "postprocess": {"convert": True, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="Run-suite preflight failed"):
+        RunSuiteRunner(config).run()
+
+    proof = json.loads((tmp_path / "results" / "runtime-platform-mismatch" / "preflight.failure.json").read_text(encoding="utf-8"))
+    assert proof["failures"][0]["kind"] == "runtime_image_platform_mismatch"
+    assert proof["failures"][0]["images"][0]["expected_platform"] == "linux/amd64"
+    assert proof["failures"][0]["images"][0]["actual_platform"] == "linux/arm64"
 
 
 def test_run_suite_runner_does_not_fail_fast_when_resolution_harness_missing(tmp_path, monkeypatch) -> None:
@@ -297,8 +462,17 @@ def test_run_suite_runner_cleans_successful_worktrees_but_keeps_failed_runs(tmp_
         workspace_key=None,
         runtime_backend="host",
         runtime_image=None,
+        runtime_platform=None,
         runtime_env=None,
+        runtime_setup_timeout=None,
+        runtime_validation_timeout=None,
+        runtime_setup_cache=False,
+        runtime_setup_cache_dir=None,
         runtime_setup_commands=(),
+        runtime_validation_commands=(),
+        diff_exclude_paths=(),
+        required_tool_call_patterns=(),
+        required_available_tool_patterns=(),
         runtime_keep_failed=False,
     ):
         del (
@@ -313,8 +487,17 @@ def test_run_suite_runner_cleans_successful_worktrees_but_keeps_failed_runs(tmp_
             setup,
             runtime_backend,
             runtime_image,
+            runtime_platform,
             runtime_env,
+            runtime_setup_timeout,
+            runtime_validation_timeout,
+            runtime_setup_cache,
+            runtime_setup_cache_dir,
             runtime_setup_commands,
+            runtime_validation_commands,
+            diff_exclude_paths,
+            required_tool_call_patterns,
+            required_available_tool_patterns,
             runtime_keep_failed,
         )
         task_id = safe_path_component(task.get("instance_id") or task.get("original_inst_id") or "task")

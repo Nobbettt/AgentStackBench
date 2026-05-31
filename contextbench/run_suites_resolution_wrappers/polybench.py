@@ -4,10 +4,12 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import csv
+import importlib
 import json
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -270,9 +272,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _load_run_evaluation_module():
+    module = sys.modules.get("poly_bench_evaluation.run_evaluation")
+    if module is not None:
+        return module
+    return importlib.import_module("poly_bench_evaluation.run_evaluation")
+
+
 def main() -> int:
     args = parse_args()
-    import poly_bench_evaluation.run_evaluation as run_evaluation
+    run_evaluation = _load_run_evaluation_module()
 
     predictions_path = args.predictions_path.resolve()
     result_path = args.result_path.resolve()

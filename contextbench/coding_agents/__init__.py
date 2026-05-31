@@ -17,6 +17,7 @@ __all__ = [
     "parse_instance_filter",
     "parse_unified_diff",
     "record_is_convertible",
+    "structured_output_schema_error",
 ]
 
 
@@ -55,17 +56,24 @@ def __getattr__(name: str):
         from .records import parse_unified_diff
 
         return parse_unified_diff
-    if name in {"build_claude_raw_response", "build_codex_raw_response", "extract_structured_output_from_value"}:
+    if name in {
+        "build_claude_raw_response",
+        "build_codex_raw_response",
+        "extract_structured_output_from_value",
+        "structured_output_schema_error",
+    }:
         from .response_parsing import (
             build_claude_raw_response,
             build_codex_raw_response,
             extract_structured_output_from_value,
+            structured_output_schema_error,
         )
 
         values = {
             "build_claude_raw_response": build_claude_raw_response,
             "build_codex_raw_response": build_codex_raw_response,
             "extract_structured_output_from_value": extract_structured_output_from_value,
+            "structured_output_schema_error": structured_output_schema_error,
         }
         return values[name]
     if name in {"detect_bench_from_instance_id", "load_tasks", "parse_bench_filter", "parse_instance_filter"}:

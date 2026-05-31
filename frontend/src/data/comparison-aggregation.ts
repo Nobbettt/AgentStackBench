@@ -239,6 +239,11 @@ function aggregateVariant(
     .filter((value): value is number => typeof value === "number" && value > 0);
   const totalTokens = filteredInstances.reduce((sum, instance) => sum + (instance.resources.totalTokens ?? 0), 0);
   const toolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.toolCalls ?? 0), 0);
+  const mcpToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.mcpToolCalls ?? 0), 0);
+  const successfulMcpToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.successfulMcpToolCalls ?? 0), 0);
+  const commandExecutions = filteredInstances.reduce((sum, instance) => sum + (instance.resources.commandExecutions ?? 0), 0);
+  const readToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.readToolCalls ?? 0), 0);
+  const editToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.editToolCalls ?? 0), 0);
   const costValues = filteredInstances
     .map((instance) => instance.resources.costUsd)
     .filter((value): value is number => typeof value === "number");
@@ -317,6 +322,11 @@ function aggregateVariant(
         avgLinesPerStep: avgLinesPerStep !== null ? formatPatternMetric(avgLinesPerStep) : undefined,
         totalTokens: totalTokens > 0 ? formatTokens(totalTokens) : undefined,
         toolCalls: String(toolCalls),
+        mcpToolCalls: String(mcpToolCalls),
+        successfulMcpToolCalls: String(successfulMcpToolCalls),
+        commandExecutions: String(commandExecutions),
+        readToolCalls: String(readToolCalls),
+        editToolCalls: String(editToolCalls),
         cost: taskCount > 0 && costValues.length === taskCount ? formatCurrency(costValues.reduce((sum, value) => sum + value, 0) / costValues.length) : undefined,
       },
       skills: {

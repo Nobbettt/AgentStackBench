@@ -208,8 +208,10 @@ def build_setup_run_record(
     tool_calls: list[ToolCall] | None,
     started_at: float,
     completed_at: float,
+    persisted_tool_results: list[dict[str, object]] | None = None,
+    retry: dict[str, object] | None = None,
 ) -> SetupRunRecord:
-    return {
+    record: SetupRunRecord = {
         "prompt_path": str(prompt_path),
         "stderr_path": str(stderr_path),
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started_at)),
@@ -224,3 +226,8 @@ def build_setup_run_record(
         "token_usage": token_usage,
         "tool_calls": tool_calls or [],
     }
+    if persisted_tool_results:
+        record["persisted_tool_results"] = persisted_tool_results
+    if retry:
+        record["retry"] = retry
+    return record

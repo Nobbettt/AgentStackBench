@@ -24,6 +24,7 @@ from contextbench.coding_agents.runtime_backends import (
     RuntimeBackendConfig,
     DockerTaskRuntime,
     normalize_runtime_backend_config,
+    run_runtime_setup_commands,
 )
 from contextbench.agents.claude.adapter import ClaudeAdapter
 from contextbench.agents.codex.adapter import CodexAdapter
@@ -80,19 +81,29 @@ def test_validate_claude_auth_rejects_logged_out(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="not logged in"):
         validate_claude_auth()
 
-def test_run_command_timeout_decodes_byte_output(tmp_path, monkeypatch) -> None:
+def test_run_command_timeout_preserves_streamed_output(tmp_path, monkeypatch) -> None:
     stdout_path = tmp_path / "stdout.log"
     stderr_path = tmp_path / "stderr.log"
 
-    def fake_run(*args, **kwargs):
-        raise subprocess.TimeoutExpired(
-            cmd=args[0],
-            timeout=kwargs.get("timeout", 30),
-            output=b"partial stdout\n",
-            stderr=b"partial stderr\n",
-        )
+    class FakeProcess:
+        returncode = None
 
-    monkeypatch.setattr("contextbench.coding_agents.runtime.subprocess.run", fake_run)
+        def __init__(self, command, **kwargs):
+            self.command = command
+            kwargs["stdout"].write("partial stdout\n")
+            kwargs["stderr"].write("partial stderr\n")
+
+        def communicate(self, input=None, timeout=None):
+            raise subprocess.TimeoutExpired(cmd=self.command, timeout=timeout)
+
+        def terminate(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 124
+
+    monkeypatch.setattr("contextbench.coding_agents.runtime_common.subprocess.Popen", FakeProcess)
+
 
     result = run_command(
         ["codex", "exec", "-"],
@@ -117,6 +128,89 @@ def test_normalize_runtime_backend_config_requires_backend() -> None:
         normalize_runtime_backend_config(runtime_backend="")
 
 
+def test_normalize_runtime_backend_config_rejects_host_platform() -> None:
+    with pytest.raises(RuntimeError, match="runtime_platform can only be used"):
+        normalize_runtime_backend_config(runtime_backend="host", runtime_platform="linux/amd64")
+
+
+def test_runtime_setup_commands_use_non_login_shell_to_preserve_prepared_env(tmp_path) -> None:
+    workspace_path = tmp_path / "workspace"
+    task_dir = tmp_path / "task"
+    workspace_path.mkdir()
+    task_dir.mkdir()
+    calls: list[dict[str, object]] = []
+
+    class FakeRuntime:
+        def run_command(self, command, *, cwd, stdin_text, stdout_path, stderr_path, timeout, env=None, host_runner=None):
+            del host_runner
+            calls.append(
+                {
+                    "command": list(command),
+                    "cwd": cwd,
+                    "stdin_text": stdin_text,
+                    "stdout_path": stdout_path,
+                    "stderr_path": stderr_path,
+                    "timeout": timeout,
+                    "env": dict(env or {}),
+                }
+            )
+            stdout_path.write_text("ok", encoding="utf-8")
+            stderr_path.write_text("", encoding="utf-8")
+            return {"ok": True, "exit_code": 0, "signal": None, "timeout": False}
+
+    failure = run_runtime_setup_commands(
+        FakeRuntime(),
+        commands=["tool-from-prepared-path --version"],
+        workspace_path=workspace_path,
+        task_dir=task_dir,
+        timeout=30,
+        env={"PATH": "/prepared/bin:/usr/bin:/bin"},
+    )
+
+    assert failure is None
+    assert calls == [
+        {
+            "command": ["/bin/sh", "-c", "tool-from-prepared-path --version"],
+            "cwd": workspace_path,
+            "stdin_text": None,
+            "stdout_path": task_dir / "runtime-setup-1.stdout.log",
+            "stderr_path": task_dir / "runtime-setup-1.stderr.log",
+            "timeout": 30,
+            "env": {"PATH": "/prepared/bin:/usr/bin:/bin"},
+        }
+    ]
+
+
+def test_runtime_setup_command_failure_records_command_timing(tmp_path, monkeypatch) -> None:
+    workspace_path = tmp_path / "workspace"
+    task_dir = tmp_path / "task"
+    workspace_path.mkdir()
+    task_dir.mkdir()
+    times = iter([100.0, 106.25])
+
+    class FakeRuntime:
+        def run_command(self, command, *, cwd, stdin_text, stdout_path, stderr_path, timeout, env=None, host_runner=None):
+            del command, cwd, stdin_text, timeout, env, host_runner
+            stdout_path.write_text("", encoding="utf-8")
+            stderr_path.write_text("failed", encoding="utf-8")
+            return {"ok": False, "exit_code": 9, "signal": None, "timeout": False}
+
+    monkeypatch.setattr("contextbench.coding_agents.runtime_backends.time.time", lambda: next(times))
+
+    failure = run_runtime_setup_commands(
+        FakeRuntime(),
+        commands=["exit 9"],
+        workspace_path=workspace_path,
+        task_dir=task_dir,
+        timeout=30,
+        env=None,
+    )
+
+    assert failure is not None
+    assert failure.started_at == 100.0
+    assert failure.completed_at == 106.25
+
+
 def test_docker_task_runtime_starts_execs_and_cleans_container(tmp_path, monkeypatch) -> None:
     workspace_path = tmp_path / "workspace"
     task_dir = tmp_path / "task"
@@ -134,8 +228,6 @@ def test_docker_task_runtime_starts_execs_and_cleans_container(tmp_path, monkeyp
         calls.append(list(command))
         if command[:2] == ["docker", "run"]:
             return subprocess.CompletedProcess(command, 0, stdout="container-id\n", stderr="")
-        if command[:2] == ["docker", "exec"]:
-            return subprocess.CompletedProcess(command, 0, stdout="agent stdout", stderr="agent stderr")
         if command[:3] == ["docker", "rm", "--force"]:
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if command[:4] == ["docker", "image", "inspect", "--format"]:
@@ -144,12 +236,25 @@ def test_docker_task_runtime_starts_execs_and_cleans_container(tmp_path, monkeyp
             return subprocess.CompletedProcess(command, 128, stdout="", stderr="not a git repository")
         raise AssertionError(f"unexpected command: {command}")
 
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            calls.append(list(command))
+            kwargs["stdout"].write("agent stdout")
+            kwargs["stderr"].write("agent stderr")
+
+        def communicate(self, input=None, timeout=None):
+            return None
+
     monkeypatch.setattr("contextbench.coding_agents.runtime_backends.subprocess.run", fake_run)
+    monkeypatch.setattr("contextbench.coding_agents.runtime_backends.subprocess.Popen", FakeProcess)
 
     runtime = DockerTaskRuntime(
         config=RuntimeBackendConfig(
             backend="docker",
             image="contextbench-agent:test",
+            platform="linux/amd64",
             env={"BASE_ENV": "1"},
         ),
         workspace_path=workspace_path,
@@ -177,6 +282,7 @@ def test_docker_task_runtime_starts_execs_and_cleans_container(tmp_path, monkeyp
     assert stderr_path.read_text(encoding="utf-8") == "agent stderr"
     assert docker_run[:4] == ["docker", "run", "--detach", "--name"]
     assert "--workdir" in docker_run
+    assert_subsequence(docker_run, ["--platform", "linux/amd64"])
     assert str(workspace_path) in docker_run
     assert f"type=bind,source={workspace_path.resolve()},target={workspace_path.resolve()}" in docker_run
     assert f"type=bind,source={task_dir.resolve()},target={task_dir.resolve()}" in docker_run

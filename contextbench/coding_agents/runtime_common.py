@@ -5,13 +5,27 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from .files import ensure_dir, usage_error, write_json
 from .types import CommandResult
+
+
+SHARED_RETRYABLE_ERROR_SNIPPETS = (
+    "rate limit",
+    "temporarily unavailable",
+    "overloaded",
+    "currently experiencing high demand",
+    "socket hang up",
+    "econnreset",
+    "etimedout",
+    "failed to fetch",
+    "network error",
+)
 
 
 def run_command(
@@ -26,25 +40,39 @@ def run_command(
 ) -> CommandResult:
     ensure_dir(stdout_path.parent)
     ensure_dir(stderr_path.parent)
+    stdin_pipe = subprocess.PIPE if stdin_text is not None else None
     try:
-        result = subprocess.run(
-            list(command),
-            cwd=str(cwd),
-            input=stdin_text,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            env=env,
-        )
-        stdout_path.write_text(coerce_output_text(result.stdout), encoding="utf-8")
-        stderr_path.write_text(coerce_output_text(result.stderr), encoding="utf-8")
-        return {
-            "ok": result.returncode == 0,
-            "exit_code": result.returncode,
-            "signal": None,
-            "timeout": False,
-        }
+        with stdout_path.open("w", encoding="utf-8") as stdout_file, stderr_path.open("w", encoding="utf-8") as stderr_file:
+            process = subprocess.Popen(
+                list(command),
+                cwd=str(cwd),
+                stdin=stdin_pipe,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                text=True,
+                env=env,
+            )
+            try:
+                process.communicate(stdin_text, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                return {
+                    "ok": False,
+                    "exit_code": None,
+                    "signal": "SIGTERM",
+                    "timeout": True,
+                }
+            return {
+                "ok": process.returncode == 0,
+                "exit_code": process.returncode,
+                "signal": None,
+                "timeout": False,
+            }
     except subprocess.TimeoutExpired as exc:
         stdout_path.write_text(coerce_output_text(exc.stdout), encoding="utf-8")
         stderr_path.write_text(coerce_output_text(exc.stderr), encoding="utf-8")
@@ -66,6 +94,35 @@ def merge_json_objects(base: object, override: object) -> object:
                 merged[key] = value
         return merged
     return override
+
+
+_TEMPLATE_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def expand_runtime_templates(
+    value: object,
+    *,
+    env: Mapping[str, object] | None = None,
+) -> object:
+    """Recursively expand ${VAR} placeholders from explicitly supplied runtime values."""
+
+    values = {str(key): str(item) for key, item in dict(env or {}).items()}
+
+    def expand_text(text: str) -> str:
+        return _TEMPLATE_PATTERN.sub(lambda match: values.get(match.group(1), match.group(0)), text)
+
+    if isinstance(value, str):
+        return expand_text(value)
+    if isinstance(value, list):
+        return [expand_runtime_templates(item, env=values) for item in value]
+    if isinstance(value, tuple):
+        return tuple(expand_runtime_templates(item, env=values) for item in value)
+    if isinstance(value, dict):
+        return {
+            str(expand_runtime_templates(key, env=values)): expand_runtime_templates(item, env=values)
+            for key, item in value.items()
+        }
+    return value
 
 
 def coerce_output_text(value: object) -> str:

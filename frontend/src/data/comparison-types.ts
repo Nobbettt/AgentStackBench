@@ -87,7 +87,15 @@ export type ComparisonInstance = {
     durationMs?: number | null;
     totalTokens?: number | null;
     toolCalls?: number | null;
+    mcpToolCalls?: number | null;
+    successfulMcpToolCalls?: number | null;
+    commandExecutions?: number | null;
+    readToolCalls?: number | null;
+    editToolCalls?: number | null;
     costUsd?: number | null;
+    retryAttempts?: number;
+    retried?: boolean;
+    retrySuppressed?: boolean;
   };
   repositorySize?: {
     status?: "available" | "unavailable";
@@ -114,10 +122,50 @@ export type ComparisonInstance = {
       count: number;
     }>;
   };
+  mcp?: McpUseSummary;
+};
+
+export type McpToolCount = {
+  name: string;
+  calls: number;
+  successfulCalls?: number;
+};
+
+export type McpToolCallDetail = {
+  toolName: string;
+  query?: string;
+  topK?: number | null;
+  resultCount?: number;
+  totalCandidates?: number | null;
+  topPaths?: string[];
+  topSymbols?: string[];
+  overlapFinalContextFiles?: string[];
+  overlapPatchFiles?: string[];
+  followedReturnedPaths?: string[];
+  meaningful?: boolean;
+};
+
+export type McpUseSummary = {
+  availableTools?: string[];
+  toolCalls?: number;
+  successfulToolCalls?: number;
+  callsWithResults?: number;
+  meaningfulCalls?: number;
+  callsWithFinalContextOverlap?: number;
+  callsWithPatchOverlap?: number;
+  callsWithFollowupOnReturnedPath?: number;
+  returnedPathCount?: number;
+  instancesWithMcpCalls?: number;
+  instancesWithMeaningfulMcpUse?: number;
+  byTool?: McpToolCount[];
+};
+
+export type McpUseDetail = McpUseSummary & {
+  calls?: McpToolCallDetail[];
 };
 
 export type ComparisonInstanceDetailTraceEntry = {
-  kind: "command_execution" | "todo_list" | "file_change" | "assistant_message";
+  kind: "command_execution" | "todo_list" | "file_change" | "assistant_message" | "tool_use" | "tool_result";
   status?: string;
   command?: string;
   output?: string;
@@ -136,7 +184,31 @@ export type ComparisonInstanceDetailVariant = {
   startedAt?: string;
   completedAt?: string;
   durationMs?: number;
+  retry?: {
+    attempts?: number;
+    maxAttempts?: number;
+    retried?: boolean;
+    suppressed?: boolean;
+    suppressionReason?: string | null;
+    events?: Array<Record<string, unknown>>;
+  };
   tokenUsage?: Record<string, unknown> | null;
+  traceCounters?: {
+    toolCalls?: number;
+    mcpToolCalls?: number;
+    successfulMcpToolCalls?: number;
+    commandExecutions?: number;
+    readToolCalls?: number;
+    editToolCalls?: number;
+  };
+  mcpUse?: McpUseDetail;
+  persistedToolResults?: Array<{
+    source_path?: string;
+    artifact_path?: string | null;
+    status?: string;
+    size_bytes?: number | null;
+    label?: string | null;
+  }>;
   modelPatch?: string;
   finalOutput?: {
     status?: string;
@@ -298,7 +370,17 @@ export type ComparisonCard = {
         avgLinesPerStep?: string;
         totalTokens?: string;
         toolCalls?: string;
+        mcpToolCalls?: string;
+        successfulMcpToolCalls?: string;
+        commandExecutions?: string;
+        readToolCalls?: string;
+        editToolCalls?: string;
         cost?: string;
+      };
+      retries?: {
+        totalAttempts?: number;
+        retriedRuns?: number;
+        suppressedRetries?: number;
       };
       skills?: {
         averageInvocationsPerRun?: number;
@@ -316,6 +398,7 @@ export type ComparisonCard = {
           averagePerRun: number;
         }>;
       };
+      mcp?: McpUseSummary;
     };
     instances?: ComparisonInstance[];
   }>;

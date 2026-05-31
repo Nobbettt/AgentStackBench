@@ -41,6 +41,11 @@ class BaseCodingAgentParser(ABC):
     def extract_tool_calls(self, raw_response: CodingAgentRawResponse) -> list[ToolCall]:
         """Extract precise tool-call metadata from a raw response object."""
 
+    def extract_available_tools(self, raw_response: CodingAgentRawResponse) -> list[str]:
+        """Extract tool names advertised by the agent runtime, if the adapter exposes them."""
+
+        return []
+
     def infer_trajectory_data(
         self,
         raw_response: CodingAgentRawResponse,
@@ -59,13 +64,8 @@ class BaseCodingAgentParser(ABC):
                 record["token_usage"] = self.extract_token_usage(raw_response)
             if "tool_calls" not in record:
                 record["tool_calls"] = self.extract_tool_calls(raw_response)
-        final_output = record.get("final_output")
-        if isinstance(final_output, dict) and not final_output.get("task_id"):
-            final_output["task_id"] = (
-                record.get("instance_id")
-                or record.get("original_inst_id")
-                or ""
-            )
+            if "available_tools" not in record:
+                record["available_tools"] = self.extract_available_tools(raw_response)
         return record
 
     def extract_trajectory(self, source: str | Path | dict[str, object]) -> dict[str, object]:

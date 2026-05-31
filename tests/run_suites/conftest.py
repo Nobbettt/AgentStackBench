@@ -58,10 +58,12 @@ def _mock_swebench_resolution(monkeypatch, tmp_path):
     monkeypatch.setattr("contextbench.run_suites_core.postprocess._docker_available", lambda: True)
     monkeypatch.setattr("contextbench.run_suites_core.postprocess._docker_image_available", lambda image: True)
     monkeypatch.setattr("contextbench.run_suites_core.postprocess._docker_image_id", lambda image: "sha256:test-postprocess")
+    monkeypatch.setattr("contextbench.run_suites_core.postprocess._docker_image_platform", lambda image: "linux/amd64")
     monkeypatch.setattr("contextbench.run_suites_core.postprocess._docker_host_socket_path", lambda: Path("/var/run/docker.sock"))
     monkeypatch.setattr("contextbench.run_suites_core.runner._docker_available", lambda: True)
     monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_available", lambda image: True)
     monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_id", lambda image: "sha256:test-postprocess")
+    monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_platform", lambda image: "linux/amd64")
     monkeypatch.setattr("contextbench.run_suites_core.runner._postprocess_image_supports_evaluation", lambda image: (True, "ok"))
     monkeypatch.setattr("contextbench.run_suites_core.runner._docker_host_socket_path", lambda: Path("/var/run/docker.sock"))
     monkeypatch.setattr(

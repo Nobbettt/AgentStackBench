@@ -1,0 +1,127 @@
+{
+  "experiment_name": "claude-cortex-mounted",
+  "description": "Batched ContextBench run comparing baseline Claude Code against Claude Code with Cortex MCP initialized and exposed before each scored benchmark task.",
+  "agent": "claude",
+  "base_run": {
+    "task_data": "data/full.parquet",
+    "task_csv": "data/selected_500_instances.csv",
+    "output_root": "results/run_suites",
+    "repo_cache": ".cache/repos",
+    "timeout": 2700,
+    "limit": 30,
+    "model": "claude-opus-4-7",
+    "reasoning_effort": "high",
+    "agent_args": [],
+    "env": {},
+    "setup": {},
+    "runtime_backend": "docker",
+    "runtime_image": "contextbench-claude-runtime:claude-code-2.1.126-linux-amd64",
+    "runtime_platform": "linux/amd64",
+    "runtime_env": {}
+  },
+  "variants": [
+    {
+      "name": "baseline",
+      "description": "Run Claude Code without any additional MCP servers or Cortex resources.",
+      "enabled": true,
+      "labels": [
+        "control",
+        "no-cortex"
+      ],
+      "notes": "Explicit control variant. Uses the same Claude model, reasoning effort, and timeout as the base run, with no additional runtime resources.",
+      "model": "claude-opus-4-7",
+      "reasoning_effort": "high",
+      "timeout": 2700,
+      "agent_args_add": [],
+      "agent_args_replace": null,
+      "env_add": {},
+      "env_replace": null,
+      "setup": {
+        "prompt_preamble": null,
+        "setup_prompt": null,
+        "setup_prompt_timeout": null,
+        "copy_paths": [],
+        "files_to_materialize": [],
+        "claude_settings_overrides": {},
+        "claude_mcp_config": {}
+      }
+    },
+    {
+      "name": "with-cortex-mcp",
+      "description": "Install Cortex, initialize and bootstrap the repository index, build its MCP server, and expose it to Claude Code before the scored benchmark task.",
+      "enabled": true,
+      "labels": [
+        "treatment",
+        "cortex",
+        "mcp"
+      ],
+      "notes": "Installs the pinned Cortex MCP package into the isolated Claude runtime, runs Cortex init plus the generated bootstrap pipeline, validates ingest/graph/embedding artifacts, and exposes Cortex as an explicit MCP server rooted at the checked-out repository.",
+      "model": "claude-opus-4-7",
+      "reasoning_effort": "high",
+      "timeout": 2700,
+      "agent_args_add": [],
+      "agent_args_replace": null,
+      "env_add": {},
+      "env_replace": null,
+      "runtime_setup_timeout": 10800,
+      "runtime_validation_timeout": 2700,
+      "runtime_setup_cache": true,
+      "setup": {
+        "prompt_preamble": "Cortex MCP is connected and pre-indexed for this repository. Use Cortex as the primary repository-navigation workflow before normal file inspection. Start with mcp__cortex__context_search to locate likely files, symbols, tests, and concepts before broad Grep, Read, Glob, or Bash-based search. For the most relevant search result, call mcp__cortex__context_get_related before reading files so you can inspect related symbols, tests, callers, callees, or neighboring context. Before editing, call mcp__cortex__context_get_rules for the relevant file, symbol, or concept when available. After choosing or applying a fix, call mcp__cortex__context_impact on the changed file or symbol to identify likely affected areas and tests. Use normal Read, Grep, Edit, and Bash after Cortex has guided discovery. Do not inspect .context/** directly with Grep, Read, Glob, or Bash; treat .context/** as Cortex implementation data and access Cortex context only through MCP tools. Do not use mcp__cortex__context_reload during the scored task unless Cortex explicitly reports a stale or missing index; bootstrap has already indexed the repository. Continue to a concrete solution; do not stop at analysis-only output.",
+        "setup_prompt": null,
+        "setup_prompt_timeout": null,
+        "copy_paths": [],
+        "files_to_materialize": [],
+        "claude_settings_overrides": {},
+        "claude_mcp_config": {
+          "mcpServers": {
+            "cortex": {
+              "command": "cortex",
+              "args": [
+                "mcp"
+              ],
+              "env": {
+                "CORTEX_PROJECT_ROOT": "${CONTEXTBENCH_WORKSPACE_PATH}"
+              }
+            }
+          }
+        }
+      },
+      "runtime_setup_commands_add": [
+        "npm install --global --prefix \"$HOME/.local\" @danielblomma/cortex-mcp@2.0.13 && test -x \"$HOME/.local/bin/cortex\"",
+        "cortex init --force --no-watch --no-connect",
+        "NPM_CONFIG_CACHE=\"$PWD/.context/mcp/.npm-cache\" npm --prefix .context/mcp install --include=optional --no-fund --no-update-notifier --loglevel=warn && npm --prefix .context/mcp run build --silent",
+        "node -e \"require('./.context/mcp/node_modules/ryugraph/ryu_native.js'); console.log('RyuGraph native binding loaded')\"",
+        "NPM_CONFIG_INCLUDE=optional ./scripts/context.sh bootstrap"
+      ],
+      "runtime_validation_commands_add": [
+        "cortex --version > \"$CONTEXTBENCH_TASK_DIR/cortex-version.txt\" && node -e \"const pkg=require(process.env.HOME + '/.local/lib/node_modules/@danielblomma/cortex-mcp/package.json'); if (pkg.version !== '2.0.13') { console.error('Expected @danielblomma/cortex-mcp 2.0.13, got ' + pkg.version); process.exit(1); }\"",
+        "test -x \"$HOME/.local/bin/cortex\" && test -x ./scripts/context.sh && test -f .context/config.yaml && test -f .context/rules.yaml && test -f .context/ontology.cypher && test -f .context/mcp/dist/server.js && test -s .context/cache/manifest.json && test -s .context/cache/documents.jsonl && test -s .context/cache/entities.file.jsonl && test -s .context/cache/graph-manifest.json && test -e .context/db/graph.ryu && test -s .context/embeddings/manifest.json && test -s .context/embeddings/entities.jsonl",
+        "node -e \"const fs=require('node:fs'); const read=(p)=>JSON.parse(fs.readFileSync(p,'utf8')); const fail=(m)=>{console.error(m); process.exit(1);}; const ingest=read('.context/cache/manifest.json'); const graph=read('.context/cache/graph-manifest.json'); const embed=read('.context/embeddings/manifest.json'); if (Number(ingest.counts?.files||0)<=0) fail('Cortex bootstrap validation failed: ingest produced no files'); if (Number(graph.counts?.files||0)<=0) fail('Cortex bootstrap validation failed: graph load produced no files'); if (Number(embed.counts?.entities||0)<=0 || Number(embed.counts?.output||0)<=0) fail('Cortex bootstrap validation failed: embeddings produced no indexed entities');\"",
+        "tmp_dir=\"${TMPDIR:-/tmp}/contextbench-cortex-mcp-smoke-$$\"; mkdir -p \"$tmp_dir\"; fifo=\"$tmp_dir/stdin\"; mkfifo \"$fifo\"; CORTEX_PROJECT_ROOT=\"${CONTEXTBENCH_WORKSPACE_PATH:-$PWD}\" cortex mcp < \"$fifo\" > \"$tmp_dir/stdout.log\" 2> \"$tmp_dir/stderr.log\" & pid=$!; exec 3>\"$fifo\"; sleep 2; if ! kill -0 \"$pid\" 2>/dev/null; then wait \"$pid\"; status=$?; cat \"$tmp_dir/stderr.log\" >&2; exec 3>&-; rm -rf \"$tmp_dir\"; exit \"$status\"; fi; exec 3>&-; kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; rm -rf \"$tmp_dir\"",
+        "for path in .gitignore AGENTS.md CLAUDE.md docs/architecture.md docs/cortex-architecture.md scripts mcp .claude .githooks; do git restore --staged --worktree -- \"$path\" 2>/dev/null || true; done; git clean -fdx -- AGENTS.md CLAUDE.md docs/architecture.md docs/cortex-architecture.md scripts mcp .claude .githooks .npm-cache"
+      ],
+      "diff_exclude_paths_add": [
+        ".context/**",
+        "AGENTS.md",
+        "CLAUDE.md"
+      ],
+      "required_available_tool_patterns_add": [
+        "^mcp__cortex__context_search$",
+        "^mcp__cortex__context_get_related$",
+        "^mcp__cortex__context_impact$",
+        "^mcp__cortex__context_get_rules$",
+        "^mcp__cortex__context_reload$"
+      ]
+    }
+  ],
+  "parallelism": {
+    "max_workers": 2
+  },
+  "postprocess": {
+    "convert": true,
+    "evaluate": true,
+    "resolve": true,
+    "gold_path": "data/full.parquet"
+  }
+}

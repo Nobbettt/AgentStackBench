@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .files import ensure_dir, usage_error
-from .runtime_common import coerce_output_text, run_command as host_run_command
+from .runtime_common import run_command as host_run_command
 from .types import CommandResult
 
 SUPPORTED_RUNTIME_BACKENDS = frozenset({"host", "docker"})
@@ -24,8 +24,10 @@ class RuntimeBackendConfig:
 
     backend: str
     image: str | None = None
+    platform: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     setup_commands: tuple[str, ...] = ()
+    validation_commands: tuple[str, ...] = ()
     keep_failed: bool = False
 
 
@@ -37,14 +39,18 @@ class RuntimeSetupResult:
     stdout_path: Path
     stderr_path: Path
     command: str
+    started_at: float
+    completed_at: float
 
 
 def normalize_runtime_backend_config(
     *,
     runtime_backend: str,
     runtime_image: str | None = None,
+    runtime_platform: str | None = None,
     runtime_env: Mapping[str, object] | None = None,
     runtime_setup_commands: Sequence[object] | None = None,
+    runtime_validation_commands: Sequence[object] | None = None,
     runtime_keep_failed: bool = False,
 ) -> RuntimeBackendConfig:
     """Validate and normalize user-facing runtime backend options."""
@@ -57,10 +63,13 @@ def normalize_runtime_backend_config(
         raise usage_error(f"Unsupported runtime backend: {runtime_backend!r}. Available: {allowed}")
 
     image = str(runtime_image or "").strip() or None
+    platform = str(runtime_platform or "").strip() or None
     if backend == "docker" and image is None:
         raise usage_error("runtime_image is required when runtime_backend='docker'")
     if backend == "host" and image is not None:
         raise usage_error("runtime_image can only be used with runtime_backend='docker'")
+    if backend == "host" and platform is not None:
+        raise usage_error("runtime_platform can only be used with runtime_backend='docker'")
 
     env = {str(key): str(value) for key, value in dict(runtime_env or {}).items()}
     setup_commands = tuple(
@@ -68,11 +77,18 @@ def normalize_runtime_backend_config(
         for text in (str(item).strip() for item in (runtime_setup_commands or ()))
         if text
     )
+    validation_commands = tuple(
+        text
+        for text in (str(item).strip() for item in (runtime_validation_commands or ()))
+        if text
+    )
     return RuntimeBackendConfig(
         backend=backend,
         image=image,
+        platform=platform,
         env=env,
         setup_commands=setup_commands,
+        validation_commands=validation_commands,
         keep_failed=bool(runtime_keep_failed),
     )
 
@@ -202,6 +218,8 @@ class DockerTaskRuntime(BaseTaskRuntime):
             "--workdir",
             str(self.workspace_path),
         ]
+        if self.config.platform:
+            command.extend(["--platform", self.config.platform])
         for key, value in sorted(self.config.env.items()):
             command.extend(["--env", f"{key}={value}"])
         for source, target, readonly in self._mounts():
@@ -254,36 +272,40 @@ class DockerTaskRuntime(BaseTaskRuntime):
         exec_command.extend(["timeout", "--foreground", "--kill-after", "10s", f"{int(timeout)}s"])
         exec_command.extend(str(part) for part in command)
 
-        try:
-            result = subprocess.run(
+        stdin_pipe = subprocess.PIPE if stdin_text is not None else None
+        with stdout_path.open("w", encoding="utf-8") as stdout_file, stderr_path.open("w", encoding="utf-8") as stderr_file:
+            process = subprocess.Popen(
                 exec_command,
-                input=stdin_text,
-                capture_output=True,
+                stdin=stdin_pipe,
+                stdout=stdout_file,
+                stderr=stderr_file,
                 text=True,
-                timeout=timeout + 15,
-                check=False,
             )
-            stdout_path.write_text(coerce_output_text(result.stdout), encoding="utf-8")
-            stderr_path.write_text(coerce_output_text(result.stderr), encoding="utf-8")
-            timed_out = result.returncode in {124, 137}
-            if timed_out:
+            try:
+                process.communicate(stdin_text, timeout=timeout + 15)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
                 self._timed_out = True
-            return {
-                "ok": result.returncode == 0 and not timed_out,
-                "exit_code": None if timed_out else result.returncode,
-                "signal": "SIGTERM" if timed_out else None,
-                "timeout": timed_out,
-            }
-        except subprocess.TimeoutExpired as exc:
+                return {
+                    "ok": False,
+                    "exit_code": None,
+                    "signal": "SIGTERM",
+                    "timeout": True,
+                }
+        timed_out = process.returncode in {124, 137}
+        if timed_out:
             self._timed_out = True
-            stdout_path.write_text(coerce_output_text(exc.stdout), encoding="utf-8")
-            stderr_path.write_text(coerce_output_text(exc.stderr), encoding="utf-8")
-            return {
-                "ok": False,
-                "exit_code": None,
-                "signal": "SIGTERM",
-                "timeout": True,
-            }
+        return {
+            "ok": process.returncode == 0 and not timed_out,
+            "exit_code": None if timed_out else process.returncode,
+            "signal": "SIGTERM" if timed_out else None,
+            "timeout": timed_out,
+        }
 
     def close(self, *, success: bool) -> None:
         if not self.container_name or not self._started:
@@ -312,6 +334,7 @@ class DockerTaskRuntime(BaseTaskRuntime):
             "backend": self.config.backend,
             "image": self.config.image,
             "image_id": self._image_id,
+            "platform": self.config.platform,
             "container_name": self.container_name,
             "user": self._exec_user,
         }
@@ -446,14 +469,16 @@ def run_runtime_setup_commands(
     task_dir: Path,
     timeout: int,
     env: dict[str, str] | None,
+    artifact_prefix: str = "runtime-setup",
 ) -> RuntimeSetupResult | None:
     """Run configured unscored shell setup commands before agent prompts."""
 
     for index, command in enumerate(commands, start=1):
-        stdout_path = task_dir / f"runtime-setup-{index}.stdout.log"
-        stderr_path = task_dir / f"runtime-setup-{index}.stderr.log"
+        stdout_path = task_dir / f"{artifact_prefix}-{index}.stdout.log"
+        stderr_path = task_dir / f"{artifact_prefix}-{index}.stderr.log"
+        started_at = time.time()
         result = runtime.run_command(
-            ["/bin/sh", "-lc", command],
+            ["/bin/sh", "-c", command],
             cwd=workspace_path,
             stdin_text=None,
             stdout_path=stdout_path,
@@ -461,11 +486,14 @@ def run_runtime_setup_commands(
             timeout=timeout,
             env=env,
         )
+        completed_at = time.time()
         if not result["ok"]:
             return RuntimeSetupResult(
                 command_result=result,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 command=command,
+                started_at=started_at,
+                completed_at=completed_at,
             )
     return None

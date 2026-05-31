@@ -17,13 +17,20 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TOKEN_BOUNDARY = r"(?=$|[\s'\"`),\]}<>])"
 _WORKTREE_PATTERN = re.compile(
     r"(?P<path>(?:/[^\s'\"`),\]}<>]+)?/(?:\.cache/worktrees/)?contextbench_worktrees/"
-    r"(?P<slug>[^\s'\"`),\]}<>]+))"
+    r"(?P<slug>[^\s'\"`),\]}<>]+)?)"
 )
 _HOME_PREFIX_PATTERN = re.compile(r"(?<!\w)(?:/Users|/home)/[^/\s'\"`),\]}<>]+")
 _TMP_PREFIX_PATTERN = re.compile(r"(?<!\w)(?:/var/folders|/private/var/folders|/tmp)/[^\s'\"`),\]}<>]+")
+_AGENT_RUNTIME_PATTERN = re.compile(
+    r"(?:(?:<contextbench-root>)|(?:/[^\s'\"`),\]}<>]+))?/?\.cache/agent-runtimes/"
+    r"[^\s'\"`),\]}<>]+"
+)
+_RELATIVE_AGENT_RUNTIME_PATTERN = re.compile(r"(?:\.\./)+agent-runtimes/[^\s'\"`),\]}<>]+")
 _FORBIDDEN_PATTERNS = (
     re.compile(r"(?<!\w)(?:/Users|/home)/[^/\s'\"`),\]}<>]+"),
     re.compile(r"\.cache/worktrees/contextbench_worktrees"),
+    re.compile(r"(?:<contextbench-root>/)?\.cache/agent-runtimes"),
+    re.compile(r"(?:\.\./)+agent-runtimes/"),
     re.compile(r"(?<!\w)(?:/var/folders|/private/var/folders|/tmp)/[^\s'\"`),\]}<>]+"),
 )
 _JSON_SUFFIXES = {".json"}
@@ -87,10 +94,12 @@ def sanitize_text(text: object, *, context: SanitizationContext | None = None) -
 
     def worktree_repl(match: re.Match[str]) -> str:
         path = match.group("path")
+        slug = match.group("slug")
         marker = "/.cache/worktrees/contextbench_worktrees/"
         _, found, suffix = path.partition(marker)
         if not found:
             _, _, suffix = path.partition("/contextbench_worktrees/")
+        suffix = suffix or slug
         return f"<worktree>/{suffix}" if suffix else "<worktree>"
 
     sanitized = _replace_root(sanitized, ctx.workspace_path, "<worktree>")
@@ -109,6 +118,8 @@ def sanitize_text(text: object, *, context: SanitizationContext | None = None) -
         sanitized = _replace_root(sanitized, root, f"<artifact-root-{index}>")
 
     sanitized = _replace_root(sanitized, ctx.repo_root, "<contextbench-root>")
+    sanitized = _AGENT_RUNTIME_PATTERN.sub("<agent-runtime>", sanitized)
+    sanitized = _RELATIVE_AGENT_RUNTIME_PATTERN.sub("<agent-runtime>", sanitized)
     sanitized = _HOME_PREFIX_PATTERN.sub("<home>", sanitized)
     sanitized = _TMP_PREFIX_PATTERN.sub("<tmp>", sanitized)
     return sanitized

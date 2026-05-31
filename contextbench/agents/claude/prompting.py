@@ -22,11 +22,13 @@ def build_prompt(task: dict[str, object]) -> str:
         "Report verification limitations clearly in final_answer and notes.",
         "Return your final response as a JSON object that matches the required schema.",
         "Do not spend effort reconstructing a full chronological interaction log.",
-        "Populate these fields carefully: status, final_answer, notes, and the final repository context you relied on most.",
+        "The final response must contain exactly these top-level fields: status, final_answer, retrieved_context_files, retrieved_context_spans, retrieved_context_symbols, and notes.",
+        "Populate every required field as a direct top-level JSON property or StructuredOutput tool input property; never put one required field inside another field.",
+        "Use arrays for retrieved_context_files, retrieved_context_spans, and retrieved_context_symbols; use [] when there is nothing useful to report.",
+        "Keep notes as plain text for caveats and verification limitations only; do not put JSON, XML, tags, or schema fields inside notes.",
         "Use retrieved_context_files and retrieved_context_spans for that final relied-on context.",
         "Use retrieved_context_symbols when you know the important symbols, otherwise leave it empty.",
-        "You may leave retrieval_steps empty if you do not have a concise chronological summary.",
-        "You may leave touched_files empty if uncertain; actual file changes can be inferred from the repository diff.",
+        "Do not add extra bookkeeping fields beyond the required schema.",
         "</instructions>",
     ]
     return "\n".join(lines)
