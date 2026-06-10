@@ -51,11 +51,16 @@ _EXCLUDED_PUBLIC_ARTIFACT_DIR_NAMES = {
     ".pytest_cache",
     "__pycache__",
     "codex-runtime",
+    # Evaluation worktrees are full checkouts of third-party task repos and
+    # must never be copied into the publishable artifact tree.
+    "contextbench_worktrees",
+    "eval-worktrees",
     "image_build_dir",
     "instance_image_build_dir",
     "node_modules",
     "public-artifacts",
     "repos",
+    "worktrees",
 }
 
 

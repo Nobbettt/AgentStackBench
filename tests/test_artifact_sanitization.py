@@ -118,6 +118,24 @@ def test_sanitize_artifact_tree_writes_publishable_copy(tmp_path: Path) -> None:
     assert "<worktree>/github.com__d/repo" in (output / "record.json").read_text(encoding="utf-8")
 
 
+def test_sanitize_artifact_tree_excludes_evaluation_worktrees(tmp_path: Path) -> None:
+    source = tmp_path / "results" / "run_suites" / "demo"
+    (source / "variants" / "baseline").mkdir(parents=True)
+    (source / "variants" / "baseline" / "eval-summary.json").write_text("{}", encoding="utf-8")
+    for excluded in ("eval-worktrees", "worktrees", "contextbench_worktrees"):
+        checkout = source / excluded / "github.com__demo__repo"
+        checkout.mkdir(parents=True)
+        (checkout / "main.py").write_text("print('task repo content')\n", encoding="utf-8")
+
+    output = tmp_path / "public" / "demo"
+    sanitize_artifact_tree(source_dir=source, output_dir=output, repo_root=tmp_path)
+
+    assert (output / "variants" / "baseline" / "eval-summary.json").exists()
+    assert not (output / "eval-worktrees").exists()
+    assert not (output / "worktrees").exists()
+    assert not (output / "contextbench_worktrees").exists()
+
+
 def test_sanitize_artifact_tree_in_place_rewrites_operational_artifacts(tmp_path: Path) -> None:
     source = tmp_path / "results" / "run_suites" / "demo"
     source.mkdir(parents=True)
