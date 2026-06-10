@@ -46,6 +46,15 @@ export type PooledContextLevel = {
   predSize?: number;
 };
 
+// `n` is the number of instances with gold context at this granularity;
+// instances without gold are excluded from the macro averages.
+export type ContextLevelSummary = {
+  recall?: string;
+  precision?: string;
+  f1?: string;
+  n?: number;
+};
+
 export type ComparisonInstance = {
   instanceId: string;
   originalInstanceId?: string | null;
@@ -380,26 +389,10 @@ export type ComparisonCard = {
         spanF1?: string;
         avgLineF1?: string;
         contextLevels?: {
-          file?: {
-            recall?: string;
-            precision?: string;
-            f1?: string;
-          };
-          symbol?: {
-            recall?: string;
-            precision?: string;
-            f1?: string;
-          };
-          block?: {
-            recall?: string;
-            precision?: string;
-            f1?: string;
-          };
-          line?: {
-            recall?: string;
-            precision?: string;
-            f1?: string;
-          };
+          file?: ContextLevelSummary;
+          symbol?: ContextLevelSummary;
+          block?: ContextLevelSummary;
+          line?: ContextLevelSummary;
         };
         pooledContextLevels?: {
           file?: PooledContextLevel;

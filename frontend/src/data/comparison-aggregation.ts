@@ -80,25 +80,28 @@ function coveragePrecision(predSize: number, goldSize: number, intersection: num
   };
 }
 
-function formatContextLevelMetrics(metrics: { coverage: number; precision: number }) {
+function formatContextLevelMetrics(metrics: { coverage: number; precision: number; f1?: number; n?: number }) {
   return {
     recall: formatMetric(metrics.coverage),
     precision: formatMetric(metrics.precision),
-    f1: formatMetric(f1(metrics.coverage, metrics.precision)),
+    // Macro levels carry their own mean-of-f1s; recomputing from mean
+    // coverage/precision (F1-of-means) is only correct for pooled totals.
+    f1: formatMetric(metrics.f1 ?? f1(metrics.coverage, metrics.precision)),
+    ...(metrics.n !== undefined ? { n: metrics.n } : {}),
   };
 }
 
 function macroContextLevelMetrics(instances: ComparisonInstance[], level: ContextLevel) {
-  const metricFor = (measure: "recall" | "precision" | "f1") =>
-    mean(
-      instances
-        .map((instance) => contextLevelMetric(instance, level, measure))
-        .filter((value): value is number => value !== null),
-    ) ?? 0;
+  const values = (measure: "recall" | "precision" | "f1") =>
+    instances
+      .map((instance) => contextLevelMetric(instance, level, measure))
+      .filter((value): value is number => value !== null);
+  const f1Values = values("f1");
   return {
-    coverage: metricFor("recall"),
-    precision: metricFor("precision"),
-    f1: metricFor("f1"),
+    coverage: mean(values("recall")) ?? 0,
+    precision: mean(values("precision")) ?? 0,
+    f1: mean(f1Values) ?? 0,
+    n: f1Values.length,
   };
 }
 

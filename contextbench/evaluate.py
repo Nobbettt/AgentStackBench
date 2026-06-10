@@ -729,6 +729,7 @@ def aggregate_results(results: list) -> dict:
                     "precision": sum(item["precision"] for item in level_values) / len(level_values),
                     "f1": sum(item["f1"] for item in level_values) / len(level_values),
                     "aggregation": "macro",
+                    "num_instances": len(level_values),
                 }
 
                 intersection = sum(r.get("final", {}).get(gran, {}).get("intersection", 0) for r in valid)

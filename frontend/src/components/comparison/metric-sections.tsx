@@ -992,6 +992,36 @@ const contextLevelRows: Array<{ key: ContextLevelKey; label: string; explanation
   },
 ];
 
+function ContextLevelSampleSize({
+  variants,
+  level,
+  taskCount,
+}: {
+  variants: ComparisonCard["variants"];
+  level: ContextLevelKey;
+  taskCount: number;
+}) {
+  const sampleSizes = Array.from(
+    new Set(
+      variants
+        .map((variant) => variant.results.quality.contextLevels?.[level]?.n)
+        .filter((value): value is number => typeof value === "number"),
+    ),
+  ).sort((left, right) => left - right);
+  if (sampleSizes.length === 0) return null;
+  // Only call out levels where instances were excluded for having no gold.
+  if (sampleSizes.every((value) => value >= taskCount)) return null;
+  const label = sampleSizes.length === 1 ? `n=${sampleSizes[0]}` : `n=${sampleSizes[0]}–${sampleSizes[sampleSizes.length - 1]}`;
+  return (
+    <span
+      className="text-xs font-normal text-muted-foreground"
+      title="Number of tasks with gold context at this granularity; tasks without gold are excluded from the macro average."
+    >
+      {label}
+    </span>
+  );
+}
+
 function contextMeasureValue(
   variant: ComparisonCard["variants"][number],
   level: ContextLevelKey,
@@ -1399,6 +1429,7 @@ function ContextEfficiencyByLevelTable({
                 <span className="inline-flex items-center gap-2">
                   {row.label}
                   <HelpIcon label={row.label} explanation={row.explanation} />
+                  <ContextLevelSampleSize variants={variants} level={row.key} taskCount={comparison.tasks} />
                 </span>
               </th>
               {showPairwiseTable ? (

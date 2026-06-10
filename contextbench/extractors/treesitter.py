@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-04-21 from upstream ContextBench.
-# Summary of changes: add parser language alias support for C# tree-sitter extraction.
+# Summary of changes: add parser language alias support for C# tree-sitter extraction;
+# recognize named function expressions, function-valued declarators, and top-level
+# component factories in JS/TS; add Rust macro definitions and Pony support.
 
 """Definition extraction (tree-sitter required).
 
@@ -19,7 +21,8 @@ LANG_MAP = {
     ".py": "python", ".js": "javascript", ".jsx": "javascript", ".ts": "typescript",
     ".tsx": "tsx", ".java": "java", ".go": "go", ".rs": "rust", ".c": "c", ".h": "c",
     ".cpp": "cpp", ".cc": "cpp", ".hpp": "cpp", ".cs": "c_sharp", ".php": "php",
-    ".rb": "ruby", ".swift": "swift", ".kt": "kotlin", ".scala": "scala"
+    ".rb": "ruby", ".swift": "swift", ".kt": "kotlin", ".scala": "scala",
+    ".pony": "pony"
 }
 
 PARSER_LANGUAGE_ALIASES = {
@@ -28,12 +31,12 @@ PARSER_LANGUAGE_ALIASES = {
 
 DEF_NODES = {
     "python": {"function_definition", "class_definition", "async_function_definition"},
-    "javascript": {"function_declaration", "class_declaration", "method_definition", "arrow_function"},
+    "javascript": {"function_declaration", "class_declaration", "method_definition"},
     "typescript": {"function_declaration", "class_declaration", "method_definition", "interface_declaration"},
     "tsx": {"function_declaration", "class_declaration", "method_definition", "interface_declaration"},
     "java": {"method_declaration", "class_declaration", "interface_declaration", "constructor_declaration"},
     "go": {"function_declaration", "method_declaration", "type_declaration"},
-    "rust": {"function_item", "impl_item", "struct_item", "trait_item"},
+    "rust": {"function_item", "impl_item", "struct_item", "trait_item", "macro_definition"},
     "c": {"function_definition", "struct_specifier"},
     "cpp": {"function_definition", "class_specifier", "struct_specifier"},
     "c_sharp": {"method_declaration", "class_declaration", "interface_declaration"},
@@ -41,8 +44,57 @@ DEF_NODES = {
     "ruby": {"method", "class", "module"},
     "swift": {"function_declaration", "class_declaration", "protocol_declaration"},
     "kotlin": {"function_declaration", "class_declaration"},
-    "scala": {"function_definition", "class_definition", "trait_definition"}
+    "scala": {"function_definition", "class_definition", "trait_definition"},
+    "pony": {
+        "actor_definition", "class_definition", "primitive_definition", "struct_definition",
+        "trait_definition", "interface_definition", "method", "behavior", "constructor",
+    },
 }
+
+# JS/TS definitions that need structural checks beyond a node-type match.
+_JS_LANGS = {"javascript", "typescript", "tsx"}
+_JS_FUNCTION_EXPRESSION_TYPES = {"function_expression", "function"}
+_JS_FUNCTION_VALUE_TYPES = {"arrow_function", "function_expression", "function"}
+
+
+def _node_field(node, field: str):
+    try:
+        return node.child_by_field_name(field)
+    except Exception:
+        return None
+
+
+def _is_top_level_declarator(node) -> bool:
+    declaration = getattr(node, "parent", None)
+    scope = getattr(declaration, "parent", None) if declaration is not None else None
+    return getattr(scope, "type", "") in {"program", "export_statement"}
+
+
+def _is_definition_node(node, lang: str) -> bool:
+    """Decide whether a named node counts as a symbol definition for `lang`.
+
+    Beyond the per-language node-type sets, JS/TS code commonly defines
+    components and utilities as named function expressions
+    (`React.forwardRef(function Select(...) {...})`), function-valued
+    declarators (`const f = () => {...}`), or top-level factory calls
+    (`const Button = styled('button', {...})`). Anonymous inline callbacks
+    stay excluded: they cannot be referenced by name.
+    """
+    node_type = getattr(node, "type", "")
+    if node_type in DEF_NODES.get(lang, set()):
+        return True
+    if lang not in _JS_LANGS:
+        return False
+    if node_type in _JS_FUNCTION_EXPRESSION_TYPES:
+        return _node_field(node, "name") is not None
+    if node_type == "variable_declarator":
+        value = _node_field(node, "value")
+        value_type = getattr(value, "type", "")
+        if value_type in _JS_FUNCTION_VALUE_TYPES:
+            return True
+        if value_type == "call_expression":
+            return _is_top_level_declarator(node)
+    return False
 
 _TS_AVAILABLE = False
 _PARSERS = {}
@@ -123,27 +175,25 @@ def extract_defs(file_path: str) -> List[DefNode]:
         return []
     
     result = []
-    target_types = DEF_NODES[lang]
-    exclude_from_result = {"program", "module", "source_file", "translation_unit"}
-    
+
     stack = [tree.root_node]
     while stack:
         node = stack.pop()
         if not getattr(node, "is_named", False):
             continue
-        
+
         node_type = getattr(node, "type", "")
         if "comment" in node_type:
             continue
-        
+
         # Add to result if it's a definition (but still traverse children)
-        if node_type in target_types:
+        if _is_definition_node(node, lang):
             result.append((node_type, node.start_byte, node.end_byte))
-        
+
         # Always traverse children (don't skip based on exclude list)
         for child in reversed(getattr(node, "children", [])):
             stack.append(child)
-    
+
     return result
 
 def _node_text(src: bytes, node) -> str:
@@ -243,7 +293,6 @@ def extract_named_defs(file_path: str) -> List[Tuple[str, str, int, int]]:
         return []
 
     result: List[Tuple[str, str, int, int]] = []
-    target_types = DEF_NODES[lang]
 
     for node in _iter_descendants(tree.root_node):
         if not getattr(node, "is_named", False):
@@ -251,7 +300,7 @@ def extract_named_defs(file_path: str) -> List[Tuple[str, str, int, int]]:
         node_type = getattr(node, "type", "")
         if "comment" in node_type:
             continue
-        if node_type not in target_types:
+        if not _is_definition_node(node, lang):
             continue
 
         name = _best_name_for_def(node, src)

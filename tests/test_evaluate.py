@@ -119,6 +119,7 @@ def test_aggregate_results_excludes_empty_gold_instances_from_macro_average() ->
     assert aggregate["final_file"]["coverage"] == pytest.approx(0.5)
     assert aggregate["final_file"]["precision"] == pytest.approx(0.5)
     assert aggregate["final_file"]["f1"] == pytest.approx(0.5)
+    assert aggregate["final_file"]["num_instances"] == 1
 
 
 def test_aggregate_results_omits_level_when_no_instance_has_gold() -> None:

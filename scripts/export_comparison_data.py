@@ -2668,6 +2668,10 @@ def _aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         value = _summary_level_value(granularity, "f1")
         return value if value is not None else _f1(coverage, precision)
 
+    def _summary_level_instances(granularity: str) -> int | None:
+        value = _summary_level_value(granularity, "num_instances")
+        return int(value) if value is not None else None
+
     file_cov = _summary_level_value("file", "coverage") or 0.0
     file_prec = _summary_level_value("file", "precision") or 0.0
     symbol_cov = _summary_level_value("symbol", "coverage") or 0.0
@@ -2708,21 +2712,25 @@ def _aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "recall": _format_metric(file_cov),
                 "precision": _format_metric(file_prec),
                 "f1": _format_metric(file_f1),
+                "n": _summary_level_instances("file"),
             },
             "symbol": {
                 "recall": _format_metric(symbol_cov),
                 "precision": _format_metric(symbol_prec),
                 "f1": _format_metric(symbol_f1),
+                "n": _summary_level_instances("symbol"),
             },
             "block": {
                 "recall": _format_metric(span_cov),
                 "precision": _format_metric(span_prec),
                 "f1": _format_metric(span_f1),
+                "n": _summary_level_instances("span"),
             },
             "line": {
                 "recall": _format_metric(line_cov),
                 "precision": _format_metric(line_prec),
                 "f1": _format_metric(line_f1),
+                "n": _summary_level_instances("line"),
             },
         },
         "pooledContextLevels": {
