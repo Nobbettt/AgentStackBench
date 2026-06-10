@@ -1,5 +1,6 @@
-# Fork note: Modified by Norbert Laszlo on 2026-04-16 from upstream ContextBench.
-# Summary of changes: keep conservative trace guards and avoid treating broad file lists as retrieved context.
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-08 from upstream ContextBench.
+# Summary of changes: keep conservative trace guards, infer command-grounded read spans, and avoid scoring broad search hits as context.
 
 """Heuristics for inferring ContextBench trajectory data from raw agent traces."""
 
@@ -22,7 +23,9 @@ from .records import merge_span_maps
 from .types import RetrievalStep, SpanMap, SymbolMap, TraceInferenceMeta, TrajectoryData
 
 _LINE_ARROW_RE = re.compile(r"^\s*(?P<line>\d+)\s*→", re.MULTILINE)
-_SED_RANGE_RE = re.compile(r"(?P<start>\d+),(?P<end>\d+)p")
+_NUMBERED_LINE_RE = re.compile(r"^\s*(?P<line>\d+)(?:\t| {2,})\s*(?=\S)", re.MULTILINE)
+_SED_RANGE_RE = re.compile(r"(?P<start>\d+)\s*,\s*(?P<end>\d+)\s*p")
+_HEAD_COUNT_RE = re.compile(r"^(?P<count>\d+)$")
 _KNOWN_ROOT_FILENAMES = {
     "BUILD",
     "BUILD.bazel",
@@ -79,6 +82,8 @@ def normalize_workspace_path(path_value: str, workspace_path: Path) -> str:
 
 def infer_read_span_from_text(text: str) -> tuple[int, int] | None:
     matches = [int(match.group("line")) for match in _LINE_ARROW_RE.finditer(text)]
+    if not matches:
+        matches = [int(match.group("line")) for match in _NUMBERED_LINE_RE.finditer(text)]
     if not matches:
         return None
     return min(matches), max(matches)
@@ -310,19 +315,8 @@ def infer_retrieval_step_from_tool_result(
             meta["dropped_large_command_outputs"] = int(meta.get("dropped_large_command_outputs", 0) or 0) + 1
         text = ""
 
-    raw_spans = infer_grep_spans_from_text(text, workspace_path, meta=meta) if text else {}
+    files: set[str] = set()
     spans: SpanMap = {}
-    for file_path, file_spans in raw_spans.items():
-        normalized, _ = _normalize_inferred_file_path(file_path, workspace_path)
-        if not normalized:
-            continue
-        spans.setdefault(normalized, []).extend(file_spans)
-    files = set(spans)
-    if text:
-        for file_path in infer_file_list_from_text(text, workspace_path, meta=meta):
-            normalized, _ = _normalize_inferred_file_path(file_path, workspace_path)
-            if normalized:
-                files.add(normalized)
 
     json_files: set[str] = set()
     json_spans: SpanMap = {}
@@ -375,6 +369,12 @@ def _command_has_word(command: str, word: str) -> bool:
     return re.search(pattern, command) is not None
 
 
+def _split_command_segments(command: str) -> list[str]:
+    if len(command) > _MAX_COMMAND_TOKENIZATION_CHARS:
+        return [command]
+    return [segment.strip() for segment in re.split(r"\n|&&|\|\||;", command) if segment.strip()]
+
+
 def _find_path_like_token(command: str) -> str | None:
     path_pattern = re.compile(r"(?P<path>(?:/|\.{0,2}/)?[A-Za-z0-9_.@%+=~:/-]+\.[A-Za-z0-9_+-]+)")
     for match in path_pattern.finditer(command):
@@ -387,24 +387,242 @@ def _find_path_like_token(command: str) -> str | None:
     return None
 
 
-def _read_like_step(tokens: list[str], output_text: str, workspace_path: Path) -> RetrievalStep | None:
-    path_token = None
-    for token in tokens:
-        if token in {"|", "&&", "||"}:
-            continue
-        if token.startswith("-"):
-            continue
-        if "." not in token and "/" not in token:
-            continue
-        if token.endswith("p") and "," in token:
-            continue
-        path_token = token
-    if not path_token:
+def _tokens_for_segment(segment: str) -> list[str]:
+    if len(segment) > _MAX_COMMAND_TOKENIZATION_CHARS:
+        return []
+    try:
+        return shlex.split(segment)
+    except Exception:
+        return []
+
+
+def _normalize_command_path_token(token: str, workspace_path: Path) -> str | None:
+    if not token or token.startswith("-"):
         return None
-    file_path = normalize_workspace_path(path_token, workspace_path)
-    span = infer_read_span_from_text(output_text)
-    spans: SpanMap = {file_path: [{"start": span[0], "end": span[1]}]} if span else {}
-    return {"files": [file_path], "spans": spans, "symbols": {}}
+    if token in {"|", "&&", "||", ";", "<", ">", ">>"}:
+        return None
+    if any(char in token for char in "*?[]{}\\|"):
+        return None
+    if token.startswith(("http://", "https://")):
+        return None
+    if token.endswith("p") and "," in token:
+        return None
+    normalized, _ = _normalize_inferred_file_path(token, workspace_path)
+    return normalized
+
+
+def _path_token_from_tokens(tokens: list[str], workspace_path: Path, *, reverse: bool = False) -> str | None:
+    iterable = reversed(tokens) if reverse else iter(tokens)
+    for token in iterable:
+        normalized = _normalize_command_path_token(token, workspace_path)
+        if normalized:
+            return normalized
+    return None
+
+
+def _merge_step(target_files: set[str], target_spans: SpanMap, step: RetrievalStep | None) -> None:
+    if not step:
+        return
+    target_files.update(step.get("files", []))
+    for file_path, spans in step.get("spans", {}).items():
+        target_files.add(file_path)
+        target_spans.setdefault(file_path, []).extend(spans)
+
+
+def _sed_range_from_tokens(tokens: list[str]) -> tuple[int, int] | None:
+    for token in tokens:
+        match = _SED_RANGE_RE.fullmatch(token.strip("'\""))
+        if not match:
+            continue
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        if start <= 0 or end <= 0:
+            return None
+        return min(start, end), max(start, end)
+    return None
+
+
+def _head_count_from_tokens(tokens: list[str]) -> int | None:
+    for index, token in enumerate(tokens):
+        if token == "-n" and index + 1 < len(tokens):
+            match = _HEAD_COUNT_RE.fullmatch(tokens[index + 1].strip())
+            if match:
+                return int(match.group("count"))
+            return None
+        if token.startswith("--lines="):
+            match = _HEAD_COUNT_RE.fullmatch(token.split("=", 1)[1].strip())
+            if match:
+                return int(match.group("count"))
+            return None
+        if token.startswith("-") and len(token) > 1:
+            match = _HEAD_COUNT_RE.fullmatch(token[1:])
+            if match:
+                return int(match.group("count"))
+    return None
+
+
+def _first_pipe_index_after(tokens: list[str], start: int) -> int:
+    for index in range(start, len(tokens)):
+        if tokens[index] == "|":
+            return index
+    return len(tokens)
+
+
+def _has_redirection_token(tokens: list[str]) -> bool:
+    return any(
+        token in {"<", ">", ">>", "<<", "<<<"} or token.startswith((">", ">>")) or ">" in token or token.startswith("<")
+        for token in tokens
+    )
+
+
+def _file_before_pipe(tokens: list[str], workspace_path: Path) -> str | None:
+    before_pipe = tokens[: tokens.index("|")] if "|" in tokens else tokens
+    return _path_token_from_tokens(before_pipe, workspace_path, reverse=True)
+
+
+def _file_after_command(tokens: list[str], command_word: str, workspace_path: Path) -> str | None:
+    try:
+        start = tokens.index(command_word) + 1
+    except ValueError:
+        return None
+    stop = _first_pipe_index_after(tokens, start)
+    return _path_token_from_tokens(tokens[start:stop], workspace_path, reverse=True)
+
+
+def _read_segment_step(segment: str, output_text: str, workspace_path: Path) -> RetrievalStep | None:
+    if not output_text.strip():
+        return None
+    tokens = _tokens_for_segment(segment)
+    if not tokens:
+        path_token = _find_path_like_token(segment)
+        if not path_token:
+            return None
+        file_path, _ = _normalize_inferred_file_path(path_token, workspace_path)
+        if not file_path:
+            return None
+        span = infer_read_span_from_text(output_text)
+        spans: SpanMap = {file_path: [{"start": span[0], "end": span[1]}]} if span else {}
+        return {"files": [file_path], "spans": spans, "symbols": {}}
+
+    spans: SpanMap = {}
+    files: set[str] = set()
+
+    if "sed" in tokens:
+        sed_range = _sed_range_from_tokens(tokens)
+        file_path = _file_before_pipe(tokens, workspace_path) if "|" in tokens else _file_after_command(tokens, "sed", workspace_path)
+        if sed_range and file_path:
+            files.add(file_path)
+            spans.setdefault(file_path, []).append({"start": sed_range[0], "end": sed_range[1]})
+            return {"files": sorted(files), "spans": spans, "symbols": {}}
+
+    if "head" in tokens and tokens[0] == "head":
+        count = _head_count_from_tokens(tokens)
+        file_path = _file_after_command(tokens, "head", workspace_path)
+        if count and file_path:
+            files.add(file_path)
+            spans.setdefault(file_path, []).append({"start": 1, "end": count})
+            return {"files": sorted(files), "spans": spans, "symbols": {}}
+
+    for command_word in ("nl", "cat", "tail"):
+        if command_word not in tokens:
+            continue
+        if _has_redirection_token(tokens):
+            continue
+        file_path = _file_after_command(tokens, command_word, workspace_path)
+        if not file_path:
+            continue
+        files.add(file_path)
+        span = infer_read_span_from_text(output_text)
+        if span:
+            spans.setdefault(file_path, []).append({"start": span[0], "end": span[1]})
+        return {"files": sorted(files), "spans": spans, "symbols": {}}
+
+    return None
+
+
+def _read_like_step(raw_command: str, output_text: str, workspace_path: Path) -> RetrievalStep | None:
+    files: set[str] = set()
+    spans: SpanMap = {}
+    for segment in _split_command_segments(raw_command):
+        _merge_step(files, spans, _read_segment_step(segment, output_text, workspace_path))
+    if not files and not spans:
+        return None
+    return {"files": sorted(files), "spans": spans, "symbols": {}}
+
+
+def _explicit_single_search_file_from_tokens(tokens: list[str], workspace_path: Path) -> str | None:
+    command_indices = [index for index, token in enumerate(tokens) if token in {"grep", "rg"}]
+    if not command_indices:
+        return None
+
+    start = command_indices[0] + 1
+    stop = _first_pipe_index_after(tokens, start)
+    candidates: list[str] = []
+    for token in tokens[start:stop]:
+        normalized = _normalize_command_path_token(token, workspace_path)
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _search_command_can_expose_file_content(tokens: list[str], output_text: str) -> bool:
+    if not output_text.strip():
+        return False
+    if _has_redirection_token(tokens):
+        return False
+    content_suppressing_flags = {
+        "-q",
+        "--quiet",
+        "-l",
+        "--files-with-matches",
+        "-L",
+        "--files-without-match",
+        "-c",
+        "--count",
+        "--files",
+    }
+    return not any(token in content_suppressing_flags for token in tokens)
+
+
+def infer_search_file_step_from_command(command: str, *, output_text: str, workspace_path: Path) -> RetrievalStep | None:
+    """Infer a conservative file-only retrieval from a single-file grep/rg command."""
+
+    files: set[str] = set()
+    for segment in _split_command_segments(unwrap_shell_command(command)):
+        tokens = _tokens_for_segment(segment)
+        if not tokens or not _has_grep_like_command(segment, tokens):
+            continue
+        if not _search_command_can_expose_file_content(tokens, output_text):
+            continue
+        file_path = _explicit_single_search_file_from_tokens(tokens, workspace_path)
+        if file_path:
+            files.add(file_path)
+    if not files:
+        return None
+    return {"files": sorted(files), "spans": {}, "symbols": {}}
+
+
+def infer_search_file_step_from_path(path_value: str, *, workspace_path: Path) -> RetrievalStep | None:
+    """Infer file-only context when a search tool was explicitly scoped to one file."""
+
+    normalized, _ = _normalize_inferred_file_path(path_value, workspace_path)
+    if not normalized:
+        return None
+    return {"files": [normalized], "spans": {}, "symbols": {}}
+
+
+def _has_read_like_command(raw_command: str, tokens: list[str]) -> bool:
+    return any(token in {"sed", "cat", "head", "tail", "nl"} for token in tokens) or any(
+        _command_has_word(raw_command, word) for word in ("sed", "cat", "head", "tail", "nl")
+    )
+
+
+def _has_grep_like_command(raw_command: str, tokens: list[str]) -> bool:
+    return "rg" in tokens or "grep" in tokens or _command_has_word(raw_command, "rg") or _command_has_word(raw_command, "grep")
+
+
+def _has_find_command(raw_command: str, tokens: list[str]) -> bool:
+    return "find" in tokens or _command_has_word(raw_command, "find")
 
 
 def infer_retrieval_step_from_command(
@@ -420,28 +638,15 @@ def infer_retrieval_step_from_command(
     if "Read" in tokens or _command_has_word(raw_command, "Read"):
         return None
 
-    if "rg" in tokens or "grep" in tokens or _command_has_word(raw_command, "rg") or _command_has_word(raw_command, "grep"):
-        spans = infer_grep_spans_from_text(output_text, workspace_path, meta=meta)
-        if spans:
-            return {"files": sorted(spans), "spans": spans, "symbols": {}}
-        infer_file_list_from_text(output_text, workspace_path, meta=meta)
-        return None
+    read_step = _read_like_step(raw_command, output_text, workspace_path) if _has_read_like_command(raw_command, tokens) else None
+    if read_step:
+        return read_step
 
-    if "find" in tokens or _command_has_word(raw_command, "find"):
-        return None
+    if _has_grep_like_command(raw_command, tokens):
+        return infer_search_file_step_from_command(raw_command, output_text=output_text, workspace_path=workspace_path)
 
-    if any(token in {"sed", "cat", "head", "tail", "nl"} for token in tokens) or any(
-        _command_has_word(raw_command, word) for word in ("sed", "cat", "head", "tail", "nl")
-    ):
-        if tokens:
-            return _read_like_step(tokens, output_text, workspace_path)
-        path_token = _find_path_like_token(raw_command)
-        if not path_token:
-            return None
-        file_path = normalize_workspace_path(path_token, workspace_path)
-        span = infer_read_span_from_text(output_text)
-        spans: SpanMap = {file_path: [{"start": span[0], "end": span[1]}]} if span else {}
-        return {"files": [file_path], "spans": spans, "symbols": {}}
+    if _has_find_command(raw_command, tokens):
+        return None
 
     return None
 

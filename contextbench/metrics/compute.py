@@ -182,7 +182,7 @@ def compute_trajectory_metrics(
             "redundancy": {"file": 0.0, "symbol": 0.0, "span": 0.0, "line": 0.0}
         }
     
-    # gold_lines should be provided by caller (from gold.line_spans_init())
+    # gold_lines should be provided by caller from the final-context gold set.
     # If not provided, use empty dict (will result in 0 line metrics)
     if gold_lines is None:
         gold_lines = {}

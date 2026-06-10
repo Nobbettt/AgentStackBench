@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-09 from upstream ContextBench.
+# Summary of changes: add refresh-rollups support for regenerated suite artifacts.
 
 """Primary CLI entrypoint for ContextBench run suites."""
 
@@ -41,6 +44,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Reuse the latest existing per-bench resolution work directory and resume missing instance results",
     )
+    parser.add_argument(
+        "--refresh-rollups",
+        action="store_true",
+        help="Rebuild manifest, summary, CSV, public rollup files, and integrity rollups from existing variant artifacts",
+    )
+    parser.add_argument(
+        "--artifact-suffix",
+        default=None,
+        help="When refreshing rollups, use suffixed postprocess artifacts such as 'aligned'.",
+    )
     return parser.parse_args(argv)
 
 
@@ -48,6 +61,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if not args.config.exists():
         print(f"ERROR: config not found: {args.config}", file=sys.stderr)
+        return 2
+    if args.artifact_suffix and not args.refresh_rollups:
+        print("ERROR: --artifact-suffix is only supported with --refresh-rollups", file=sys.stderr)
         return 2
 
     try:
@@ -60,7 +76,11 @@ def main(argv: list[str] | None = None) -> int:
             skip_evaluate=bool(args.skip_evaluate),
             skip_resolve=bool(args.skip_resolve),
             resume_resolution=bool(args.resume_resolution),
+            refresh_rollups=bool(args.refresh_rollups),
+            refresh_artifact_suffix=args.artifact_suffix,
         )
+        if args.refresh_rollups:
+            return runner.refresh_rollup_artifacts()
         return runner.run()
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

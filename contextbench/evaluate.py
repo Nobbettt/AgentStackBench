@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-04-17 from upstream ContextBench.
-# Summary of changes: update tree-sitter install hints and fix evaluator integrity for file, symbol-only, and EditLoc scoring.
+# Summary of changes: update tree-sitter install hints and fix evaluator integrity for file, symbol-only, empty trajectory, and EditLoc scoring.
 """
 Trajectory-based evaluation of context retrieval and edit localization.
 
@@ -114,12 +114,24 @@ def _is_unsafe_predicted_context_path(path: object) -> bool:
     return any(part in {"", ".", ".."} for part in parts)
 
 
-def _filter_step_to_repo(step, repo_dir: str) -> tuple[object, list[str]]:
+def _safe_predicted_context_path_for_file_metric(path: object) -> str:
+    p = str(path or "").strip().strip("'\"").replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    if p.startswith("/testbed/"):
+        return p[len("/testbed/") :]
+    if p.startswith("/workspace/"):
+        return p[len("/workspace/") :]
+    return p
+
+
+def _filter_step_to_repo(step, repo_dir: str) -> tuple[object, list[str], list[str]]:
     """Filter a Step's files/spans/symbols to files that exist under repo_dir."""
     if not step:
-        return step, []
+        return step, [], []
 
     invalid_paths: list[str] = []
+    missing_paths: list[str] = []
     files = []
     for f in (step.files or []):
         rel = _resolve_repo_relpath(repo_dir, f)
@@ -127,6 +139,9 @@ def _filter_step_to_repo(step, repo_dir: str) -> tuple[object, list[str]]:
             files.append(rel)
         elif _is_unsafe_predicted_context_path(f):
             invalid_paths.append(str(f))
+        elif str(f or "").strip():
+            files.append(_safe_predicted_context_path_for_file_metric(f))
+            missing_paths.append(str(f))
     step.files = sorted(set(files))
 
     spans = []
@@ -139,6 +154,8 @@ def _filter_step_to_repo(step, repo_dir: str) -> tuple[object, list[str]]:
             spans.append(s2)
         elif _is_unsafe_predicted_context_path(f):
             invalid_paths.append(str(f))
+        elif str(f or "").strip():
+            missing_paths.append(str(f))
     step.spans = spans
 
     syms = {}
@@ -149,6 +166,8 @@ def _filter_step_to_repo(step, repo_dir: str) -> tuple[object, list[str]]:
         if not rel:
             if _is_unsafe_predicted_context_path(f):
                 invalid_paths.append(str(f))
+            elif str(f or "").strip():
+                missing_paths.append(str(f))
             continue
         # Merge if multiple original keys resolve to the same repo path.
         if rel in syms:
@@ -157,7 +176,7 @@ def _filter_step_to_repo(step, repo_dir: str) -> tuple[object, list[str]]:
             syms[rel] = names
     step.symbols = syms
 
-    return step, sorted(set(invalid_paths))
+    return step, sorted(set(invalid_paths)), sorted(set(missing_paths))
 
 
 def _repos_compatible(left: str, right: str) -> bool:
@@ -170,10 +189,18 @@ def _repos_compatible(left: str, right: str) -> bool:
     return _normalize_repo_slug(left) == _normalize_repo_slug(right)
 
 
-def evaluate_instance(instance_id: str, gold, pred_data: dict, cache_dir: str) -> dict:
+def evaluate_instance(
+    instance_id: str,
+    gold,
+    pred_data: dict,
+    cache_dir: str,
+    *,
+    workspace_key: str | None = None,
+    tmp_root: str | None = None,
+) -> dict:
     """Evaluate one instance."""
     print(f"  Setting up repository", file=sys.stderr)
-    
+
     # Setup repository
     pred_repo_url = str(pred_data.get("repo_url") or "").strip()
     gold_repo_url = str(gold.repo_url or "").strip()
@@ -210,11 +237,11 @@ def evaluate_instance(instance_id: str, gold, pred_data: dict, cache_dir: str) -
         }
     repo_url = gold_repo_url
     commit = gold_commit
-    
+
     print(f"  Repo: {repo_url}", file=sys.stderr)
     print(f"  Commit: {commit[:12]}...", file=sys.stderr)
     
-    repo_dir = checkout(repo_url, commit, cache_dir)
+    repo_dir = checkout(repo_url, commit, cache_dir, workspace_key=workspace_key, tmp_root=tmp_root)
     
     if not repo_dir or not os.path.isdir(repo_dir):
         print(f"  ERROR: Checkout failed", file=sys.stderr)
@@ -228,21 +255,32 @@ def evaluate_instance(instance_id: str, gold, pred_data: dict, cache_dir: str) -
 
     # Drop any predicted paths that do not exist in the checked-out repo worktree.
     invalid_paths: list[str] = []
+    trajectory_missing_paths: list[str] = []
     filtered_steps = []
     for step in traj_steps:
         filtered_result = _filter_step_to_repo(step, repo_dir)
         if isinstance(filtered_result, tuple):
-            filtered, step_invalid = filtered_result
+            if len(filtered_result) == 3:
+                filtered, step_invalid, step_missing = filtered_result
+            else:  # pragma: no cover - compatibility for tests/mocks
+                filtered, step_invalid = filtered_result
+                step_missing = []
         else:  # pragma: no cover - compatibility for tests/mocks
-            filtered, step_invalid = filtered_result, []
+            filtered, step_invalid, step_missing = filtered_result, [], []
         filtered_steps.append(filtered)
         invalid_paths.extend(step_invalid)
+        trajectory_missing_paths.extend(step_missing)
     traj_steps = filtered_steps
     final_result = _filter_step_to_repo(final_step, repo_dir)
     if isinstance(final_result, tuple):
-        final_step, final_invalid = final_result
+        if len(final_result) == 3:
+            final_step, final_invalid, final_missing_paths = final_result
+        else:  # pragma: no cover - compatibility for tests/mocks
+            final_step, final_invalid = final_result
+            final_missing_paths = []
     else:  # pragma: no cover - compatibility for tests/mocks
         final_step, final_invalid = final_result, []
+        final_missing_paths = []
     invalid_paths.extend(final_invalid)
     if invalid_paths:
         invalid_paths = sorted(set(invalid_paths))
@@ -257,9 +295,10 @@ def evaluate_instance(instance_id: str, gold, pred_data: dict, cache_dir: str) -
     if not final_step or (not final_files and not final_step.spans and not getattr(final_step, "symbols", None)):
         print(f"  ERROR: No context extracted from trajectory", file=sys.stderr)
         return {"instance_id": instance_id, "error": "no_context_extracted"}
+    empty_trajectory = False
     if not traj_steps:
-        print(f"  ERROR: No trajectory steps extracted", file=sys.stderr)
-        return {"instance_id": instance_id, "error": "no_trajectory_steps"}
+        print("  No trajectory steps extracted; scoring trajectory retrieval as empty", file=sys.stderr)
+        empty_trajectory = True
     
     print(f"  Extracted: {len(traj_steps)} steps, final has {len(final_files)} files", file=sys.stderr)
     
@@ -267,7 +306,7 @@ def evaluate_instance(instance_id: str, gold, pred_data: dict, cache_dir: str) -
     gold_files = set(gold.files())
     gold_spans = gold.byte_spans(repo_dir)
     gold_symbols = extract_def_set_in_spans(gold_spans, repo_dir)
-    gold_lines = gold.line_spans_init()  # Get line intervals for line-level metrics
+    gold_lines = gold.line_spans()  # Final line-level metrics use init+add gold context.
     
     # Get final pred representations
     final_spans = _step_spans(final_step, repo_dir)
@@ -324,8 +363,16 @@ def evaluate_instance(instance_id: str, gold, pred_data: dict, cache_dir: str) -
             final_files, final_symbols, final_spans,
             gold_files, gold_symbols, gold_spans,
             pred_lines=final_lines, gold_lines=gold_lines
-        )
+        ),
+        "predicted_context_path_diagnostics": {
+            "missing_final_paths": sorted(set(final_missing_paths)),
+            "missing_trajectory_paths": sorted(set(trajectory_missing_paths)),
+            "missing_final_path_count": len(set(final_missing_paths)),
+            "missing_trajectory_path_count": len(set(trajectory_missing_paths)),
+        },
     }
+    if empty_trajectory:
+        results["empty_trajectory"] = True
     
     # Compute trajectory metrics
     results["trajectory"] = compute_trajectory_metrics(
@@ -644,31 +691,71 @@ def extract_gold_symbols_fullset(
     return 0 if errors == 0 else 2
 
 
+def _f1_score(coverage: float, precision: float) -> float:
+    denominator = coverage + precision
+    return 0.0 if denominator == 0 else 2 * coverage * precision / denominator
+
+
 def aggregate_results(results: list) -> dict:
-    """Micro-average aggregation."""
+    """Macro-average final context metrics with pooled diagnostics."""
     valid = [r for r in results if "error" not in r]
     if not valid:
         return {"num_valid": 0, "num_total": len(results)}
     
     agg = {"num_valid": len(valid), "num_total": len(results)}
     
-    # Micro-average for final metrics
+    # Macro-average final metrics for public benchmark reporting.
     for gran in ['file', 'symbol', 'span', 'line']:
         if any(gran in r.get("final", {}) for r in valid):
-            intersection = sum(r.get("final", {}).get(gran, {}).get("intersection", 0) for r in valid)
-            gold_size = sum(r.get("final", {}).get(gran, {}).get("gold_size", 0) for r in valid)
-            pred_size = sum(r.get("final", {}).get(gran, {}).get("pred_size", 0) for r in valid)
-            cov, prec = coverage_precision(pred_size, gold_size, intersection)
-            agg[f"final_{gran}"] = {"coverage": cov, "precision": prec}
-    
-    # Macro-average for trajectory metrics
+            level_values = []
+            for row in valid:
+                metric = row.get("final", {}).get(gran, {})
+                if not metric:
+                    continue
+                cov, prec = coverage_precision(
+                    metric.get("pred_size", 0),
+                    metric.get("gold_size", 0),
+                    metric.get("intersection", 0),
+                )
+                level_values.append({"coverage": cov, "precision": prec, "f1": _f1_score(cov, prec)})
+            if level_values:
+                agg[f"final_{gran}"] = {
+                    "coverage": sum(item["coverage"] for item in level_values) / len(level_values),
+                    "precision": sum(item["precision"] for item in level_values) / len(level_values),
+                    "f1": sum(item["f1"] for item in level_values) / len(level_values),
+                    "aggregation": "macro",
+                }
+
+                intersection = sum(r.get("final", {}).get(gran, {}).get("intersection", 0) for r in valid)
+                gold_size = sum(r.get("final", {}).get(gran, {}).get("gold_size", 0) for r in valid)
+                pred_size = sum(r.get("final", {}).get(gran, {}).get("pred_size", 0) for r in valid)
+                pooled_cov, pooled_prec = coverage_precision(pred_size, gold_size, intersection)
+                agg[f"pooled_final_{gran}"] = {
+                    "coverage": pooled_cov,
+                    "precision": pooled_prec,
+                    "f1": _f1_score(pooled_cov, pooled_prec),
+                    "intersection": intersection,
+                    "gold_size": gold_size,
+                    "pred_size": pred_size,
+                    "aggregation": "pooled",
+                }
+
+    # Macro-average for trajectory metrics.
     for gran in ['file', 'symbol', 'span', 'line']:
-        if any(gran in r.get("trajectory", {}).get("auc_coverage", {}) for r in valid):
-            auc_vals = [r.get("trajectory", {}).get("auc_coverage", {}).get(gran, 0.0) for r in valid]
-            red_vals = [r.get("trajectory", {}).get("redundancy", {}).get(gran, 0.0) for r in valid]
-            if auc_vals:
-                agg[f"traj_auc_{gran}"] = sum(auc_vals) / len(auc_vals)
-                agg[f"traj_redundancy_{gran}"] = sum(red_vals) / len(red_vals)
+        auc_vals = [
+            value
+            for row in valid
+            if isinstance((value := row.get("trajectory", {}).get("auc_coverage", {}).get(gran)), (int, float))
+        ]
+        red_vals = [
+            value
+            for row in valid
+            if isinstance((value := row.get("trajectory", {}).get("redundancy", {}).get(gran)), (int, float))
+        ]
+        if auc_vals:
+            agg[f"traj_auc_{gran}"] = sum(auc_vals) / len(auc_vals)
+        if red_vals:
+            agg[f"traj_redundancy_{gran}"] = sum(red_vals) / len(red_vals)
     
     # EditLoc micro-average
     if any("editloc" in r for r in valid):

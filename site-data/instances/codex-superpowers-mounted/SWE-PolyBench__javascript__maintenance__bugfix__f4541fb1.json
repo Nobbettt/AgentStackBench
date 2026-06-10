@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-10T20:32:24Z",
       "completedAt": "2026-05-10T20:35:43Z",
       "durationMs": 199244,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 717348,
@@ -25,6 +40,28 @@
         "total_tokens": 725981,
         "cache_read_input_tokens": 653952
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 27,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/lib/plugins/aws/package/compile/events/stream/index.js b/lib/plugins/aws/package/compile/events/stream/index.js\nindex a0bb4ab36..a15f6b81f 100644\n--- a/lib/plugins/aws/package/compile/events/stream/index.js\n+++ b/lib/plugins/aws/package/compile/events/stream/index.js\n@@ -119,13 +119,15 @@ class AwsCompileStreamEvents {\n               .getStreamLogicalId(functionName, streamType, streamName);\n \n             const funcRole = functionObj.role || this.serverless.service.provider.role;\n-            let dependsOn = '\"IamRoleLambdaExecution\"';\n+            let dependsOn = `\"${this.provider.naming.getRoleLogicalId()}\"`;\n             if (funcRole) {\n               if ( // check whether the custom role is an ARN\n                 typeof funcRole === 'string' &&\n                 funcRole.indexOf(':') !== -1\n               ) {\n                 dependsOn = '[]';\n+              } else if (typeof funcRole === 'string') {\n+                dependsOn = `\"${funcRole}\"`;\n               } else if ( // otherwise, check if we have an in-service reference to a role ARN\n                 typeof funcRole === 'object' &&\n                 'Fn::GetAtt' in funcRole &&\n@@ -136,6 +138,11 @@ class AwsCompileStreamEvents {\n                 funcRole['Fn::GetAtt'][1] === 'Arn'\n               ) {\n                 dependsOn = `\"${funcRole['Fn::GetAtt'][0]}\"`;\n+              } else if (\n+                typeof funcRole === 'object' &&\n+                'Fn::ImportValue' in funcRole\n+              ) {\n+                dependsOn = '[]';\n               }\n             }\n             const streamTemplate = `\ndiff --git a/lib/plugins/aws/package/compile/events/stream/index.test.js b/lib/plugins/aws/package/compile/events/stream/index.test.js\nindex 0ebc32de7..0327ccca3 100644\n--- a/lib/plugins/aws/package/compile/events/stream/index.test.js\n+++ b/lib/plugins/aws/package/compile/events/stream/index.test.js\n@@ -136,6 +136,27 @@ describe('AwsCompileStreamEvents', () => {\n       ).to.equal(null);\n     });\n \n+    it('should depend on custom IAM role logical name if it is set in function', () => {\n+      const roleLogicalId = 'RoleLogicalId';\n+      awsCompileStreamEvents.serverless.service.functions = {\n+        first: {\n+          role: roleLogicalId,\n+          events: [\n+            {\n+              stream: 'arn:aws:dynamodb:region:account:table/foo/stream/1',\n+            },\n+          ],\n+        },\n+      };\n+\n+      awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.IamRoleLambdaExecution = null;\n+\n+      expect(() => { awsCompileStreamEvents.compileStreamEvents(); }).to.not.throw(Error);\n+      expect(awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.FirstEventSourceMappingDynamodbFoo.DependsOn).to.equal(roleLogicalId);\n+    });\n+\n     it('should not throw error if custom IAM role reference is set in function', () => {\n       const roleLogicalId = 'RoleLogicalId';\n       awsCompileStreamEvents.serverless.service.functions = {\n@@ -192,6 +213,27 @@ describe('AwsCompileStreamEvents', () => {\n       ).to.equal(null);\n     });\n \n+    it('should depend on custom IAM role logical name if it is set in provider', () => {\n+      const roleLogicalId = 'RoleLogicalId';\n+      awsCompileStreamEvents.serverless.service.functions = {\n+        first: {\n+          events: [\n+            {\n+              stream: 'arn:aws:dynamodb:region:account:table/foo/stream/1',\n+            },\n+          ],\n+        },\n+      };\n+\n+      awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.IamRoleLambdaExecution = null;\n+      awsCompileStreamEvents.serverless.service.provider.role = roleLogicalId;\n+\n+      expect(() => { awsCompileStreamEvents.compileStreamEvents(); }).to.not.throw(Error);\n+      expect(awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.FirstEventSourceMappingDynamodbFoo.DependsOn).to.equal(roleLogicalId);\n+    });\n+\n     it('should not throw error if custom IAM role reference is set in provider', () => {\n       const roleLogicalId = 'RoleLogicalId';\n       awsCompileStreamEvents.serverless.service.functions = {\n@@ -219,6 +261,30 @@ describe('AwsCompileStreamEvents', () => {\n         .Resources.IamRoleLambdaExecution).to.equal(null);\n     });\n \n+    it('should not depend on IAM role resources if role is imported in provider', () => {\n+      awsCompileStreamEvents.serverless.service.functions = {\n+        first: {\n+          events: [\n+            {\n+              stream: 'arn:aws:dynamodb:region:account:table/foo/stream/1',\n+            },\n+          ],\n+        },\n+      };\n+\n+      awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.IamRoleLambdaExecution = null;\n+      awsCompileStreamEvents.serverless.service.provider.role = {\n+        'Fn::ImportValue': 'RoleArnImport',\n+      };\n+\n+      expect(() => { awsCompileStreamEvents.compileStreamEvents(); }).to.not.throw(Error);\n+      expect(awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.FirstEventSourceMappingDynamodbFoo.DependsOn).to.be.instanceof(Array);\n+      expect(awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.FirstEventSourceMappingDynamodbFoo.DependsOn.length).to.equal(0);\n+    });\n+\n     describe('when a DynamoDB stream ARN is given', () => {\n       it('should create event source mappings when a DynamoDB stream ARN is given', () => {\n         awsCompileStreamEvents.serverless.service.functions = {\n",
       "finalOutput": {
         "status": "completed",
@@ -67,269 +104,83 @@
         "predSteps": [
           {
             "files": [
-              "lib/plugins/aws/common/index.js",
-              "lib/plugins/aws/common/index.test.js",
-              "lib/plugins/aws/common/lib/artifacts.js",
-              "lib/plugins/aws/common/lib/artifacts.test.js",
-              "lib/plugins/aws/common/lib/cleanupTempDir.js",
-              "lib/plugins/aws/common/lib/cleanupTempDir.test.js",
-              "lib/plugins/aws/configCredentials/awsConfigCredentials.js",
-              "lib/plugins/aws/configCredentials/awsConfigCredentials.test.js",
-              "lib/plugins/aws/deploy/index.js",
-              "lib/plugins/aws/deploy/index.test.js",
-              "lib/plugins/aws/deploy/lib/cleanupS3Bucket.js",
-              "lib/plugins/aws/deploy/lib/cleanupS3Bucket.test.js",
-              "lib/plugins/aws/deploy/lib/createStack.js",
-              "lib/plugins/aws/deploy/lib/createStack.test.js",
-              "lib/plugins/aws/deploy/lib/extendedValidate.js",
-              "lib/plugins/aws/deploy/lib/uploadArtifacts.js",
-              "lib/plugins/aws/deploy/lib/uploadArtifacts.test.js",
-              "lib/plugins/aws/deployFunction/index.js",
-              "lib/plugins/aws/deployFunction/index.test.js",
-              "lib/plugins/aws/deployList/index.js",
-              "lib/plugins/aws/deployList/index.test.js",
-              "lib/plugins/aws/info/display.js",
-              "lib/plugins/aws/info/display.test.js",
-              "lib/plugins/aws/info/getApiKeyValues.js",
-              "lib/plugins/aws/info/getApiKeyValues.test.js",
-              "lib/plugins/aws/info/getStackInfo.js",
-              "lib/plugins/aws/info/getStackInfo.test.js",
-              "lib/plugins/aws/info/index.js",
-              "lib/plugins/aws/info/index.test.js",
-              "lib/plugins/aws/invoke/index.js",
-              "lib/plugins/aws/invoke/index.test.js",
-              "lib/plugins/aws/invokeLocal/fixture/handlerWithError.js",
-              "lib/plugins/aws/invokeLocal/fixture/handlerWithSuccess.js",
-              "lib/plugins/aws/invokeLocal/index.js",
-              "lib/plugins/aws/invokeLocal/index.test.js",
-              "lib/plugins/aws/invokeLocal/invoke.py",
-              "lib/plugins/aws/lib/monitorStack.js",
-              "lib/plugins/aws/lib/monitorStack.test.js",
-              "lib/plugins/aws/lib/naming.js",
-              "lib/plugins/aws/lib/naming.test.js",
-              "lib/plugins/aws/lib/setBucketName.js",
-              "lib/plugins/aws/lib/setBucketName.test.js",
-              "lib/plugins/aws/lib/updateStack.js",
-              "lib/plugins/aws/lib/updateStack.test.js",
-              "lib/plugins/aws/lib/validate.js",
-              "lib/plugins/aws/lib/validate.test.js",
-              "lib/plugins/aws/logs/index.js",
-              "lib/plugins/aws/logs/index.test.js",
-              "lib/plugins/aws/metrics/awsMetrics.js",
-              "lib/plugins/aws/metrics/awsMetrics.test.js",
-              "lib/plugins/aws/package/compile/events/alexaSkill/index.js",
-              "lib/plugins/aws/package/compile/events/alexaSkill/index.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/index.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/index.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/apiKeys.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/apiKeys.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/authorizers.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/authorizers.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/cors.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/cors.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/deployment.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/deployment.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/authorization.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/index.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/index.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/integration.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/responses.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/permissions.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/permissions.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/resources.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/resources.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/restApi.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/restApi.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/validate.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/validate.test.js",
-              "lib/plugins/aws/package/compile/events/cloudWatchEvent/index.js",
-              "lib/plugins/aws/package/compile/events/cloudWatchEvent/index.test.js",
-              "lib/plugins/aws/package/compile/events/cloudWatchLog/index.js",
-              "lib/plugins/aws/package/compile/events/cloudWatchLog/index.test.js",
-              "lib/plugins/aws/package/compile/events/iot/index.js",
-              "lib/plugins/aws/package/compile/events/iot/index.test.js",
-              "lib/plugins/aws/package/compile/events/s3/index.js",
-              "lib/plugins/aws/package/compile/events/s3/index.test.js",
-              "lib/plugins/aws/package/compile/events/schedule/index.js",
-              "lib/plugins/aws/package/compile/events/schedule/index.test.js",
-              "lib/plugins/aws/package/compile/events/sns/index.js",
-              "lib/plugins/aws/package/compile/events/sns/index.test.js",
-              "lib/plugins/aws/package/compile/events/stream/index.js",
-              "lib/plugins/aws/package/compile/events/stream/index.test.js",
-              "lib/plugins/aws/package/compile/functions/index.js",
-              "lib/plugins/aws/package/compile/functions/index.test.js",
-              "lib/plugins/aws/package/index.js",
-              "lib/plugins/aws/package/index.test.js",
-              "lib/plugins/aws/package/lib/core-cloudformation-template.json",
-              "lib/plugins/aws/package/lib/generateArtifactDirectoryName.js",
-              "lib/plugins/aws/package/lib/generateArtifactDirectoryName.test.js",
-              "lib/plugins/aws/package/lib/generateCoreTemplate.js",
-              "lib/plugins/aws/package/lib/generateCoreTemplate.test.js",
-              "lib/plugins/aws/package/lib/iam-role-lambda-execution-template.json",
-              "lib/plugins/aws/package/lib/mergeCustomProviderResources.js",
-              "lib/plugins/aws/package/lib/mergeCustomProviderResources.test.js",
-              "lib/plugins/aws/package/lib/mergeIamTemplates.js",
-              "lib/plugins/aws/package/lib/mergeIamTemplates.test.js",
-              "lib/plugins/aws/package/lib/packageService.js",
-              "lib/plugins/aws/package/lib/packageService.test.js",
-              "lib/plugins/aws/package/lib/saveCompiledTemplate.js",
-              "lib/plugins/aws/package/lib/saveCompiledTemplate.test.js",
-              "lib/plugins/aws/package/lib/saveServiceState.js",
-              "lib/plugins/aws/package/lib/saveServiceState.test.js",
-              "lib/plugins/aws/package/lib/zipService.js",
-              "lib/plugins/aws/package/lib/zipService.test.js",
-              "lib/plugins/aws/provider/awsProvider.js",
-              "lib/plugins/aws/provider/awsProvider.test.js",
-              "lib/plugins/aws/remove/index.js",
-              "lib/plugins/aws/remove/index.test.js",
-              "lib/plugins/aws/remove/lib/bucket.js",
-              "lib/plugins/aws/remove/lib/bucket.test.js",
-              "lib/plugins/aws/remove/lib/stack.js",
-              "lib/plugins/aws/remove/lib/stack.test.js",
-              "lib/plugins/aws/rollback/index.js",
-              "lib/plugins/aws/rollback/index.test.js",
-              "lib/plugins/aws/utils/findAndGroupDeployments.js",
-              "lib/plugins/aws/utils/findAndGroupDeployments.test.js",
-              "lib/plugins/aws/utils/getS3ObjectsFromStacks.js",
-              "lib/plugins/aws/utils/getS3ObjectsFromStacks.test.js",
-              "lib/plugins/create/templates/aws-csharp/AssemblyInfo.cs",
-              "lib/plugins/create/templates/aws-csharp/Handler.cs",
-              "lib/plugins/create/templates/aws-csharp/build.ps1",
-              "lib/plugins/create/templates/aws-csharp/build.sh",
-              "lib/plugins/create/templates/aws-csharp/project.json",
-              "lib/plugins/create/templates/aws-csharp/serverless.yml",
-              "lib/plugins/create/templates/aws-groovy-gradle/build.gradle",
-              "lib/plugins/create/templates/aws-groovy-gradle/gradle/wrapper/gradle-wrapper.jar",
-              "lib/plugins/create/templates/aws-groovy-gradle/gradle/wrapper/gradle-wrapper.properties",
-              "lib/plugins/create/templates/aws-groovy-gradle/gradlew.bat",
-              "lib/plugins/create/templates/aws-groovy-gradle/serverless.yml",
-              "lib/plugins/create/templates/aws-groovy-gradle/src/main/groovy/com/serverless/ApiGatewayResponse.groovy",
-              "lib/plugins/create/templates/aws-groovy-gradle/src/main/groovy/com/serverless/Handler.groovy",
-              "lib/plugins/create/templates/aws-groovy-gradle/src/main/groovy/com/serverless/Response.groovy",
-              "lib/plugins/create/templates/aws-groovy-gradle/src/main/resources/log4j.properties",
-              "lib/plugins/create/templates/aws-java-gradle/build.gradle",
-              "lib/plugins/create/templates/aws-java-gradle/gradle/wrapper/gradle-wrapper.jar",
-              "lib/plugins/create/templates/aws-java-gradle/gradle/wrapper/gradle-wrapper.properties",
-              "lib/plugins/create/templates/aws-java-gradle/gradlew.bat",
-              "lib/plugins/create/templates/aws-java-gradle/serverless.yml",
-              "lib/plugins/create/templates/aws-java-gradle/src/main/java/com/serverless/ApiGatewayResponse.java",
-              "lib/plugins/create/templates/aws-java-gradle/src/main/java/com/serverless/Handler.java",
-              "lib/plugins/create/templates/aws-java-gradle/src/main/java/com/serverless/Response.java",
-              "lib/plugins/create/templates/aws-java-gradle/src/main/resources/log4j.properties",
-              "lib/plugins/create/templates/aws-java-maven/pom.xml",
-              "lib/plugins/create/templates/aws-java-maven/serverless.yml",
-              "lib/plugins/create/templates/aws-java-maven/src/main/java/com/serverless/ApiGatewayResponse.java",
-              "lib/plugins/create/templates/aws-java-maven/src/main/java/com/serverless/Handler.java",
-              "lib/plugins/create/templates/aws-java-maven/src/main/java/com/serverless/Response.java",
-              "lib/plugins/create/templates/aws-java-maven/src/main/resources/log4j.properties",
-              "lib/plugins/create/templates/aws-nodejs/handler.js",
-              "lib/plugins/create/templates/aws-nodejs/serverless.yml",
-              "lib/plugins/create/templates/aws-python/handler.py",
-              "lib/plugins/create/templates/aws-python/serverless.yml",
-              "lib/plugins/create/templates/aws-scala-sbt/build.sbt",
-              "lib/plugins/create/templates/aws-scala-sbt/project/assembly.sbt",
-              "lib/plugins/create/templates/aws-scala-sbt/project/plugins.sbt",
-              "lib/plugins/create/templates/aws-scala-sbt/serverless.yml",
-              "lib/plugins/create/templates/aws-scala-sbt/src/main/scala/hello/Handler.scala",
-              "lib/plugins/create/templates/aws-scala-sbt/src/main/scala/hello/Request.scala",
-              "lib/plugins/create/templates/aws-scala-sbt/src/main/scala/hello/Response.scala",
-              "lib/plugins/create/templates/azure-nodejs/README.md",
-              "lib/plugins/create/templates/azure-nodejs/handler.js",
-              "lib/plugins/create/templates/azure-nodejs/package.json",
-              "lib/plugins/create/templates/azure-nodejs/serverless.yml",
-              "lib/plugins/create/templates/openwhisk-nodejs/README.md",
-              "lib/plugins/create/templates/openwhisk-nodejs/handler.js",
-              "lib/plugins/create/templates/openwhisk-nodejs/package.json",
-              "lib/plugins/create/templates/openwhisk-nodejs/serverless.yml",
-              "lib/plugins/create/templates/openwhisk-python/README.md",
-              "lib/plugins/create/templates/openwhisk-python/handler.py",
-              "lib/plugins/create/templates/openwhisk-python/package.json",
-              "lib/plugins/create/templates/openwhisk-python/serverless.yml",
-              "lib/plugins/create/templates/openwhisk-swift/README.md",
-              "lib/plugins/create/templates/openwhisk-swift/package.json",
-              "lib/plugins/create/templates/openwhisk-swift/ping.swift",
-              "lib/plugins/create/templates/openwhisk-swift/serverless.yml",
-              "lib/plugins/create/templates/plugin/index.js"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "lib/plugins/aws/package/lib/mergeIamTemplates.js"
             ],
-            "spans": {},
+            "spans": {
+              "lib/plugins/aws/package/lib/mergeIamTemplates.js": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "lib/plugins/aws/package/compile/events/stream/index.js"
             ],
-            "spans": {},
+            "spans": {
+              "lib/plugins/aws/package/compile/events/stream/index.js": [
+                {
+                  "start": 1,
+                  "end": 280
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "lib/plugins/aws/package/compile/events/stream/index.test.js"
             ],
-            "spans": {},
+            "spans": {
+              "lib/plugins/aws/package/compile/events/stream/index.test.js": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "lib/plugins/aws/package/lib/mergeIamTemplates.test.js"
             ],
-            "spans": {},
+            "spans": {
+              "lib/plugins/aws/package/lib/mergeIamTemplates.test.js": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "lib/plugins/aws/lib/naming.js",
-              "lib/plugins/aws/lib/naming.test.js"
+              "lib/plugins/aws/package/compile/events/stream/index.test.js"
             ],
             "spans": {
-              "lib/plugins/aws/lib/naming.test.js": [
+              "lib/plugins/aws/package/compile/events/stream/index.test.js": [
                 {
-                  "start": 109,
-                  "end": 109
-                },
-                {
-                  "start": 112,
-                  "end": 112
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 128,
-                  "end": 128
-                },
-                {
-                  "start": 132,
-                  "end": 132
-                },
-                {
-                  "start": 135,
-                  "end": 135
+                  "start": 260,
+                  "end": 760
                 }
-              ],
-              "lib/plugins/aws/lib/naming.js": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "lib/plugins/aws/package/lib/mergeIamTemplates.test.js"
+            ],
+            "spans": {
+              "lib/plugins/aws/package/lib/mergeIamTemplates.test.js": [
                 {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 89,
-                  "end": 89
-                },
-                {
-                  "start": 94,
-                  "end": 94
-                },
-                {
-                  "start": 217,
-                  "end": 217
+                  "start": 260,
+                  "end": 520
                 }
               ]
             },
@@ -339,533 +190,25 @@
             "files": [
               "lib/plugins/aws/package/lib/iam-role-lambda-execution-template.json"
             ],
-            "spans": {},
+            "spans": {
+              "lib/plugins/aws/package/lib/iam-role-lambda-execution-template.json": [
+                {
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "lib/plugins/aws/package/lib/core-cloudformation-template.json"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/apiKeys.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/apiKeys.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/cors.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/deployment.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/deployment.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/authorization.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/index.test.js",
-              "lib/plugins/aws/package/compile/events/cloudWatchLog/index.js",
-              "lib/plugins/aws/package/compile/events/stream/index.js",
-              "lib/plugins/aws/package/compile/events/stream/index.test.js",
-              "lib/plugins/aws/package/compile/functions/index.js",
-              "lib/plugins/aws/package/compile/functions/index.test.js",
-              "lib/plugins/aws/package/lib/mergeIamTemplates.test.js"
-            ],
             "spans": {
-              "lib/plugins/aws/package/lib/mergeIamTemplates.test.js": [
+              "lib/plugins/aws/package/lib/core-cloudformation-template.json": [
                 {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 282,
-                  "end": 282
-                },
-                {
-                  "start": 314,
-                  "end": 314
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/cloudWatchLog/index.js": [
-                {
-                  "start": 84,
-                  "end": 84
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/stream/index.js": [
-                {
-                  "start": 122,
-                  "end": 122
-                },
-                {
-                  "start": 144,
-                  "end": 144
-                },
-                {
-                  "start": 189,
-                  "end": 189
-                },
-                {
-                  "start": 192,
-                  "end": 192
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/stream/index.test.js": [
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 98,
-                  "end": 98
-                },
-                {
-                  "start": 101,
-                  "end": 101
-                },
-                {
-                  "start": 106,
-                  "end": 106
-                },
-                {
-                  "start": 123,
-                  "end": 123
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                },
-                {
-                  "start": 132,
-                  "end": 132
-                },
-                {
-                  "start": 135,
-                  "end": 135
-                },
-                {
-                  "start": 153,
-                  "end": 153
-                },
-                {
-                  "start": 155,
-                  "end": 155
-                },
-                {
-                  "start": 159,
-                  "end": 159
-                },
-                {
-                  "start": 161,
-                  "end": 161
-                },
-                {
-                  "start": 176,
-                  "end": 176
-                },
-                {
-                  "start": 179,
-                  "end": 179
-                },
-                {
-                  "start": 186,
-                  "end": 186
-                },
-                {
-                  "start": 188,
-                  "end": 188
-                },
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 208,
-                  "end": 208
-                },
-                {
-                  "start": 210,
-                  "end": 210
-                },
-                {
-                  "start": 217,
-                  "end": 217
-                },
-                {
-                  "start": 219,
-                  "end": 219
-                },
-                {
-                  "start": 256,
-                  "end": 256
-                },
-                {
-                  "start": 257,
-                  "end": 257
-                },
-                {
-                  "start": 291,
-                  "end": 291
-                },
-                {
-                  "start": 292,
-                  "end": 292
-                },
-                {
-                  "start": 320,
-                  "end": 320
-                },
-                {
-                  "start": 321,
-                  "end": 321
-                },
-                {
-                  "start": 373,
-                  "end": 373
-                },
-                {
-                  "start": 473,
-                  "end": 473
-                },
-                {
-                  "start": 513,
-                  "end": 513
-                },
-                {
-                  "start": 514,
-                  "end": 514
-                },
-                {
-                  "start": 548,
-                  "end": 548
-                },
-                {
-                  "start": 549,
-                  "end": 549
-                },
-                {
-                  "start": 577,
-                  "end": 577
-                },
-                {
-                  "start": 578,
-                  "end": 578
-                },
-                {
-                  "start": 634,
-                  "end": 634
-                },
-                {
-                  "start": 649,
-                  "end": 649
-                },
-                {
-                  "start": 668,
-                  "end": 668
-                }
-              ],
-              "lib/plugins/aws/package/compile/functions/index.js": [
-                {
-                  "start": 41,
-                  "end": 41
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 56,
-                  "end": 56
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 62,
-                  "end": 62
-                },
-                {
-                  "start": 154,
-                  "end": 154
-                },
-                {
-                  "start": 171,
-                  "end": 171
-                },
-                {
-                  "start": 172,
-                  "end": 172
-                }
-              ],
-              "lib/plugins/aws/package/compile/functions/index.test.js": [
-                {
-                  "start": 123,
-                  "end": 123
-                },
-                {
-                  "start": 142,
-                  "end": 142
-                },
-                {
-                  "start": 172,
-                  "end": 172
-                },
-                {
-                  "start": 192,
-                  "end": 192
-                },
-                {
-                  "start": 211,
-                  "end": 211
-                },
-                {
-                  "start": 241,
-                  "end": 241
-                },
-                {
-                  "start": 263,
-                  "end": 263
-                },
-                {
-                  "start": 283,
-                  "end": 283
-                },
-                {
-                  "start": 307,
-                  "end": 307
-                },
-                {
-                  "start": 313,
-                  "end": 313
-                },
-                {
-                  "start": 337,
-                  "end": 337
-                },
-                {
-                  "start": 343,
-                  "end": 343
-                },
-                {
-                  "start": 371,
-                  "end": 371
-                },
-                {
-                  "start": 373,
-                  "end": 373
-                },
-                {
-                  "start": 383,
-                  "end": 383
-                },
-                {
-                  "start": 414,
-                  "end": 414
-                },
-                {
-                  "start": 416,
-                  "end": 416
-                },
-                {
-                  "start": 426,
-                  "end": 426
-                },
-                {
-                  "start": 460,
-                  "end": 460
-                },
-                {
-                  "start": 462,
-                  "end": 462
-                },
-                {
-                  "start": 472,
-                  "end": 472
-                },
-                {
-                  "start": 511,
-                  "end": 511
-                },
-                {
-                  "start": 513,
-                  "end": 513
-                },
-                {
-                  "start": 523,
-                  "end": 523
-                },
-                {
-                  "start": 560,
-                  "end": 560
-                },
-                {
-                  "start": 562,
-                  "end": 562
-                },
-                {
-                  "start": 572,
-                  "end": 572
-                },
-                {
-                  "start": 608,
-                  "end": 608
-                },
-                {
-                  "start": 610,
-                  "end": 610
-                },
-                {
-                  "start": 620,
-                  "end": 620
-                },
-                {
-                  "start": 659,
-                  "end": 659
-                },
-                {
-                  "start": 661,
-                  "end": 661
-                },
-                {
-                  "start": 671,
-                  "end": 671
-                },
-                {
-                  "start": 719,
-                  "end": 719
-                },
-                {
-                  "start": 721,
-                  "end": 721
-                },
-                {
-                  "start": 731,
-                  "end": 731
-                },
-                {
-                  "start": 762,
-                  "end": 762
-                },
-                {
-                  "start": 764,
-                  "end": 764
-                },
-                {
-                  "start": 774,
-                  "end": 774
-                },
-                {
-                  "start": 799,
-                  "end": 799
-                },
-                {
-                  "start": 801,
-                  "end": 801
-                },
-                {
-                  "start": 811,
-                  "end": 811
-                },
-                {
-                  "start": 840,
-                  "end": 840
-                },
-                {
-                  "start": 842,
-                  "end": 842
-                },
-                {
-                  "start": 852,
-                  "end": 852
-                },
-                {
-                  "start": 883,
-                  "end": 883
-                },
-                {
-                  "start": 885,
-                  "end": 885
-                },
-                {
-                  "start": 895,
-                  "end": 895
-                },
-                {
-                  "start": 1011,
-                  "end": 1011
-                },
-                {
-                  "start": 1012,
-                  "end": 1012
-                },
-                {
-                  "start": 1017,
-                  "end": 1017
-                },
-                {
-                  "start": 1031,
-                  "end": 1031
-                },
-                {
-                  "start": 1037,
-                  "end": 1037
-                },
-                {
-                  "start": 1051,
-                  "end": 1051
-                },
-                {
-                  "start": 1057,
-                  "end": 1057
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/cors.test.js": [
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 24,
-                  "end": 24
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/deployment.js": [
-                {
-                  "start": 18,
-                  "end": 18
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/deployment.test.js": [
-                {
-                  "start": 39,
-                  "end": 39
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/apiKeys.js": [
-                {
-                  "start": 34,
-                  "end": 34
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/apiKeys.test.js": [
-                {
-                  "start": 74,
-                  "end": 74
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/authorization.js": [
-                {
-                  "start": 22,
-                  "end": 22
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/index.test.js": [
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 24,
-                  "end": 24
+                  "start": 1,
+                  "end": 240
                 }
               ]
             },
@@ -875,774 +218,123 @@
             "files": [
               "lib/plugins/aws/package/compile/functions/index.js"
             ],
-            "spans": {},
+            "spans": {
+              "lib/plugins/aws/package/compile/functions/index.js": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "lib/plugins/aws/package/compile/functions/index.test.js"
             ],
-            "spans": {},
+            "spans": {
+              "lib/plugins/aws/package/compile/functions/index.test.js": [
+                {
+                  "start": 980,
+                  "end": 1080
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "lib/plugins/aws/package/index.js"
             ],
-            "spans": {},
+            "spans": {
+              "lib/plugins/aws/package/index.js": [
+                {
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "package.json"
             ],
-            "spans": {},
+            "spans": {
+              "package.json": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "lib/plugins/aws/package/compile/events/stream/index.js"
+            ],
+            "spans": {
+              "lib/plugins/aws/package/compile/events/stream/index.js": [
+                {
+                  "start": 110,
+                  "end": 155
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "lib/plugins/aws/package/compile/events/stream/index.test.js"
+            ],
+            "spans": {
+              "lib/plugins/aws/package/compile/events/stream/index.test.js": [
+                {
+                  "start": 110,
+                  "end": 290
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "lib/plugins/aws/package/compile/functions/index.js"
+            ],
+            "spans": {
+              "lib/plugins/aws/package/compile/functions/index.js": [
+                {
+                  "start": 26,
+                  "end": 60
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "lib/plugins/aws/common/index.js",
-          "lib/plugins/aws/common/index.test.js",
-          "lib/plugins/aws/common/lib/artifacts.js",
-          "lib/plugins/aws/common/lib/artifacts.test.js",
-          "lib/plugins/aws/common/lib/cleanupTempDir.js",
-          "lib/plugins/aws/common/lib/cleanupTempDir.test.js",
-          "lib/plugins/aws/configCredentials/awsConfigCredentials.js",
-          "lib/plugins/aws/configCredentials/awsConfigCredentials.test.js",
-          "lib/plugins/aws/deploy/index.js",
-          "lib/plugins/aws/deploy/index.test.js",
-          "lib/plugins/aws/deploy/lib/cleanupS3Bucket.js",
-          "lib/plugins/aws/deploy/lib/cleanupS3Bucket.test.js",
-          "lib/plugins/aws/deploy/lib/createStack.js",
-          "lib/plugins/aws/deploy/lib/createStack.test.js",
-          "lib/plugins/aws/deploy/lib/extendedValidate.js",
-          "lib/plugins/aws/deploy/lib/uploadArtifacts.js",
-          "lib/plugins/aws/deploy/lib/uploadArtifacts.test.js",
-          "lib/plugins/aws/deployFunction/index.js",
-          "lib/plugins/aws/deployFunction/index.test.js",
-          "lib/plugins/aws/deployList/index.js",
-          "lib/plugins/aws/deployList/index.test.js",
-          "lib/plugins/aws/info/display.js",
-          "lib/plugins/aws/info/display.test.js",
-          "lib/plugins/aws/info/getApiKeyValues.js",
-          "lib/plugins/aws/info/getApiKeyValues.test.js",
-          "lib/plugins/aws/info/getStackInfo.js",
-          "lib/plugins/aws/info/getStackInfo.test.js",
-          "lib/plugins/aws/info/index.js",
-          "lib/plugins/aws/info/index.test.js",
-          "lib/plugins/aws/invoke/index.js",
-          "lib/plugins/aws/invoke/index.test.js",
-          "lib/plugins/aws/invokeLocal/fixture/handlerWithError.js",
-          "lib/plugins/aws/invokeLocal/fixture/handlerWithSuccess.js",
-          "lib/plugins/aws/invokeLocal/index.js",
-          "lib/plugins/aws/invokeLocal/index.test.js",
-          "lib/plugins/aws/invokeLocal/invoke.py",
-          "lib/plugins/aws/lib/monitorStack.js",
-          "lib/plugins/aws/lib/monitorStack.test.js",
-          "lib/plugins/aws/lib/naming.js",
-          "lib/plugins/aws/lib/naming.test.js",
-          "lib/plugins/aws/lib/setBucketName.js",
-          "lib/plugins/aws/lib/setBucketName.test.js",
-          "lib/plugins/aws/lib/updateStack.js",
-          "lib/plugins/aws/lib/updateStack.test.js",
-          "lib/plugins/aws/lib/validate.js",
-          "lib/plugins/aws/lib/validate.test.js",
-          "lib/plugins/aws/logs/index.js",
-          "lib/plugins/aws/logs/index.test.js",
-          "lib/plugins/aws/metrics/awsMetrics.js",
-          "lib/plugins/aws/metrics/awsMetrics.test.js",
-          "lib/plugins/aws/package/compile/events/alexaSkill/index.js",
-          "lib/plugins/aws/package/compile/events/alexaSkill/index.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/index.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/index.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/apiKeys.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/apiKeys.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/authorizers.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/authorizers.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/cors.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/cors.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/deployment.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/deployment.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/method/authorization.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/method/index.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/method/index.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/method/integration.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/method/responses.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/permissions.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/permissions.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/resources.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/resources.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/restApi.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/restApi.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/validate.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/validate.test.js",
-          "lib/plugins/aws/package/compile/events/cloudWatchEvent/index.js",
-          "lib/plugins/aws/package/compile/events/cloudWatchEvent/index.test.js",
-          "lib/plugins/aws/package/compile/events/cloudWatchLog/index.js",
-          "lib/plugins/aws/package/compile/events/cloudWatchLog/index.test.js",
-          "lib/plugins/aws/package/compile/events/iot/index.js",
-          "lib/plugins/aws/package/compile/events/iot/index.test.js",
-          "lib/plugins/aws/package/compile/events/s3/index.js",
-          "lib/plugins/aws/package/compile/events/s3/index.test.js",
-          "lib/plugins/aws/package/compile/events/schedule/index.js",
-          "lib/plugins/aws/package/compile/events/schedule/index.test.js",
-          "lib/plugins/aws/package/compile/events/sns/index.js",
-          "lib/plugins/aws/package/compile/events/sns/index.test.js",
           "lib/plugins/aws/package/compile/events/stream/index.js",
           "lib/plugins/aws/package/compile/events/stream/index.test.js",
-          "lib/plugins/aws/package/compile/functions/index.js",
-          "lib/plugins/aws/package/compile/functions/index.test.js",
-          "lib/plugins/aws/package/index.js",
-          "lib/plugins/aws/package/index.test.js",
-          "lib/plugins/aws/package/lib/core-cloudformation-template.json",
-          "lib/plugins/aws/package/lib/generateArtifactDirectoryName.js",
-          "lib/plugins/aws/package/lib/generateArtifactDirectoryName.test.js",
-          "lib/plugins/aws/package/lib/generateCoreTemplate.js",
-          "lib/plugins/aws/package/lib/generateCoreTemplate.test.js",
-          "lib/plugins/aws/package/lib/iam-role-lambda-execution-template.json",
-          "lib/plugins/aws/package/lib/mergeCustomProviderResources.js",
-          "lib/plugins/aws/package/lib/mergeCustomProviderResources.test.js",
-          "lib/plugins/aws/package/lib/mergeIamTemplates.js",
-          "lib/plugins/aws/package/lib/mergeIamTemplates.test.js",
-          "lib/plugins/aws/package/lib/packageService.js",
-          "lib/plugins/aws/package/lib/packageService.test.js",
-          "lib/plugins/aws/package/lib/saveCompiledTemplate.js",
-          "lib/plugins/aws/package/lib/saveCompiledTemplate.test.js",
-          "lib/plugins/aws/package/lib/saveServiceState.js",
-          "lib/plugins/aws/package/lib/saveServiceState.test.js",
-          "lib/plugins/aws/package/lib/zipService.js",
-          "lib/plugins/aws/package/lib/zipService.test.js",
-          "lib/plugins/aws/provider/awsProvider.js",
-          "lib/plugins/aws/provider/awsProvider.test.js",
-          "lib/plugins/aws/remove/index.js",
-          "lib/plugins/aws/remove/index.test.js",
-          "lib/plugins/aws/remove/lib/bucket.js",
-          "lib/plugins/aws/remove/lib/bucket.test.js",
-          "lib/plugins/aws/remove/lib/stack.js",
-          "lib/plugins/aws/remove/lib/stack.test.js",
-          "lib/plugins/aws/rollback/index.js",
-          "lib/plugins/aws/rollback/index.test.js",
-          "lib/plugins/aws/utils/findAndGroupDeployments.js",
-          "lib/plugins/aws/utils/findAndGroupDeployments.test.js",
-          "lib/plugins/aws/utils/getS3ObjectsFromStacks.js",
-          "lib/plugins/aws/utils/getS3ObjectsFromStacks.test.js",
-          "lib/plugins/create/templates/aws-csharp/AssemblyInfo.cs",
-          "lib/plugins/create/templates/aws-csharp/Handler.cs",
-          "lib/plugins/create/templates/aws-csharp/build.ps1",
-          "lib/plugins/create/templates/aws-csharp/build.sh",
-          "lib/plugins/create/templates/aws-csharp/project.json",
-          "lib/plugins/create/templates/aws-csharp/serverless.yml",
-          "lib/plugins/create/templates/aws-groovy-gradle/build.gradle",
-          "lib/plugins/create/templates/aws-groovy-gradle/gradle/wrapper/gradle-wrapper.jar",
-          "lib/plugins/create/templates/aws-groovy-gradle/gradle/wrapper/gradle-wrapper.properties",
-          "lib/plugins/create/templates/aws-groovy-gradle/gradlew.bat",
-          "lib/plugins/create/templates/aws-groovy-gradle/serverless.yml",
-          "lib/plugins/create/templates/aws-groovy-gradle/src/main/groovy/com/serverless/ApiGatewayResponse.groovy",
-          "lib/plugins/create/templates/aws-groovy-gradle/src/main/groovy/com/serverless/Handler.groovy",
-          "lib/plugins/create/templates/aws-groovy-gradle/src/main/groovy/com/serverless/Response.groovy",
-          "lib/plugins/create/templates/aws-groovy-gradle/src/main/resources/log4j.properties",
-          "lib/plugins/create/templates/aws-java-gradle/build.gradle",
-          "lib/plugins/create/templates/aws-java-gradle/gradle/wrapper/gradle-wrapper.jar",
-          "lib/plugins/create/templates/aws-java-gradle/gradle/wrapper/gradle-wrapper.properties",
-          "lib/plugins/create/templates/aws-java-gradle/gradlew.bat",
-          "lib/plugins/create/templates/aws-java-gradle/serverless.yml",
-          "lib/plugins/create/templates/aws-java-gradle/src/main/java/com/serverless/ApiGatewayResponse.java",
-          "lib/plugins/create/templates/aws-java-gradle/src/main/java/com/serverless/Handler.java",
-          "lib/plugins/create/templates/aws-java-gradle/src/main/java/com/serverless/Response.java",
-          "lib/plugins/create/templates/aws-java-gradle/src/main/resources/log4j.properties",
-          "lib/plugins/create/templates/aws-java-maven/pom.xml",
-          "lib/plugins/create/templates/aws-java-maven/serverless.yml",
-          "lib/plugins/create/templates/aws-java-maven/src/main/java/com/serverless/ApiGatewayResponse.java",
-          "lib/plugins/create/templates/aws-java-maven/src/main/java/com/serverless/Handler.java",
-          "lib/plugins/create/templates/aws-java-maven/src/main/java/com/serverless/Response.java",
-          "lib/plugins/create/templates/aws-java-maven/src/main/resources/log4j.properties",
-          "lib/plugins/create/templates/aws-nodejs/handler.js",
-          "lib/plugins/create/templates/aws-nodejs/serverless.yml",
-          "lib/plugins/create/templates/aws-python/handler.py",
-          "lib/plugins/create/templates/aws-python/serverless.yml",
-          "lib/plugins/create/templates/aws-scala-sbt/build.sbt",
-          "lib/plugins/create/templates/aws-scala-sbt/project/assembly.sbt",
-          "lib/plugins/create/templates/aws-scala-sbt/project/plugins.sbt",
-          "lib/plugins/create/templates/aws-scala-sbt/serverless.yml",
-          "lib/plugins/create/templates/aws-scala-sbt/src/main/scala/hello/Handler.scala",
-          "lib/plugins/create/templates/aws-scala-sbt/src/main/scala/hello/Request.scala",
-          "lib/plugins/create/templates/aws-scala-sbt/src/main/scala/hello/Response.scala",
-          "lib/plugins/create/templates/azure-nodejs/README.md",
-          "lib/plugins/create/templates/azure-nodejs/handler.js",
-          "lib/plugins/create/templates/azure-nodejs/package.json",
-          "lib/plugins/create/templates/azure-nodejs/serverless.yml",
-          "lib/plugins/create/templates/openwhisk-nodejs/README.md",
-          "lib/plugins/create/templates/openwhisk-nodejs/handler.js",
-          "lib/plugins/create/templates/openwhisk-nodejs/package.json",
-          "lib/plugins/create/templates/openwhisk-nodejs/serverless.yml",
-          "lib/plugins/create/templates/openwhisk-python/README.md",
-          "lib/plugins/create/templates/openwhisk-python/handler.py",
-          "lib/plugins/create/templates/openwhisk-python/package.json",
-          "lib/plugins/create/templates/openwhisk-python/serverless.yml",
-          "lib/plugins/create/templates/openwhisk-swift/README.md",
-          "lib/plugins/create/templates/openwhisk-swift/package.json",
-          "lib/plugins/create/templates/openwhisk-swift/ping.swift",
-          "lib/plugins/create/templates/openwhisk-swift/serverless.yml",
-          "lib/plugins/create/templates/plugin/index.js",
-          "package.json"
+          "lib/plugins/aws/package/compile/functions/index.js"
         ],
         "predSpans": {
-          "lib/plugins/aws/lib/naming.test.js": [
-            {
-              "start": 109,
-              "end": 109
-            },
-            {
-              "start": 112,
-              "end": 112
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 128,
-              "end": 128
-            },
-            {
-              "start": 132,
-              "end": 132
-            },
-            {
-              "start": 135,
-              "end": 135
-            }
-          ],
-          "lib/plugins/aws/lib/naming.js": [
-            {
-              "start": 76,
-              "end": 76
-            },
-            {
-              "start": 89,
-              "end": 89
-            },
-            {
-              "start": 94,
-              "end": 94
-            },
-            {
-              "start": 217,
-              "end": 217
-            }
-          ],
-          "lib/plugins/aws/package/lib/mergeIamTemplates.test.js": [
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 282,
-              "end": 282
-            },
-            {
-              "start": 314,
-              "end": 314
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/cloudWatchLog/index.js": [
-            {
-              "start": 84,
-              "end": 84
-            }
-          ],
           "lib/plugins/aws/package/compile/events/stream/index.js": [
             {
               "start": 121,
               "end": 145
-            },
-            {
-              "start": 122,
-              "end": 122
-            },
-            {
-              "start": 144,
-              "end": 144
-            },
-            {
-              "start": 189,
-              "end": 189
-            },
-            {
-              "start": 192,
-              "end": 192
             }
           ],
           "lib/plugins/aws/package/compile/events/stream/index.test.js": [
             {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 98,
-              "end": 98
-            },
-            {
-              "start": 101,
-              "end": 101
-            },
-            {
-              "start": 106,
-              "end": 106
-            },
-            {
-              "start": 123,
-              "end": 123
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 130,
-              "end": 130
-            },
-            {
-              "start": 132,
-              "end": 132
-            },
-            {
-              "start": 135,
-              "end": 135
-            },
-            {
               "start": 139,
               "end": 286
-            },
-            {
-              "start": 153,
-              "end": 153
-            },
-            {
-              "start": 155,
-              "end": 155
-            },
-            {
-              "start": 159,
-              "end": 159
-            },
-            {
-              "start": 161,
-              "end": 161
-            },
-            {
-              "start": 176,
-              "end": 176
-            },
-            {
-              "start": 179,
-              "end": 179
-            },
-            {
-              "start": 186,
-              "end": 186
-            },
-            {
-              "start": 188,
-              "end": 188
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 208,
-              "end": 208
-            },
-            {
-              "start": 210,
-              "end": 210
-            },
-            {
-              "start": 217,
-              "end": 217
-            },
-            {
-              "start": 219,
-              "end": 219
-            },
-            {
-              "start": 256,
-              "end": 256
-            },
-            {
-              "start": 257,
-              "end": 257
-            },
-            {
-              "start": 291,
-              "end": 291
-            },
-            {
-              "start": 292,
-              "end": 292
-            },
-            {
-              "start": 320,
-              "end": 320
-            },
-            {
-              "start": 321,
-              "end": 321
-            },
-            {
-              "start": 373,
-              "end": 373
-            },
-            {
-              "start": 473,
-              "end": 473
-            },
-            {
-              "start": 513,
-              "end": 513
-            },
-            {
-              "start": 514,
-              "end": 514
-            },
-            {
-              "start": 548,
-              "end": 548
-            },
-            {
-              "start": 549,
-              "end": 549
-            },
-            {
-              "start": 577,
-              "end": 577
-            },
-            {
-              "start": 578,
-              "end": 578
-            },
-            {
-              "start": 634,
-              "end": 634
-            },
-            {
-              "start": 649,
-              "end": 649
-            },
-            {
-              "start": 668,
-              "end": 668
             }
           ],
           "lib/plugins/aws/package/compile/functions/index.js": [
             {
               "start": 31,
               "end": 60
-            },
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 56,
-              "end": 56
-            },
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 62,
-              "end": 62
-            },
-            {
-              "start": 154,
-              "end": 154
-            },
-            {
-              "start": 171,
-              "end": 171
-            },
-            {
-              "start": 172,
-              "end": 172
-            }
-          ],
-          "lib/plugins/aws/package/compile/functions/index.test.js": [
-            {
-              "start": 123,
-              "end": 123
-            },
-            {
-              "start": 142,
-              "end": 142
-            },
-            {
-              "start": 172,
-              "end": 172
-            },
-            {
-              "start": 192,
-              "end": 192
-            },
-            {
-              "start": 211,
-              "end": 211
-            },
-            {
-              "start": 241,
-              "end": 241
-            },
-            {
-              "start": 263,
-              "end": 263
-            },
-            {
-              "start": 283,
-              "end": 283
-            },
-            {
-              "start": 307,
-              "end": 307
-            },
-            {
-              "start": 313,
-              "end": 313
-            },
-            {
-              "start": 337,
-              "end": 337
-            },
-            {
-              "start": 343,
-              "end": 343
-            },
-            {
-              "start": 371,
-              "end": 371
-            },
-            {
-              "start": 373,
-              "end": 373
-            },
-            {
-              "start": 383,
-              "end": 383
-            },
-            {
-              "start": 414,
-              "end": 414
-            },
-            {
-              "start": 416,
-              "end": 416
-            },
-            {
-              "start": 426,
-              "end": 426
-            },
-            {
-              "start": 460,
-              "end": 460
-            },
-            {
-              "start": 462,
-              "end": 462
-            },
-            {
-              "start": 472,
-              "end": 472
-            },
-            {
-              "start": 511,
-              "end": 511
-            },
-            {
-              "start": 513,
-              "end": 513
-            },
-            {
-              "start": 523,
-              "end": 523
-            },
-            {
-              "start": 560,
-              "end": 560
-            },
-            {
-              "start": 562,
-              "end": 562
-            },
-            {
-              "start": 572,
-              "end": 572
-            },
-            {
-              "start": 608,
-              "end": 608
-            },
-            {
-              "start": 610,
-              "end": 610
-            },
-            {
-              "start": 620,
-              "end": 620
-            },
-            {
-              "start": 659,
-              "end": 659
-            },
-            {
-              "start": 661,
-              "end": 661
-            },
-            {
-              "start": 671,
-              "end": 671
-            },
-            {
-              "start": 719,
-              "end": 719
-            },
-            {
-              "start": 721,
-              "end": 721
-            },
-            {
-              "start": 731,
-              "end": 731
-            },
-            {
-              "start": 762,
-              "end": 762
-            },
-            {
-              "start": 764,
-              "end": 764
-            },
-            {
-              "start": 774,
-              "end": 774
-            },
-            {
-              "start": 799,
-              "end": 799
-            },
-            {
-              "start": 801,
-              "end": 801
-            },
-            {
-              "start": 811,
-              "end": 811
-            },
-            {
-              "start": 840,
-              "end": 840
-            },
-            {
-              "start": 842,
-              "end": 842
-            },
-            {
-              "start": 852,
-              "end": 852
-            },
-            {
-              "start": 883,
-              "end": 883
-            },
-            {
-              "start": 885,
-              "end": 885
-            },
-            {
-              "start": 895,
-              "end": 895
-            },
-            {
-              "start": 1011,
-              "end": 1011
-            },
-            {
-              "start": 1012,
-              "end": 1012
-            },
-            {
-              "start": 1017,
-              "end": 1017
-            },
-            {
-              "start": 1031,
-              "end": 1031
-            },
-            {
-              "start": 1037,
-              "end": 1037
-            },
-            {
-              "start": 1051,
-              "end": 1051
-            },
-            {
-              "start": 1057,
-              "end": 1057
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/cors.test.js": [
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 24,
-              "end": 24
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/deployment.js": [
-            {
-              "start": 18,
-              "end": 18
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/deployment.test.js": [
-            {
-              "start": 39,
-              "end": 39
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/apiKeys.js": [
-            {
-              "start": 34,
-              "end": 34
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/apiKeys.test.js": [
-            {
-              "start": 74,
-              "end": 74
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/method/authorization.js": [
-            {
-              "start": 22,
-              "end": 22
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/method/index.test.js": [
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 24,
-              "end": 24
             }
           ]
         },
@@ -1660,7 +352,7 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.8,
+              "file": 0.0,
               "symbol": 0.0,
               "span": 0.0,
               "line": 0.0
@@ -1669,123 +361,141 @@
           {
             "step": 2,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.2,
+              "symbol": 0.2,
+              "span": 0.323062558356676,
+              "line": 0.32342007434944237
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.7,
+              "span": 0.7441643323996265,
+              "line": 0.7323420074349443
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.7,
+              "span": 0.7441643323996265,
+              "line": 0.7323420074349443
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.7,
+              "span": 0.7441643323996265,
+              "line": 0.7323420074349443
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.7,
+              "span": 0.7441643323996265,
+              "line": 0.7323420074349443
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.7,
+              "span": 0.7441643323996265,
+              "line": 0.7323420074349443
             }
           },
           {
             "step": 8,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.7,
+              "span": 0.7441643323996265,
+              "line": 0.7323420074349443
             }
           },
           {
             "step": 9,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.8,
-              "span": 0.14625244037008742,
-              "line": 0.10780669144981413
+              "file": 0.6,
+              "symbol": 0.85,
+              "span": 0.8902470078940667,
+              "line": 0.8996282527881041
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 0.8,
-              "symbol": 0.8,
-              "span": 0.14625244037008742,
-              "line": 0.10780669144981413
+              "symbol": 0.95,
+              "span": 0.8902470078940667,
+              "line": 0.8996282527881041
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 0.8,
-              "symbol": 0.8,
-              "span": 0.14625244037008742,
-              "line": 0.10780669144981413
+              "symbol": 0.95,
+              "span": 0.8902470078940667,
+              "line": 0.8996282527881041
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 0.8,
-              "symbol": 0.8,
-              "span": 0.14625244037008742,
-              "line": 0.10780669144981413
+              "symbol": 0.95,
+              "span": 0.8902470078940667,
+              "line": 0.8996282527881041
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 0.8,
-              "symbol": 0.8,
-              "span": 0.14625244037008742,
-              "line": 0.10780669144981413
+              "symbol": 0.95,
+              "span": 0.8902470078940667,
+              "line": 0.8996282527881041
+            }
+          },
+          {
+            "step": 14,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.95,
+              "span": 0.8902470078940667,
+              "line": 0.8996282527881041
+            }
+          },
+          {
+            "step": 15,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.95,
+              "span": 0.8902470078940667,
+              "line": 0.8996282527881041
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.8,
-          "symbol": 0.3076923076923077,
-          "span": 0.05625093860387978,
-          "line": 0.041464112096082355
+          "file": 0.5333333333333333,
+          "symbol": 0.73,
+          "span": 0.7346518405341934,
+          "line": 0.7343246592317224
         },
         "redundancy": {
-          "file": 0.11538461538461542,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.33333333333333337,
+          "symbol": 0.17218543046357615,
+          "span": 0.12846720313229154,
+          "line": 0.07799113737075336
         }
       },
       "fixOverlap": {
@@ -1916,12 +626,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/lib/plugins/aws/package/compile/events/stream/index.js",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/lib/plugins/aws/package/compile/events/stream/index.js",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/lib/plugins/aws/package/compile/events/stream/index.test.js",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/lib/plugins/aws/package/compile/events/stream/index.test.js",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2074,9 +802,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-10T20:32:22Z",
       "completedAt": "2026-05-10T20:37:36Z",
       "durationMs": 313661,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 962233,
@@ -2085,6 +828,28 @@
         "total_tokens": 975630,
         "cache_read_input_tokens": 884736
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 33,
+        "readToolCalls": 0,
+        "editToolCalls": 3
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/lib/plugins/aws/package/compile/events/stream/index.js b/lib/plugins/aws/package/compile/events/stream/index.js\nindex a0bb4ab36..54ad85057 100644\n--- a/lib/plugins/aws/package/compile/events/stream/index.js\n+++ b/lib/plugins/aws/package/compile/events/stream/index.js\n@@ -12,6 +12,33 @@ class AwsCompileStreamEvents {\n     };\n   }\n \n+  resolveStreamEventDependsOn(role) {\n+    let dependsOn = 'IamRoleLambdaExecution';\n+\n+    if (role) {\n+      if (typeof role === 'object') {\n+        if ('Fn::GetAtt' in role &&\n+          Array.isArray(role['Fn::GetAtt']) &&\n+          role['Fn::GetAtt'].length === 2 &&\n+          typeof role['Fn::GetAtt'][0] === 'string' &&\n+          typeof role['Fn::GetAtt'][1] === 'string' &&\n+          role['Fn::GetAtt'][1] === 'Arn') {\n+          dependsOn = role['Fn::GetAtt'][0];\n+        } else if ('Fn::ImportValue' in role) {\n+          dependsOn = [];\n+        }\n+      } else if (typeof role === 'string') {\n+        if (role.startsWith('arn:aws')) {\n+          dependsOn = [];\n+        } else {\n+          dependsOn = role;\n+        }\n+      }\n+    }\n+\n+    return dependsOn;\n+  }\n+\n   compileStreamEvents() {\n     this.serverless.service.getAllFunctions().forEach((functionName) => {\n       const functionObj = this.serverless.service.getFunction(functionName);\n@@ -119,25 +146,7 @@ class AwsCompileStreamEvents {\n               .getStreamLogicalId(functionName, streamType, streamName);\n \n             const funcRole = functionObj.role || this.serverless.service.provider.role;\n-            let dependsOn = '\"IamRoleLambdaExecution\"';\n-            if (funcRole) {\n-              if ( // check whether the custom role is an ARN\n-                typeof funcRole === 'string' &&\n-                funcRole.indexOf(':') !== -1\n-              ) {\n-                dependsOn = '[]';\n-              } else if ( // otherwise, check if we have an in-service reference to a role ARN\n-                typeof funcRole === 'object' &&\n-                'Fn::GetAtt' in funcRole &&\n-                Array.isArray(funcRole['Fn::GetAtt']) &&\n-                funcRole['Fn::GetAtt'].length === 2 &&\n-                typeof funcRole['Fn::GetAtt'][0] === 'string' &&\n-                typeof funcRole['Fn::GetAtt'][1] === 'string' &&\n-                funcRole['Fn::GetAtt'][1] === 'Arn'\n-              ) {\n-                dependsOn = `\"${funcRole['Fn::GetAtt'][0]}\"`;\n-              }\n-            }\n+            const dependsOn = JSON.stringify(this.resolveStreamEventDependsOn(funcRole));\n             const streamTemplate = `\n               {\n                 \"Type\": \"AWS::Lambda::EventSourceMapping\",\ndiff --git a/lib/plugins/aws/package/compile/events/stream/index.test.js b/lib/plugins/aws/package/compile/events/stream/index.test.js\nindex 0ebc32de7..7745d86a6 100644\n--- a/lib/plugins/aws/package/compile/events/stream/index.test.js\n+++ b/lib/plugins/aws/package/compile/events/stream/index.test.js\n@@ -136,6 +136,29 @@ describe('AwsCompileStreamEvents', () => {\n       ).to.equal(null);\n     });\n \n+    it('should depend on custom IAM role logical name set in function', () => {\n+      const roleLogicalId = 'CustomRoleLogicalId';\n+      awsCompileStreamEvents.serverless.service.functions = {\n+        first: {\n+          role: roleLogicalId,\n+          events: [\n+            {\n+              stream: 'arn:aws:dynamodb:region:account:table/foo/stream/1',\n+            },\n+          ],\n+        },\n+      };\n+\n+      awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.IamRoleLambdaExecution = null;\n+\n+      expect(() => { awsCompileStreamEvents.compileStreamEvents(); }).to.not.throw(Error);\n+      expect(awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.FirstEventSourceMappingDynamodbFoo.DependsOn).to.equal(roleLogicalId);\n+      expect(awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.IamRoleLambdaExecution).to.equal(null);\n+    });\n+\n     it('should not throw error if custom IAM role reference is set in function', () => {\n       const roleLogicalId = 'RoleLogicalId';\n       awsCompileStreamEvents.serverless.service.functions = {\n@@ -192,6 +215,29 @@ describe('AwsCompileStreamEvents', () => {\n       ).to.equal(null);\n     });\n \n+    it('should depend on custom IAM role logical name set in provider', () => {\n+      const roleLogicalId = 'CustomRoleLogicalId';\n+      awsCompileStreamEvents.serverless.service.functions = {\n+        first: {\n+          events: [\n+            {\n+              stream: 'arn:aws:dynamodb:region:account:table/foo/stream/1',\n+            },\n+          ],\n+        },\n+      };\n+\n+      awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.IamRoleLambdaExecution = null;\n+      awsCompileStreamEvents.serverless.service.provider.role = roleLogicalId;\n+\n+      expect(() => { awsCompileStreamEvents.compileStreamEvents(); }).to.not.throw(Error);\n+      expect(awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.FirstEventSourceMappingDynamodbFoo.DependsOn).to.equal(roleLogicalId);\n+      expect(awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.IamRoleLambdaExecution).to.equal(null);\n+    });\n+\n     it('should not throw error if custom IAM role reference is set in provider', () => {\n       const roleLogicalId = 'RoleLogicalId';\n       awsCompileStreamEvents.serverless.service.functions = {\n@@ -219,6 +265,32 @@ describe('AwsCompileStreamEvents', () => {\n         .Resources.IamRoleLambdaExecution).to.equal(null);\n     });\n \n+    it('should not depend on default IAM role when custom IAM role import is set in provider', () => {\n+      awsCompileStreamEvents.serverless.service.functions = {\n+        first: {\n+          events: [\n+            {\n+              stream: 'arn:aws:dynamodb:region:account:table/foo/stream/1',\n+            },\n+          ],\n+        },\n+      };\n+\n+      awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.IamRoleLambdaExecution = null;\n+      awsCompileStreamEvents.serverless.service.provider.role = {\n+        'Fn::ImportValue': 'ImportedRoleArn',\n+      };\n+\n+      expect(() => { awsCompileStreamEvents.compileStreamEvents(); }).to.not.throw(Error);\n+      expect(awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.FirstEventSourceMappingDynamodbFoo.DependsOn).to.be.instanceof(Array);\n+      expect(awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.FirstEventSourceMappingDynamodbFoo.DependsOn.length).to.equal(0);\n+      expect(awsCompileStreamEvents.serverless.service.provider.compiledCloudFormationTemplate\n+        .Resources.IamRoleLambdaExecution).to.equal(null);\n+    });\n+\n     describe('when a DynamoDB stream ARN is given', () => {\n       it('should create event source mappings when a DynamoDB stream ARN is given', () => {\n         awsCompileStreamEvents.serverless.service.functions = {\n",
       "finalOutput": {
         "status": "completed",
@@ -2136,497 +901,13 @@
         "predSteps": [
           {
             "files": [
-              "docs/providers/aws/guide/testing.md",
-              "docs/providers/azure/guide/testing.md",
-              "docs/providers/openwhisk/guide/testing.md",
-              "lib/Serverless.test.js",
-              "lib/classes/CLI.test.js",
-              "lib/classes/Config.test.js",
-              "lib/classes/Error.test.js",
-              "lib/classes/PluginManager.test.js",
-              "lib/classes/Service.test.js",
-              "lib/classes/Utils.test.js",
-              "lib/classes/Variables.test.js",
-              "lib/classes/YamlParser.test.js",
-              "lib/plugins/aws/common/index.test.js",
-              "lib/plugins/aws/common/lib/artifacts.test.js",
-              "lib/plugins/aws/common/lib/cleanupTempDir.test.js",
-              "lib/plugins/aws/configCredentials/awsConfigCredentials.test.js",
-              "lib/plugins/aws/deploy/index.test.js",
-              "lib/plugins/aws/deploy/lib/cleanupS3Bucket.test.js",
-              "lib/plugins/aws/deploy/lib/createStack.test.js",
-              "lib/plugins/aws/deploy/lib/uploadArtifacts.test.js",
-              "lib/plugins/aws/deployFunction/index.test.js",
-              "lib/plugins/aws/deployList/index.test.js",
-              "lib/plugins/aws/info/display.test.js",
-              "lib/plugins/aws/info/getApiKeyValues.test.js",
-              "lib/plugins/aws/info/getStackInfo.test.js",
-              "lib/plugins/aws/info/index.test.js",
-              "lib/plugins/aws/invoke/index.test.js",
-              "lib/plugins/aws/invokeLocal/index.test.js",
-              "lib/plugins/aws/lib/monitorStack.test.js",
-              "lib/plugins/aws/lib/naming.test.js",
-              "lib/plugins/aws/lib/setBucketName.test.js",
-              "lib/plugins/aws/lib/updateStack.test.js",
-              "lib/plugins/aws/lib/validate.test.js",
-              "lib/plugins/aws/logs/index.test.js",
-              "lib/plugins/aws/metrics/awsMetrics.test.js",
-              "lib/plugins/aws/package/compile/events/alexaSkill/index.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/index.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/apiKeys.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/authorizers.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/cors.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/deployment.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/index.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/permissions.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/resources.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/restApi.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/validate.test.js",
-              "lib/plugins/aws/package/compile/events/cloudWatchEvent/index.test.js",
-              "lib/plugins/aws/package/compile/events/cloudWatchLog/index.test.js",
-              "lib/plugins/aws/package/compile/events/iot/index.test.js",
-              "lib/plugins/aws/package/compile/events/s3/index.test.js",
-              "lib/plugins/aws/package/compile/events/schedule/index.test.js",
-              "lib/plugins/aws/package/compile/events/sns/index.test.js",
-              "lib/plugins/aws/package/compile/events/stream/index.test.js",
-              "lib/plugins/aws/package/compile/functions/index.test.js",
-              "lib/plugins/aws/package/index.test.js",
-              "lib/plugins/aws/package/lib/generateArtifactDirectoryName.test.js",
-              "lib/plugins/aws/package/lib/generateCoreTemplate.test.js",
-              "lib/plugins/aws/package/lib/mergeCustomProviderResources.test.js",
-              "lib/plugins/aws/package/lib/mergeIamTemplates.test.js",
-              "lib/plugins/aws/package/lib/packageService.test.js",
-              "lib/plugins/aws/package/lib/saveCompiledTemplate.test.js",
-              "lib/plugins/aws/package/lib/saveServiceState.test.js",
-              "lib/plugins/aws/package/lib/zipService.test.js",
-              "lib/plugins/aws/provider/awsProvider.test.js",
-              "lib/plugins/aws/remove/index.test.js",
-              "lib/plugins/aws/remove/lib/bucket.test.js",
-              "lib/plugins/aws/remove/lib/stack.test.js",
-              "lib/plugins/aws/rollback/index.test.js",
-              "lib/plugins/aws/utils/findAndGroupDeployments.test.js",
-              "lib/plugins/aws/utils/getS3ObjectsFromStacks.test.js",
-              "lib/plugins/config/config.test.js",
-              "lib/plugins/create/create.test.js",
-              "lib/plugins/deploy/deploy.test.js",
-              "lib/plugins/info/info.test.js",
-              "lib/plugins/install/install.test.js",
-              "lib/plugins/invoke/invoke.test.js",
-              "lib/plugins/logs/logs.test.js",
-              "lib/plugins/metrics/metrics.test.js",
-              "lib/plugins/package/package.test.js",
-              "lib/plugins/remove/remove.test.js",
-              "lib/plugins/rollback/index.test.js",
-              "lib/plugins/slstats/slstats.test.js",
-              "scripts/integration-test-cleanup.js",
-              "tests/integration/aws/api-gateway/integration-lambda-proxy/api-keys/service/handler.js",
-              "tests/integration/aws/api-gateway/integration-lambda-proxy/api-keys/service/serverless.yml",
-              "tests/integration/aws/api-gateway/integration-lambda-proxy/api-keys/tests.js",
-              "tests/integration/aws/api-gateway/integration-lambda-proxy/cors/service/handler.js",
-              "tests/integration/aws/api-gateway/integration-lambda-proxy/cors/service/serverless.yml",
-              "tests/integration/aws/api-gateway/integration-lambda-proxy/cors/tests.js",
-              "tests/integration/aws/api-gateway/integration-lambda-proxy/custom-authorizers/service/handler.js",
-              "tests/integration/aws/api-gateway/integration-lambda-proxy/custom-authorizers/service/serverless.yml",
-              "tests/integration/aws/api-gateway/integration-lambda-proxy/custom-authorizers/tests.js",
-              "tests/integration/aws/api-gateway/integration-lambda-proxy/simple-api/service/handler.js",
-              "tests/integration/aws/api-gateway/integration-lambda-proxy/simple-api/service/serverless.yml",
-              "tests/integration/aws/api-gateway/integration-lambda-proxy/simple-api/tests.js",
-              "tests/integration/aws/api-gateway/integration-lambda/api-keys/service/handler.js",
-              "tests/integration/aws/api-gateway/integration-lambda/api-keys/service/serverless.yml",
-              "tests/integration/aws/api-gateway/integration-lambda/api-keys/tests.js",
-              "tests/integration/aws/api-gateway/integration-lambda/cors/service/handler.js",
-              "tests/integration/aws/api-gateway/integration-lambda/cors/service/serverless.yml",
-              "tests/integration/aws/api-gateway/integration-lambda/cors/tests.js",
-              "tests/integration/aws/api-gateway/integration-lambda/custom-authorizers/service/handler.js",
-              "tests/integration/aws/api-gateway/integration-lambda/custom-authorizers/service/serverless.yml",
-              "tests/integration/aws/api-gateway/integration-lambda/custom-authorizers/tests.js",
-              "tests/integration/aws/api-gateway/integration-lambda/simple-api/service/handler.js",
-              "tests/integration/aws/api-gateway/integration-lambda/simple-api/service/serverless.yml",
-              "tests/integration/aws/api-gateway/integration-lambda/simple-api/tests.js",
-              "tests/integration/aws/cloud-watch-event/multiple-events-multiple-functions/service/handler.js",
-              "tests/integration/aws/cloud-watch-event/multiple-events-multiple-functions/service/serverless.yml",
-              "tests/integration/aws/cloud-watch-event/multiple-events-multiple-functions/tests.js",
-              "tests/integration/aws/cloud-watch-event/multiple-events-single-function/service/handler.js",
-              "tests/integration/aws/cloud-watch-event/multiple-events-single-function/service/serverless.yml",
-              "tests/integration/aws/cloud-watch-event/multiple-events-single-function/tests.js",
-              "tests/integration/aws/cloud-watch-event/single-event-multiple-functions/service/handler.js",
-              "tests/integration/aws/cloud-watch-event/single-event-multiple-functions/service/serverless.yml",
-              "tests/integration/aws/cloud-watch-event/single-event-multiple-functions/tests.js",
-              "tests/integration/aws/cloud-watch-event/single-event-single-function/service/handler.js",
-              "tests/integration/aws/cloud-watch-event/single-event-single-function/service/serverless.yml",
-              "tests/integration/aws/cloud-watch-event/single-event-single-function/tests.js",
-              "tests/integration/aws/general/custom-resources/service/handler.js",
-              "tests/integration/aws/general/custom-resources/service/serverless.yml",
-              "tests/integration/aws/general/custom-resources/tests.js",
-              "tests/integration/aws/general/environment-variables/service/handler.js",
-              "tests/integration/aws/general/environment-variables/service/serverless.yml",
-              "tests/integration/aws/general/environment-variables/tests.js",
-              "tests/integration/aws/general/nested-handlers/service/deeply/nested/handler.js",
-              "tests/integration/aws/general/nested-handlers/service/serverless.yml",
-              "tests/integration/aws/general/nested-handlers/tests.js",
-              "tests/integration/aws/general/overwrite-resources/service/handler.js",
-              "tests/integration/aws/general/overwrite-resources/service/serverless.yml",
-              "tests/integration/aws/general/overwrite-resources/tests.js",
-              "tests/integration/aws/general/package/service/handler.js",
-              "tests/integration/aws/general/package/service/serverless.yml",
-              "tests/integration/aws/general/package/tests.js",
-              "tests/integration/aws/iot/multiple-rules-multiple-functions/service/handler.js",
-              "tests/integration/aws/iot/multiple-rules-multiple-functions/service/serverless.yml",
-              "tests/integration/aws/iot/multiple-rules-multiple-functions/tests.js",
-              "tests/integration/aws/iot/multiple-rules-single-function/service/handler.js",
-              "tests/integration/aws/iot/multiple-rules-single-function/service/serverless.yml",
-              "tests/integration/aws/iot/multiple-rules-single-function/tests.js",
-              "tests/integration/aws/iot/single-rule-multiple-functions/service/handler.js",
-              "tests/integration/aws/iot/single-rule-multiple-functions/service/serverless.yml",
-              "tests/integration/aws/iot/single-rule-multiple-functions/tests.js",
-              "tests/integration/aws/iot/single-rule-single-function/service/handler.js",
-              "tests/integration/aws/iot/single-rule-single-function/service/serverless.yml",
-              "tests/integration/aws/iot/single-rule-single-function/tests.js",
-              "tests/integration/aws/s3/multiple-events-multiple-functions-multiple-buckets/service/handler.js",
-              "tests/integration/aws/s3/multiple-events-multiple-functions-multiple-buckets/service/serverless.yml",
-              "tests/integration/aws/s3/multiple-events-multiple-functions-multiple-buckets/tests.js",
-              "tests/integration/aws/s3/multiple-events-multiple-functions-single-bucket/service/handler.js",
-              "tests/integration/aws/s3/multiple-events-multiple-functions-single-bucket/service/serverless.yml",
-              "tests/integration/aws/s3/multiple-events-multiple-functions-single-bucket/tests.js",
-              "tests/integration/aws/s3/multiple-events-single-function-single-bucket/service/handler.js",
-              "tests/integration/aws/s3/multiple-events-single-function-single-bucket/service/serverless.yml",
-              "tests/integration/aws/s3/multiple-events-single-function-single-bucket/tests.js",
-              "tests/integration/aws/s3/single-event-single-function-single-bucket/service/handler.js",
-              "tests/integration/aws/s3/single-event-single-function-single-bucket/service/serverless.yml",
-              "tests/integration/aws/s3/single-event-single-function-single-bucket/tests.js",
-              "tests/integration/aws/schedule/multiple-schedules-multiple-functions/service/handler.js",
-              "tests/integration/aws/schedule/multiple-schedules-multiple-functions/service/serverless.yml",
-              "tests/integration/aws/schedule/multiple-schedules-multiple-functions/tests.js",
-              "tests/integration/aws/sns/existing-topic/service/handler.js",
-              "tests/integration/aws/sns/existing-topic/service/serverless.yml",
-              "tests/integration/aws/sns/existing-topic/tests.js",
-              "tests/integration/aws/sns/multiple-topics-multiple-functions/service/handler.js",
-              "tests/integration/aws/sns/multiple-topics-multiple-functions/service/serverless.yml",
-              "tests/integration/aws/sns/multiple-topics-multiple-functions/tests.js",
-              "tests/integration/aws/sns/multiple-topics-single-function/service/handler.js",
-              "tests/integration/aws/sns/multiple-topics-single-function/service/serverless.yml",
-              "tests/integration/aws/sns/multiple-topics-single-function/tests.js",
-              "tests/integration/aws/sns/single-topic-multiple-functions/service/handler.js",
-              "tests/integration/aws/sns/single-topic-multiple-functions/service/serverless.yml",
-              "tests/integration/aws/sns/single-topic-multiple-functions/tests.js",
-              "tests/integration/aws/sns/single-topic-single-function/service/handler.js",
-              "tests/integration/aws/sns/single-topic-single-function/service/serverless.yml",
-              "tests/integration/aws/sns/single-topic-single-function/tests.js",
-              "tests/integration/general/custom-plugins/service/handler.js",
-              "tests/integration/general/custom-plugins/service/package.json",
-              "tests/integration/general/custom-plugins/service/serverless-plugin-greeter/main.js",
-              "tests/integration/general/custom-plugins/service/serverless-plugin-greeter/package.json",
-              "tests/integration/general/custom-plugins/service/serverless.yml",
-              "tests/integration/general/custom-plugins/tests.js",
-              "tests/integration/general/local-plugins/service/handler.js",
-              "tests/integration/general/local-plugins/service/serverless.yml",
-              "tests/integration/general/local-plugins/tests.js",
-              "tests/setupTests.js",
-              "tests/simple-suite/tests.js",
-              "tests/utils/index.js",
-              "tests/utils/index.test.js"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "docs/providers/aws/guide/resources.md",
-              "lib/plugins/aws/lib/naming.js",
-              "lib/plugins/aws/package/compile/events/stream/index.js",
               "lib/plugins/aws/package/compile/events/stream/index.test.js"
             ],
             "spans": {
-              "lib/plugins/aws/lib/naming.js": [
-                {
-                  "start": 220,
-                  "end": 220
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/stream/index.js": [
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 64,
-                  "end": 64
-                },
-                {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 168,
-                  "end": 168
-                }
-              ],
               "lib/plugins/aws/package/compile/events/stream/index.test.js": [
                 {
-                  "start": 40,
-                  "end": 40
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                },
-                {
-                  "start": 132,
-                  "end": 132
-                },
-                {
-                  "start": 146,
-                  "end": 146
-                },
-                {
-                  "start": 159,
-                  "end": 159
-                },
-                {
-                  "start": 169,
-                  "end": 169
-                },
-                {
-                  "start": 186,
-                  "end": 186
-                },
-                {
-                  "start": 188,
-                  "end": 188
-                },
-                {
-                  "start": 201,
-                  "end": 201
-                },
-                {
-                  "start": 217,
-                  "end": 217
-                },
-                {
-                  "start": 251,
-                  "end": 251
-                },
-                {
-                  "start": 253,
-                  "end": 253
-                },
-                {
-                  "start": 255,
-                  "end": 255
-                },
-                {
-                  "start": 259,
-                  "end": 259
-                },
-                {
-                  "start": 266,
-                  "end": 266
-                },
-                {
-                  "start": 273,
-                  "end": 273
-                },
-                {
-                  "start": 280,
-                  "end": 280
-                },
-                {
-                  "start": 286,
-                  "end": 286
-                },
-                {
-                  "start": 288,
-                  "end": 288
-                },
-                {
-                  "start": 290,
-                  "end": 290
-                },
-                {
-                  "start": 294,
-                  "end": 294
-                },
-                {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 305,
-                  "end": 305
-                },
-                {
-                  "start": 309,
-                  "end": 309
-                },
-                {
-                  "start": 315,
-                  "end": 315
-                },
-                {
-                  "start": 317,
-                  "end": 317
-                },
-                {
-                  "start": 319,
-                  "end": 319
-                },
-                {
-                  "start": 323,
-                  "end": 323
-                },
-                {
-                  "start": 330,
-                  "end": 330
-                },
-                {
-                  "start": 334,
-                  "end": 334
-                },
-                {
-                  "start": 338,
-                  "end": 338
-                },
-                {
-                  "start": 343,
-                  "end": 343
-                },
-                {
-                  "start": 355,
-                  "end": 355
-                },
-                {
-                  "start": 368,
-                  "end": 368
-                },
-                {
-                  "start": 397,
-                  "end": 397
-                },
-                {
-                  "start": 399,
-                  "end": 399
-                },
-                {
-                  "start": 479,
-                  "end": 479
-                },
-                {
-                  "start": 480,
-                  "end": 480
-                },
-                {
-                  "start": 508,
-                  "end": 508
-                },
-                {
-                  "start": 510,
-                  "end": 510
-                },
-                {
-                  "start": 512,
-                  "end": 512
-                },
-                {
-                  "start": 516,
-                  "end": 516
-                },
-                {
-                  "start": 523,
-                  "end": 523
-                },
-                {
-                  "start": 530,
-                  "end": 530
-                },
-                {
-                  "start": 537,
-                  "end": 537
-                },
-                {
-                  "start": 543,
-                  "end": 543
-                },
-                {
-                  "start": 545,
-                  "end": 545
-                },
-                {
-                  "start": 547,
-                  "end": 547
-                },
-                {
-                  "start": 551,
-                  "end": 551
-                },
-                {
-                  "start": 558,
-                  "end": 558
-                },
-                {
-                  "start": 562,
-                  "end": 562
-                },
-                {
-                  "start": 566,
-                  "end": 566
-                },
-                {
-                  "start": 572,
-                  "end": 572
-                },
-                {
-                  "start": 574,
-                  "end": 574
-                },
-                {
-                  "start": 576,
-                  "end": 576
-                },
-                {
-                  "start": 580,
-                  "end": 580
-                },
-                {
-                  "start": 587,
-                  "end": 587
-                },
-                {
-                  "start": 591,
-                  "end": 591
-                },
-                {
-                  "start": 595,
-                  "end": 595
-                },
-                {
-                  "start": 640,
-                  "end": 640
-                },
-                {
-                  "start": 656,
-                  "end": 656
-                },
-                {
-                  "start": 688,
-                  "end": 688
-                }
-              ],
-              "docs/providers/aws/guide/resources.md": [
-                {
-                  "start": 85,
-                  "end": 85
+                  "start": 1,
+                  "end": 360
                 }
               ]
             },
@@ -2634,23 +915,30 @@
           },
           {
             "files": [
-              "lib/plugins/aws/package/compile/events/stream/index.test.js"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "CHANGELOG.md"
             ],
-            "spans": {},
+            "spans": {
+              "CHANGELOG.md": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "lib/plugins/aws/package/compile/events/stream/index.js"
             ],
-            "spans": {},
+            "spans": {
+              "lib/plugins/aws/package/compile/events/stream/index.js": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -2664,340 +952,88 @@
             "files": [
               "lib/plugins/aws/package/lib/mergeCustomProviderResources.js"
             ],
-            "spans": {},
+            "spans": {
+              "lib/plugins/aws/package/lib/mergeCustomProviderResources.js": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "lib/plugins/aws/package/compile/functions/index.js"
             ],
+            "spans": {
+              "lib/plugins/aws/package/compile/functions/index.js": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "lib/plugins/aws/package/index.js"
+            ],
             "spans": {},
             "symbols": {}
           },
           {
             "files": [
-              "lib/plugins/aws/package/compile/events/alexaSkill/index.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/authorizers.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/index.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/integration.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/permissions.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/permissions.test.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/validate.js",
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/validate.test.js",
-              "lib/plugins/aws/package/compile/events/cloudWatchEvent/index.js",
-              "lib/plugins/aws/package/compile/events/cloudWatchLog/index.js",
-              "lib/plugins/aws/package/compile/events/iot/index.js",
-              "lib/plugins/aws/package/compile/events/schedule/index.js",
-              "lib/plugins/aws/package/compile/events/sns/index.js",
-              "lib/plugins/aws/package/compile/events/stream/index.js",
-              "lib/plugins/aws/package/compile/events/stream/index.test.js",
-              "lib/plugins/aws/package/compile/functions/index.js",
-              "lib/plugins/aws/package/compile/functions/index.test.js",
-              "lib/plugins/aws/package/lib/mergeIamTemplates.test.js"
+              "lib/plugins/aws/package/compile/events/stream/index.test.js"
             ],
             "spans": {
-              "lib/plugins/aws/package/lib/mergeIamTemplates.test.js": [
-                {
-                  "start": 381,
-                  "end": 381
-                }
-              ],
-              "lib/plugins/aws/package/compile/functions/index.test.js": [
-                {
-                  "start": 112,
-                  "end": 112
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 131,
-                  "end": 131
-                },
-                {
-                  "start": 148,
-                  "end": 148
-                },
-                {
-                  "start": 156,
-                  "end": 156
-                },
-                {
-                  "start": 176,
-                  "end": 176
-                },
-                {
-                  "start": 271,
-                  "end": 271
-                },
-                {
-                  "start": 321,
-                  "end": 321
-                },
-                {
-                  "start": 340,
-                  "end": 340
-                },
-                {
-                  "start": 383,
-                  "end": 383
-                },
-                {
-                  "start": 426,
-                  "end": 426
-                },
-                {
-                  "start": 472,
-                  "end": 472
-                },
-                {
-                  "start": 523,
-                  "end": 523
-                },
-                {
-                  "start": 572,
-                  "end": 572
-                },
-                {
-                  "start": 620,
-                  "end": 620
-                },
-                {
-                  "start": 671,
-                  "end": 671
-                },
-                {
-                  "start": 731,
-                  "end": 731
-                },
-                {
-                  "start": 774,
-                  "end": 774
-                },
-                {
-                  "start": 811,
-                  "end": 811
-                },
-                {
-                  "start": 852,
-                  "end": 852
-                },
-                {
-                  "start": 895,
-                  "end": 895
-                },
-                {
-                  "start": 1052,
-                  "end": 1052
-                }
-              ],
-              "lib/plugins/aws/package/compile/functions/index.js": [
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 61,
-                  "end": 61
-                },
-                {
-                  "start": 152,
-                  "end": 152
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/cloudWatchLog/index.js": [
-                {
-                  "start": 88,
-                  "end": 88
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/cloudWatchEvent/index.js": [
-                {
-                  "start": 90,
-                  "end": 90
-                },
-                {
-                  "start": 105,
-                  "end": 105
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/schedule/index.js": [
-                {
-                  "start": 103,
-                  "end": 103
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/iot/index.js": [
-                {
-                  "start": 68,
-                  "end": 68
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/alexaSkill/index.test.js": [
-                {
-                  "start": 60,
-                  "end": 60
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/sns/index.js": [
-                {
-                  "start": 68,
-                  "end": 68
-                }
-              ],
               "lib/plugins/aws/package/compile/events/stream/index.test.js": [
                 {
-                  "start": 140,
-                  "end": 140
-                },
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 159,
-                  "end": 159
-                },
-                {
-                  "start": 196,
-                  "end": 196
-                },
-                {
-                  "start": 213,
-                  "end": 213
-                },
-                {
-                  "start": 217,
-                  "end": 217
-                },
-                {
-                  "start": 349,
-                  "end": 349
-                },
-                {
-                  "start": 370,
-                  "end": 370
-                },
-                {
-                  "start": 409,
-                  "end": 409
-                },
-                {
-                  "start": 427,
-                  "end": 427
+                  "start": 360,
+                  "end": 760
                 }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "lib/plugins/aws/package/compile/events/stream/index.js"
+            ],
+            "spans": {
               "lib/plugins/aws/package/compile/events/stream/index.js": [
                 {
-                  "start": 121,
-                  "end": 121
-                },
-                {
-                  "start": 123,
-                  "end": 123
-                },
-                {
-                  "start": 125,
-                  "end": 125
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                },
-                {
-                  "start": 131,
-                  "end": 131
-                },
-                {
-                  "start": 132,
-                  "end": 132
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                },
-                {
-                  "start": 134,
-                  "end": 134
-                },
-                {
-                  "start": 135,
-                  "end": 135
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 138,
-                  "end": 138
+                  "start": 1,
+                  "end": 220
                 }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/validate.test.js": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "lib/plugins/aws/package/compile/events/stream/index.test.js"
+            ],
+            "spans": {
+              "lib/plugins/aws/package/compile/events/stream/index.test.js": [
                 {
-                  "start": 755,
-                  "end": 755
+                  "start": 100,
+                  "end": 320
                 }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/permissions.js": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "lib/plugins/aws/package/compile/functions/index.js"
+            ],
+            "spans": {
+              "lib/plugins/aws/package/compile/functions/index.js": [
                 {
-                  "start": 18,
-                  "end": 18
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/authorizers.test.js": [
-                {
-                  "start": 29,
-                  "end": 29
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/validate.js": [
-                {
-                  "start": 398,
-                  "end": 398
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/integration.js": [
-                {
-                  "start": 57,
-                  "end": 57
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/method/index.test.js": [
-                {
-                  "start": 392,
-                  "end": 392
-                },
-                {
-                  "start": 404,
-                  "end": 404
-                }
-              ],
-              "lib/plugins/aws/package/compile/events/apiGateway/lib/permissions.test.js": [
-                {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 92,
-                  "end": 92
+                  "start": 20,
+                  "end": 70
                 }
               ]
             },
@@ -3005,810 +1041,31 @@
           }
         ],
         "predFiles": [
-          "CHANGELOG.md",
-          "docs/providers/aws/guide/resources.md",
-          "docs/providers/aws/guide/testing.md",
-          "docs/providers/azure/guide/testing.md",
-          "docs/providers/openwhisk/guide/testing.md",
-          "lib/Serverless.test.js",
-          "lib/classes/CLI.test.js",
-          "lib/classes/Config.test.js",
-          "lib/classes/Error.test.js",
-          "lib/classes/PluginManager.test.js",
-          "lib/classes/Service.test.js",
-          "lib/classes/Utils.test.js",
-          "lib/classes/Variables.test.js",
-          "lib/classes/YamlParser.test.js",
-          "lib/plugins/aws/common/index.test.js",
-          "lib/plugins/aws/common/lib/artifacts.test.js",
-          "lib/plugins/aws/common/lib/cleanupTempDir.test.js",
-          "lib/plugins/aws/configCredentials/awsConfigCredentials.test.js",
-          "lib/plugins/aws/deploy/index.test.js",
-          "lib/plugins/aws/deploy/lib/cleanupS3Bucket.test.js",
-          "lib/plugins/aws/deploy/lib/createStack.test.js",
-          "lib/plugins/aws/deploy/lib/uploadArtifacts.test.js",
-          "lib/plugins/aws/deployFunction/index.test.js",
-          "lib/plugins/aws/deployList/index.test.js",
-          "lib/plugins/aws/info/display.test.js",
-          "lib/plugins/aws/info/getApiKeyValues.test.js",
-          "lib/plugins/aws/info/getStackInfo.test.js",
-          "lib/plugins/aws/info/index.test.js",
-          "lib/plugins/aws/invoke/index.test.js",
-          "lib/plugins/aws/invokeLocal/index.test.js",
-          "lib/plugins/aws/lib/monitorStack.test.js",
-          "lib/plugins/aws/lib/naming.js",
-          "lib/plugins/aws/lib/naming.test.js",
-          "lib/plugins/aws/lib/setBucketName.test.js",
-          "lib/plugins/aws/lib/updateStack.test.js",
-          "lib/plugins/aws/lib/validate.test.js",
-          "lib/plugins/aws/logs/index.test.js",
-          "lib/plugins/aws/metrics/awsMetrics.test.js",
-          "lib/plugins/aws/package/compile/events/alexaSkill/index.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/index.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/apiKeys.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/authorizers.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/cors.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/deployment.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/method/index.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/method/integration.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/permissions.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/permissions.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/resources.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/restApi.test.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/validate.js",
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/validate.test.js",
-          "lib/plugins/aws/package/compile/events/cloudWatchEvent/index.js",
-          "lib/plugins/aws/package/compile/events/cloudWatchEvent/index.test.js",
-          "lib/plugins/aws/package/compile/events/cloudWatchLog/index.js",
-          "lib/plugins/aws/package/compile/events/cloudWatchLog/index.test.js",
-          "lib/plugins/aws/package/compile/events/iot/index.js",
-          "lib/plugins/aws/package/compile/events/iot/index.test.js",
-          "lib/plugins/aws/package/compile/events/s3/index.test.js",
-          "lib/plugins/aws/package/compile/events/schedule/index.js",
-          "lib/plugins/aws/package/compile/events/schedule/index.test.js",
-          "lib/plugins/aws/package/compile/events/sns/index.js",
-          "lib/plugins/aws/package/compile/events/sns/index.test.js",
           "lib/plugins/aws/package/compile/events/stream/index.js",
           "lib/plugins/aws/package/compile/events/stream/index.test.js",
-          "lib/plugins/aws/package/compile/functions/index.js",
-          "lib/plugins/aws/package/compile/functions/index.test.js",
-          "lib/plugins/aws/package/index.test.js",
-          "lib/plugins/aws/package/lib/generateArtifactDirectoryName.test.js",
-          "lib/plugins/aws/package/lib/generateCoreTemplate.test.js",
-          "lib/plugins/aws/package/lib/mergeCustomProviderResources.js",
-          "lib/plugins/aws/package/lib/mergeCustomProviderResources.test.js",
-          "lib/plugins/aws/package/lib/mergeIamTemplates.test.js",
-          "lib/plugins/aws/package/lib/packageService.test.js",
-          "lib/plugins/aws/package/lib/saveCompiledTemplate.test.js",
-          "lib/plugins/aws/package/lib/saveServiceState.test.js",
-          "lib/plugins/aws/package/lib/zipService.test.js",
-          "lib/plugins/aws/provider/awsProvider.test.js",
-          "lib/plugins/aws/remove/index.test.js",
-          "lib/plugins/aws/remove/lib/bucket.test.js",
-          "lib/plugins/aws/remove/lib/stack.test.js",
-          "lib/plugins/aws/rollback/index.test.js",
-          "lib/plugins/aws/utils/findAndGroupDeployments.test.js",
-          "lib/plugins/aws/utils/getS3ObjectsFromStacks.test.js",
-          "lib/plugins/config/config.test.js",
-          "lib/plugins/create/create.test.js",
-          "lib/plugins/deploy/deploy.test.js",
-          "lib/plugins/info/info.test.js",
-          "lib/plugins/install/install.test.js",
-          "lib/plugins/invoke/invoke.test.js",
-          "lib/plugins/logs/logs.test.js",
-          "lib/plugins/metrics/metrics.test.js",
-          "lib/plugins/package/package.test.js",
-          "lib/plugins/remove/remove.test.js",
-          "lib/plugins/rollback/index.test.js",
-          "lib/plugins/slstats/slstats.test.js",
-          "package.json",
-          "scripts/integration-test-cleanup.js",
-          "tests/integration/aws/api-gateway/integration-lambda-proxy/api-keys/service/handler.js",
-          "tests/integration/aws/api-gateway/integration-lambda-proxy/api-keys/service/serverless.yml",
-          "tests/integration/aws/api-gateway/integration-lambda-proxy/api-keys/tests.js",
-          "tests/integration/aws/api-gateway/integration-lambda-proxy/cors/service/handler.js",
-          "tests/integration/aws/api-gateway/integration-lambda-proxy/cors/service/serverless.yml",
-          "tests/integration/aws/api-gateway/integration-lambda-proxy/cors/tests.js",
-          "tests/integration/aws/api-gateway/integration-lambda-proxy/custom-authorizers/service/handler.js",
-          "tests/integration/aws/api-gateway/integration-lambda-proxy/custom-authorizers/service/serverless.yml",
-          "tests/integration/aws/api-gateway/integration-lambda-proxy/custom-authorizers/tests.js",
-          "tests/integration/aws/api-gateway/integration-lambda-proxy/simple-api/service/handler.js",
-          "tests/integration/aws/api-gateway/integration-lambda-proxy/simple-api/service/serverless.yml",
-          "tests/integration/aws/api-gateway/integration-lambda-proxy/simple-api/tests.js",
-          "tests/integration/aws/api-gateway/integration-lambda/api-keys/service/handler.js",
-          "tests/integration/aws/api-gateway/integration-lambda/api-keys/service/serverless.yml",
-          "tests/integration/aws/api-gateway/integration-lambda/api-keys/tests.js",
-          "tests/integration/aws/api-gateway/integration-lambda/cors/service/handler.js",
-          "tests/integration/aws/api-gateway/integration-lambda/cors/service/serverless.yml",
-          "tests/integration/aws/api-gateway/integration-lambda/cors/tests.js",
-          "tests/integration/aws/api-gateway/integration-lambda/custom-authorizers/service/handler.js",
-          "tests/integration/aws/api-gateway/integration-lambda/custom-authorizers/service/serverless.yml",
-          "tests/integration/aws/api-gateway/integration-lambda/custom-authorizers/tests.js",
-          "tests/integration/aws/api-gateway/integration-lambda/simple-api/service/handler.js",
-          "tests/integration/aws/api-gateway/integration-lambda/simple-api/service/serverless.yml",
-          "tests/integration/aws/api-gateway/integration-lambda/simple-api/tests.js",
-          "tests/integration/aws/cloud-watch-event/multiple-events-multiple-functions/service/handler.js",
-          "tests/integration/aws/cloud-watch-event/multiple-events-multiple-functions/service/serverless.yml",
-          "tests/integration/aws/cloud-watch-event/multiple-events-multiple-functions/tests.js",
-          "tests/integration/aws/cloud-watch-event/multiple-events-single-function/service/handler.js",
-          "tests/integration/aws/cloud-watch-event/multiple-events-single-function/service/serverless.yml",
-          "tests/integration/aws/cloud-watch-event/multiple-events-single-function/tests.js",
-          "tests/integration/aws/cloud-watch-event/single-event-multiple-functions/service/handler.js",
-          "tests/integration/aws/cloud-watch-event/single-event-multiple-functions/service/serverless.yml",
-          "tests/integration/aws/cloud-watch-event/single-event-multiple-functions/tests.js",
-          "tests/integration/aws/cloud-watch-event/single-event-single-function/service/handler.js",
-          "tests/integration/aws/cloud-watch-event/single-event-single-function/service/serverless.yml",
-          "tests/integration/aws/cloud-watch-event/single-event-single-function/tests.js",
-          "tests/integration/aws/general/custom-resources/service/handler.js",
-          "tests/integration/aws/general/custom-resources/service/serverless.yml",
-          "tests/integration/aws/general/custom-resources/tests.js",
-          "tests/integration/aws/general/environment-variables/service/handler.js",
-          "tests/integration/aws/general/environment-variables/service/serverless.yml",
-          "tests/integration/aws/general/environment-variables/tests.js",
-          "tests/integration/aws/general/nested-handlers/service/deeply/nested/handler.js",
-          "tests/integration/aws/general/nested-handlers/service/serverless.yml",
-          "tests/integration/aws/general/nested-handlers/tests.js",
-          "tests/integration/aws/general/overwrite-resources/service/handler.js",
-          "tests/integration/aws/general/overwrite-resources/service/serverless.yml",
-          "tests/integration/aws/general/overwrite-resources/tests.js",
-          "tests/integration/aws/general/package/service/handler.js",
-          "tests/integration/aws/general/package/service/serverless.yml",
-          "tests/integration/aws/general/package/tests.js",
-          "tests/integration/aws/iot/multiple-rules-multiple-functions/service/handler.js",
-          "tests/integration/aws/iot/multiple-rules-multiple-functions/service/serverless.yml",
-          "tests/integration/aws/iot/multiple-rules-multiple-functions/tests.js",
-          "tests/integration/aws/iot/multiple-rules-single-function/service/handler.js",
-          "tests/integration/aws/iot/multiple-rules-single-function/service/serverless.yml",
-          "tests/integration/aws/iot/multiple-rules-single-function/tests.js",
-          "tests/integration/aws/iot/single-rule-multiple-functions/service/handler.js",
-          "tests/integration/aws/iot/single-rule-multiple-functions/service/serverless.yml",
-          "tests/integration/aws/iot/single-rule-multiple-functions/tests.js",
-          "tests/integration/aws/iot/single-rule-single-function/service/handler.js",
-          "tests/integration/aws/iot/single-rule-single-function/service/serverless.yml",
-          "tests/integration/aws/iot/single-rule-single-function/tests.js",
-          "tests/integration/aws/s3/multiple-events-multiple-functions-multiple-buckets/service/handler.js",
-          "tests/integration/aws/s3/multiple-events-multiple-functions-multiple-buckets/service/serverless.yml",
-          "tests/integration/aws/s3/multiple-events-multiple-functions-multiple-buckets/tests.js",
-          "tests/integration/aws/s3/multiple-events-multiple-functions-single-bucket/service/handler.js",
-          "tests/integration/aws/s3/multiple-events-multiple-functions-single-bucket/service/serverless.yml",
-          "tests/integration/aws/s3/multiple-events-multiple-functions-single-bucket/tests.js",
-          "tests/integration/aws/s3/multiple-events-single-function-single-bucket/service/handler.js",
-          "tests/integration/aws/s3/multiple-events-single-function-single-bucket/service/serverless.yml",
-          "tests/integration/aws/s3/multiple-events-single-function-single-bucket/tests.js",
-          "tests/integration/aws/s3/single-event-single-function-single-bucket/service/handler.js",
-          "tests/integration/aws/s3/single-event-single-function-single-bucket/service/serverless.yml",
-          "tests/integration/aws/s3/single-event-single-function-single-bucket/tests.js",
-          "tests/integration/aws/schedule/multiple-schedules-multiple-functions/service/handler.js",
-          "tests/integration/aws/schedule/multiple-schedules-multiple-functions/service/serverless.yml",
-          "tests/integration/aws/schedule/multiple-schedules-multiple-functions/tests.js",
-          "tests/integration/aws/sns/existing-topic/service/handler.js",
-          "tests/integration/aws/sns/existing-topic/service/serverless.yml",
-          "tests/integration/aws/sns/existing-topic/tests.js",
-          "tests/integration/aws/sns/multiple-topics-multiple-functions/service/handler.js",
-          "tests/integration/aws/sns/multiple-topics-multiple-functions/service/serverless.yml",
-          "tests/integration/aws/sns/multiple-topics-multiple-functions/tests.js",
-          "tests/integration/aws/sns/multiple-topics-single-function/service/handler.js",
-          "tests/integration/aws/sns/multiple-topics-single-function/service/serverless.yml",
-          "tests/integration/aws/sns/multiple-topics-single-function/tests.js",
-          "tests/integration/aws/sns/single-topic-multiple-functions/service/handler.js",
-          "tests/integration/aws/sns/single-topic-multiple-functions/service/serverless.yml",
-          "tests/integration/aws/sns/single-topic-multiple-functions/tests.js",
-          "tests/integration/aws/sns/single-topic-single-function/service/handler.js",
-          "tests/integration/aws/sns/single-topic-single-function/service/serverless.yml",
-          "tests/integration/aws/sns/single-topic-single-function/tests.js",
-          "tests/integration/general/custom-plugins/service/handler.js",
-          "tests/integration/general/custom-plugins/service/package.json",
-          "tests/integration/general/custom-plugins/service/serverless-plugin-greeter/main.js",
-          "tests/integration/general/custom-plugins/service/serverless-plugin-greeter/package.json",
-          "tests/integration/general/custom-plugins/service/serverless.yml",
-          "tests/integration/general/custom-plugins/tests.js",
-          "tests/integration/general/local-plugins/service/handler.js",
-          "tests/integration/general/local-plugins/service/serverless.yml",
-          "tests/integration/general/local-plugins/tests.js",
-          "tests/setupTests.js",
-          "tests/simple-suite/tests.js",
-          "tests/utils/index.js",
-          "tests/utils/index.test.js"
+          "lib/plugins/aws/package/compile/functions/index.js"
         ],
         "predSpans": {
-          "lib/plugins/aws/lib/naming.js": [
-            {
-              "start": 220,
-              "end": 220
-            }
-          ],
           "lib/plugins/aws/package/compile/events/stream/index.js": [
             {
               "start": 15,
               "end": 40
             },
             {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 64,
-              "end": 64
-            },
-            {
-              "start": 76,
-              "end": 76
-            },
-            {
-              "start": 121,
-              "end": 121
-            },
-            {
-              "start": 123,
-              "end": 123
-            },
-            {
-              "start": 125,
-              "end": 125
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 130,
-              "end": 130
-            },
-            {
-              "start": 131,
-              "end": 131
-            },
-            {
-              "start": 132,
-              "end": 132
-            },
-            {
-              "start": 133,
-              "end": 133
-            },
-            {
-              "start": 134,
-              "end": 134
-            },
-            {
-              "start": 135,
-              "end": 135
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 138,
-              "end": 138
-            },
-            {
-              "start": 143,
-              "end": 143
-            },
-            {
               "start": 148,
               "end": 153
-            },
-            {
-              "start": 168,
-              "end": 168
             }
           ],
           "lib/plugins/aws/package/compile/events/stream/index.test.js": [
             {
-              "start": 40,
-              "end": 40
-            },
-            {
-              "start": 91,
-              "end": 91
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 130,
-              "end": 130
-            },
-            {
-              "start": 132,
-              "end": 132
-            },
-            {
               "start": 139,
               "end": 291
-            },
-            {
-              "start": 140,
-              "end": 140
-            },
-            {
-              "start": 143,
-              "end": 143
-            },
-            {
-              "start": 146,
-              "end": 146
-            },
-            {
-              "start": 159,
-              "end": 159
-            },
-            {
-              "start": 169,
-              "end": 169
-            },
-            {
-              "start": 186,
-              "end": 186
-            },
-            {
-              "start": 188,
-              "end": 188
-            },
-            {
-              "start": 196,
-              "end": 196
-            },
-            {
-              "start": 201,
-              "end": 201
-            },
-            {
-              "start": 213,
-              "end": 213
-            },
-            {
-              "start": 217,
-              "end": 217
-            },
-            {
-              "start": 251,
-              "end": 251
-            },
-            {
-              "start": 253,
-              "end": 253
-            },
-            {
-              "start": 255,
-              "end": 255
-            },
-            {
-              "start": 259,
-              "end": 259
-            },
-            {
-              "start": 266,
-              "end": 266
-            },
-            {
-              "start": 273,
-              "end": 273
-            },
-            {
-              "start": 280,
-              "end": 280
-            },
-            {
-              "start": 286,
-              "end": 286
-            },
-            {
-              "start": 288,
-              "end": 288
-            },
-            {
-              "start": 290,
-              "end": 290
-            },
-            {
-              "start": 294,
-              "end": 294
-            },
-            {
-              "start": 301,
-              "end": 301
-            },
-            {
-              "start": 305,
-              "end": 305
-            },
-            {
-              "start": 309,
-              "end": 309
-            },
-            {
-              "start": 315,
-              "end": 315
-            },
-            {
-              "start": 317,
-              "end": 317
-            },
-            {
-              "start": 319,
-              "end": 319
-            },
-            {
-              "start": 323,
-              "end": 323
-            },
-            {
-              "start": 330,
-              "end": 330
-            },
-            {
-              "start": 334,
-              "end": 334
-            },
-            {
-              "start": 338,
-              "end": 338
-            },
-            {
-              "start": 343,
-              "end": 343
-            },
-            {
-              "start": 349,
-              "end": 349
-            },
-            {
-              "start": 355,
-              "end": 355
-            },
-            {
-              "start": 368,
-              "end": 368
-            },
-            {
-              "start": 370,
-              "end": 370
-            },
-            {
-              "start": 397,
-              "end": 397
-            },
-            {
-              "start": 399,
-              "end": 399
-            },
-            {
-              "start": 409,
-              "end": 409
-            },
-            {
-              "start": 427,
-              "end": 427
-            },
-            {
-              "start": 479,
-              "end": 479
-            },
-            {
-              "start": 480,
-              "end": 480
-            },
-            {
-              "start": 508,
-              "end": 508
-            },
-            {
-              "start": 510,
-              "end": 510
-            },
-            {
-              "start": 512,
-              "end": 512
-            },
-            {
-              "start": 516,
-              "end": 516
-            },
-            {
-              "start": 523,
-              "end": 523
-            },
-            {
-              "start": 530,
-              "end": 530
-            },
-            {
-              "start": 537,
-              "end": 537
-            },
-            {
-              "start": 543,
-              "end": 543
-            },
-            {
-              "start": 545,
-              "end": 545
-            },
-            {
-              "start": 547,
-              "end": 547
-            },
-            {
-              "start": 551,
-              "end": 551
-            },
-            {
-              "start": 558,
-              "end": 558
-            },
-            {
-              "start": 562,
-              "end": 562
-            },
-            {
-              "start": 566,
-              "end": 566
-            },
-            {
-              "start": 572,
-              "end": 572
-            },
-            {
-              "start": 574,
-              "end": 574
-            },
-            {
-              "start": 576,
-              "end": 576
-            },
-            {
-              "start": 580,
-              "end": 580
-            },
-            {
-              "start": 587,
-              "end": 587
-            },
-            {
-              "start": 591,
-              "end": 591
-            },
-            {
-              "start": 595,
-              "end": 595
-            },
-            {
-              "start": 640,
-              "end": 640
-            },
-            {
-              "start": 656,
-              "end": 656
-            },
-            {
-              "start": 688,
-              "end": 688
-            }
-          ],
-          "docs/providers/aws/guide/resources.md": [
-            {
-              "start": 85,
-              "end": 85
-            }
-          ],
-          "lib/plugins/aws/package/lib/mergeIamTemplates.test.js": [
-            {
-              "start": 381,
-              "end": 381
-            }
-          ],
-          "lib/plugins/aws/package/compile/functions/index.test.js": [
-            {
-              "start": 112,
-              "end": 112
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 131,
-              "end": 131
-            },
-            {
-              "start": 148,
-              "end": 148
-            },
-            {
-              "start": 156,
-              "end": 156
-            },
-            {
-              "start": 176,
-              "end": 176
-            },
-            {
-              "start": 271,
-              "end": 271
-            },
-            {
-              "start": 321,
-              "end": 321
-            },
-            {
-              "start": 340,
-              "end": 340
-            },
-            {
-              "start": 383,
-              "end": 383
-            },
-            {
-              "start": 426,
-              "end": 426
-            },
-            {
-              "start": 472,
-              "end": 472
-            },
-            {
-              "start": 523,
-              "end": 523
-            },
-            {
-              "start": 572,
-              "end": 572
-            },
-            {
-              "start": 620,
-              "end": 620
-            },
-            {
-              "start": 671,
-              "end": 671
-            },
-            {
-              "start": 731,
-              "end": 731
-            },
-            {
-              "start": 774,
-              "end": 774
-            },
-            {
-              "start": 811,
-              "end": 811
-            },
-            {
-              "start": 852,
-              "end": 852
-            },
-            {
-              "start": 895,
-              "end": 895
-            },
-            {
-              "start": 1052,
-              "end": 1052
             }
           ],
           "lib/plugins/aws/package/compile/functions/index.js": [
             {
               "start": 31,
               "end": 63
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 61,
-              "end": 61
-            },
-            {
-              "start": 152,
-              "end": 152
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/cloudWatchLog/index.js": [
-            {
-              "start": 88,
-              "end": 88
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/cloudWatchEvent/index.js": [
-            {
-              "start": 90,
-              "end": 90
-            },
-            {
-              "start": 105,
-              "end": 105
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/schedule/index.js": [
-            {
-              "start": 103,
-              "end": 103
-            },
-            {
-              "start": 118,
-              "end": 118
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/iot/index.js": [
-            {
-              "start": 68,
-              "end": 68
-            },
-            {
-              "start": 81,
-              "end": 81
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/alexaSkill/index.test.js": [
-            {
-              "start": 60,
-              "end": 60
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/sns/index.js": [
-            {
-              "start": 68,
-              "end": 68
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/validate.test.js": [
-            {
-              "start": 755,
-              "end": 755
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/permissions.js": [
-            {
-              "start": 18,
-              "end": 18
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/authorizers.test.js": [
-            {
-              "start": 29,
-              "end": 29
-            },
-            {
-              "start": 47,
-              "end": 47
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/validate.js": [
-            {
-              "start": 398,
-              "end": 398
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/method/integration.js": [
-            {
-              "start": 57,
-              "end": 57
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/method/index.test.js": [
-            {
-              "start": 392,
-              "end": 392
-            },
-            {
-              "start": 404,
-              "end": 404
-            }
-          ],
-          "lib/plugins/aws/package/compile/events/apiGateway/lib/permissions.test.js": [
-            {
-              "start": 76,
-              "end": 76
-            },
-            {
-              "start": 92,
-              "end": 92
             }
           ]
         },
@@ -3827,141 +1084,114 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.2,
+              "symbol": 0.5,
+              "span": 0.4211017740429505,
+              "line": 0.40892193308550184
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.5,
+              "span": 0.45089550971903913,
+              "line": 0.4200743494423792
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.6,
+              "symbol": 0.7,
+              "span": 0.7739580680757151,
+              "line": 0.7434944237918215
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.6,
+              "symbol": 0.7,
+              "span": 0.7739580680757151,
+              "line": 0.7434944237918215
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.6,
+              "symbol": 0.7,
+              "span": 0.7739580680757151,
+              "line": 0.7434944237918215
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.4,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.8,
+              "symbol": 0.85,
+              "span": 0.9200407435701553,
+              "line": 0.9107806691449815
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 0.6,
-              "symbol": 0.5,
-              "span": 0.07885578473813767,
-              "line": 0.04460966542750929
+              "file": 0.8,
+              "symbol": 0.85,
+              "span": 0.9200407435701553,
+              "line": 0.9107806691449815
             }
           },
           {
             "step": 8,
             "coverage": {
-              "file": 0.6,
-              "symbol": 0.5,
-              "span": 0.07885578473813767,
-              "line": 0.04460966542750929
+              "file": 0.8,
+              "symbol": 0.85,
+              "span": 0.9200407435701553,
+              "line": 0.9107806691449815
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 0.8,
-              "symbol": 0.5,
-              "span": 0.07885578473813767,
-              "line": 0.04460966542750929
+              "symbol": 0.85,
+              "span": 0.9200407435701553,
+              "line": 0.9107806691449815
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 0.8,
-              "symbol": 0.5,
-              "span": 0.07885578473813767,
-              "line": 0.04460966542750929
+              "symbol": 0.85,
+              "span": 0.9200407435701553,
+              "line": 0.9107806691449815
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 0.8,
-              "symbol": 0.5,
-              "span": 0.07885578473813767,
-              "line": 0.04460966542750929
-            }
-          },
-          {
-            "step": 12,
-            "coverage": {
-              "file": 0.8,
-              "symbol": 0.5,
-              "span": 0.07885578473813767,
-              "line": 0.04460966542750929
-            }
-          },
-          {
-            "step": 13,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.07885578473813767,
-              "line": 0.04460966542750929
-            }
-          },
-          {
-            "step": 14,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.18402512520159578,
-              "line": 0.12267657992565056
+              "symbol": 0.85,
+              "span": 0.9200407435701553,
+              "line": 0.9107806691449815
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.4857142857142857,
-          "symbol": 0.3071428571428571,
-          "span": 0.052572544169182826,
-          "line": 0.031067445565586826
+          "file": 0.6545454545454545,
+          "symbol": 0.7454545454545454,
+          "span": 0.7921923590372788,
+          "line": 0.7749239607975668
         },
         "redundancy": {
-          "file": 0.05990783410138245,
-          "symbol": 0.10416666666666663,
-          "span": 0.01655020228025006,
-          "line": 0.01449275362318836
+          "file": 0.36363636363636365,
+          "symbol": 0.35064935064935066,
+          "span": 0.2591961276723095,
+          "line": 0.22277451423407135
         }
       },
       "fixOverlap": {
@@ -3980,35 +1210,35 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/d049ac5b44be0566f9bb/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,200p' <contextbench-root>/.cache/agent-runtimes/codex/d049ac5b44be0566f9bb/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,200p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/d049ac5b44be0566f9bb/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/d049ac5b44be0566f9bb/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/d049ac5b44be0566f9bb/home/.agents/skills/superpowers/systematic-debugging/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: systematic-debugging\ndescription: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes\n---\n\n# Systematic Debugging\n\n## Overview\n\nRandom fixes waste time and create new bugs. Quick patches mask underlying issues.\n\n**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.\n\n**Violating the letter of this process is violating the spirit of debugging.**\n\n## The Iron Law\n\n```\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST\n```\n\nIf you haven't completed Phase 1, you cannot propose fixes.\n\n## When to Use\n\nUse for ANY technical issue:\n- Test failures\n- Bugs in production\n- Unexpected behavior\n- Performance problems\n- Build failures\n- Integration issues\n\n**Use this ESPECIALLY when:**\n- Under time pressure (emergencies make guessing tempting)\n- \"Just one quick fix\" seems obvious\n- You've already tried multiple fixes\n- Previous fix didn't work\n- You don't fully understand the issue\n\n**Don't skip when:**\n- Issue seems simple (simple bugs have root causes too)\n- You're in a hurry (rushing guarantees rework)\n- Manager wants it fixed NOW (systematic is faster than thrashing)\n\n## The Four Phases\n\nYou MUST complete each phase before proceeding to the next.\n\n### Phase 1: Root Cause Investigation\n\n**BEFORE attempting ANY fix:**\n\n1. **Read Error Messages Carefully**\n   - Don't skip past errors or warnings\n   - They often contain the exact solution\n   - Read stack traces completely\n   - Note line numbers, file paths, error codes\n\n2. **Reproduce Consistently**\n   - Can you trigger it reliably?\n   - What are the exact steps?\n   - Does it happen every time?\n   - If not reproducible \u2192 gather more data, don't guess\n\n3. **Check Recent Changes**\n   - What changed that could cause this?\n   - Git diff, recent commits\n   - New dependencies, config changes\n   - Environmental differences\n\n4. **Gather Evidence in Multi-Component Systems**\n\n   **WHEN system has multiple components (CI \u2192 build \u2192 signing, API \u2192 service \u2192 database):**\n\n   **BEFORE proposing fixes, add diagnostic instrumentation:**\n   ```\n   For EACH component boundary:\n     - Log what data enters component\n     - Log what data exits component\n     - Verify environment/config propagation\n     - Check state at each layer\n\n   Run once to gather evidence showing WHERE it breaks\n   THEN analyze evidence to identify failing component\n   THEN investigate that specific component\n   ```\n\n   **Example (multi-layer system):**\n   ```bash\n   # Layer 1: Workflow\n   echo \"=== Secrets available in workflow: ===\"\n   echo \"IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}\"\n\n   # Layer 2: Build script\n   echo \"=== Env vars in build script: ===\"\n   env | grep IDENTITY || echo \"IDENTITY not in environment\"\n\n   # Layer 3: Signing script\n   echo \"=== Keychain state: ===\"\n   security list-keychains\n   security find-identity -v\n\n   # Layer 4: Actual signing\n   codesign --sign \"$IDENTITY\" --verbose=4 \"$APP\"\n   ```\n\n   **This reveals:** Which layer fails (secrets \u2192 workflow \u2713, workflow \u2192 build \u2717)\n\n5. **Trace Data Flow**\n\n   **WHEN error is deep in call stack:**\n\n   See `root-cause-tracing.md` in this directory for the complete backward tracing technique.\n\n   **Quick version:**\n   - Where does bad value originate?\n   - What called this with bad value?\n   - Keep tracing up until you find the source\n   - Fix at source, not at symptom\n\n### Phase 2: Pattern Analysis\n\n**Find the pattern before fixing:**\n\n1. **Find Working Examples**\n   - Locate similar working code in same codebase\n   - What works that's similar to what's broken?\n\n2. **Compare Against References**\n   - If implementing pattern, read reference implementation COMPLETELY\n   - Don't skim - read every line\n   - Understand the pattern fully before applying\n\n3. **Identify Differences**\n   - What's different between working and broken?\n   - List every difference, however small\n   - Don't assume \"that can't matter\"\n\n4. **Understand Dependencies**\n   - What other components does this need?\n   - \u2026",
           "exitCode": 0
         },
@@ -4092,7 +1322,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/lib/plugins/aws/package/compile/events/stream/index.test.js",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/lib/plugins/aws/package/compile/events/stream/index.test.js",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -4132,7 +1371,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/lib/plugins/aws/package/compile/events/stream/index.test.js",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/lib/plugins/aws/package/compile/events/stream/index.test.js",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -4144,7 +1392,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/lib/plugins/aws/package/compile/events/stream/index.js",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/lib/plugins/aws/package/compile/events/stream/index.js",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

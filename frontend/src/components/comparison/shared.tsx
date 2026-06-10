@@ -1,9 +1,10 @@
 
-import { CircleHelp, Minus, TrendingDown, TrendingUp } from "lucide-react";
+import { CheckCircle2, CircleHelp, Minus, TrendingDown, TrendingUp } from "lucide-react";
 
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { deltaIndicatorClassName } from "@/components/comparison/format";
+import { formatPValue, formatSignificanceEffect, formatSignificanceInterval, type PairedSignificance } from "@/components/comparison/significance";
 import type { ComparisonVariant, DeltaTone, MetricDirection } from "@/components/comparison/types";
 import { cn } from "@/lib/utils";
 
@@ -48,6 +49,46 @@ export function DeltaIndicator({ label, delta, tone }: { label: string; delta: n
       <Icon className="h-4 w-4" />
       <span>{label}</span>
     </div>
+  );
+}
+
+export function SignificanceBadge({ stat }: { stat: PairedSignificance | null | undefined }) {
+  if (!stat) return null;
+
+  const toneClassName = stat.significant
+    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+    : "border-border bg-muted/30 text-muted-foreground/70";
+  const iconClassName = stat.significant
+    ? "text-emerald-700"
+    : "text-muted-foreground/70";
+  const label = stat.significant ? "Significant" : "Not significant";
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          role="button"
+          tabIndex={0}
+          className={cn(
+            "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+            toneClassName,
+          )}
+          aria-label={`${label} statistical result`}
+        >
+          <CheckCircle2 className={cn("h-3.5 w-3.5 stroke-[2.75]", iconClassName)} />
+          <span>{stat.significant ? "sig" : "n.s."}</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">
+        <div className="space-y-1">
+          <div className="font-medium">{label}</div>
+          <div>{stat.testName}, paired tasks n={stat.n}</div>
+          <div>{stat.effectLabel ?? "Effect"}: {formatSignificanceEffect(stat)}</div>
+          <div>95% CI: {formatSignificanceInterval(stat)}</div>
+          <div>p={formatPValue(stat.pValue)}, q={formatPValue(stat.qValue)} after FDR correction</div>
+        </div>
+      </TooltipContent>
+    </Tooltip>
   );
 }
 

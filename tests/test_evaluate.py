@@ -1,5 +1,6 @@
-# Fork note: Modified by Norbert Laszlo on 2026-04-17 from upstream ContextBench.
-# Summary of changes: add regression coverage for symbol-only context, effective file coverage, and EditLoc integrity.
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-09 from upstream ContextBench.
+# Summary of changes: add regression coverage for symbol-only context, effective file coverage, empty trajectories, and EditLoc integrity.
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 from contextbench import evaluate
 from contextbench.metrics.compute import compute_trajectory_metrics
+from contextbench.parsers.gold import Gold
 from contextbench.parsers.trajectory import Step
 
 
@@ -50,6 +52,80 @@ def test_main_uses_tree_sitter_install_hint(monkeypatch, capsys) -> None:
     assert "pip install tree-sitter-test-package" in err
 
 
+def test_gold_line_spans_includes_init_and_add_context() -> None:
+    gold = Gold(
+        {
+            "inst_id": "task-1",
+            "init_ctx": [{"file": "src/a.py", "start_line": 1, "end_line": 3}],
+            "add_ctx": [{"file": "src/a.py", "start_line": 5, "end_line": 7}],
+        }
+    )
+
+    assert gold.line_spans() == {"src/a.py": [(1, 3), (5, 7)]}
+    assert gold.line_spans_init() == {"src/a.py": [(1, 3)]}
+
+
+def test_aggregate_results_uses_macro_final_context_metrics() -> None:
+    rows = [
+        {
+            "final": {
+                "file": {"intersection": 1, "gold_size": 1, "pred_size": 1},
+                "symbol": {"intersection": 1, "gold_size": 1, "pred_size": 1},
+                "span": {"intersection": 1, "gold_size": 1, "pred_size": 1},
+                "line": {"intersection": 1, "gold_size": 1, "pred_size": 1},
+            },
+            "trajectory": {"auc_coverage": {}, "redundancy": {}},
+        },
+        {
+            "final": {
+                "file": {"intersection": 1, "gold_size": 1, "pred_size": 100},
+                "symbol": {"intersection": 1, "gold_size": 1, "pred_size": 100},
+                "span": {"intersection": 1, "gold_size": 1, "pred_size": 100},
+                "line": {"intersection": 1, "gold_size": 1, "pred_size": 100},
+            },
+            "trajectory": {"auc_coverage": {}, "redundancy": {}},
+        },
+    ]
+
+    aggregate = evaluate.aggregate_results(rows)
+
+    assert aggregate["final_file"]["aggregation"] == "macro"
+    assert aggregate["final_file"]["coverage"] == 1.0
+    assert aggregate["final_file"]["precision"] == pytest.approx(0.505)
+    assert aggregate["final_file"]["f1"] == pytest.approx((1.0 + (2 * 1.0 * 0.01 / 1.01)) / 2)
+    assert aggregate["pooled_final_file"]["precision"] == pytest.approx(2 / 101)
+
+
+def test_aggregate_results_excludes_missing_trajectory_levels() -> None:
+    aggregate = evaluate.aggregate_results(
+        [
+            {
+                "final": {
+                    "file": {"intersection": 1, "gold_size": 1, "pred_size": 1},
+                },
+                "trajectory": {
+                    "auc_coverage": {"line": 0.8},
+                    "redundancy": {"line": 0.2},
+                },
+            },
+            {
+                "final": {
+                    "file": {"intersection": 1, "gold_size": 1, "pred_size": 1},
+                },
+                "trajectory": {
+                    "auc_coverage": {"file": 0.9},
+                    "redundancy": {"file": 0.1},
+                },
+            },
+        ]
+    )
+
+    assert aggregate["traj_auc_line"] == pytest.approx(0.8)
+    assert aggregate["traj_redundancy_line"] == pytest.approx(0.2)
+    assert aggregate["traj_auc_file"] == pytest.approx(0.9)
+    assert aggregate["traj_redundancy_file"] == pytest.approx(0.1)
+
+
 class _DummyGold:
     def __init__(self, *, patch: str = "") -> None:
         self.repo_url = "https://github.com/example/repo.git"
@@ -64,6 +140,9 @@ class _DummyGold:
         return {"src/a.py": [(0, 10)]}
 
     def line_spans_init(self):
+        return {"src/a.py": [(1, 10)]}
+
+    def line_spans(self):
         return {"src/a.py": [(1, 10)]}
 
 
@@ -111,6 +190,43 @@ def test_evaluate_instance_fails_on_commit_mismatch() -> None:
     assert result["gold_commit"] == gold.commit
 
 
+def test_evaluate_instance_passes_workspace_isolation_to_checkout(tmp_path) -> None:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "src").mkdir()
+    (repo_dir / "src" / "a.py").write_text("print('ok')\n", encoding="utf-8")
+    gold = _DummyGold()
+    pred = {
+        "instance_id": "task-1",
+        "repo_url": gold.repo_url,
+        "commit": gold.commit,
+        "traj_data": {
+            "pred_steps": [],
+            "pred_files": ["src/a.py"],
+            "pred_spans": {},
+            "pred_symbols": {},
+        },
+    }
+
+    with patch("contextbench.evaluate.checkout", return_value=str(repo_dir)) as checkout:
+        evaluate.evaluate_instance(
+            "task-1",
+            gold,
+            pred,
+            "/tmp/cache",
+            workspace_key="suite-baseline-eval",
+            tmp_root="/tmp/worktrees",
+        )
+
+    checkout.assert_called_once_with(
+        gold.repo_url,
+        gold.commit,
+        "/tmp/cache",
+        workspace_key="suite-baseline-eval",
+        tmp_root="/tmp/worktrees",
+    )
+
+
 def test_evaluate_instance_fails_on_invalid_predicted_context_path(tmp_path) -> None:
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
@@ -136,7 +252,7 @@ def test_evaluate_instance_fails_on_invalid_predicted_context_path(tmp_path) -> 
     assert result["invalid_paths"] == ["../outside.py"]
 
 
-def test_evaluate_instance_drops_non_repo_context_paths_without_failing(tmp_path) -> None:
+def test_evaluate_instance_counts_missing_safe_final_paths_as_file_false_positives(tmp_path) -> None:
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
     (repo_dir / "src").mkdir()
@@ -158,11 +274,17 @@ def test_evaluate_instance_drops_non_repo_context_paths_without_failing(tmp_path
         result = evaluate.evaluate_instance("task-1", gold, pred, "/tmp")
 
     assert "error" not in result
-    assert result["final"]["file"]["pred_size"] == 1
+    assert result["final"]["file"]["pred_size"] == 2
     assert result["final"]["file"]["intersection"] == 1
+    assert result["predicted_context_path_diagnostics"] == {
+        "missing_final_paths": [".venv/bin"],
+        "missing_trajectory_paths": [".venv/bin"],
+        "missing_final_path_count": 1,
+        "missing_trajectory_path_count": 1,
+    }
 
 
-def test_evaluate_instance_fails_when_no_trajectory_steps(tmp_path) -> None:
+def test_evaluate_instance_scores_empty_trajectory_when_no_steps(tmp_path) -> None:
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
     (repo_dir / "src").mkdir()
@@ -183,7 +305,10 @@ def test_evaluate_instance_fails_when_no_trajectory_steps(tmp_path) -> None:
     with patch("contextbench.evaluate.checkout", return_value=str(repo_dir)):
         result = evaluate.evaluate_instance("task-1", gold, pred, "/tmp")
 
-    assert result["error"] == "no_trajectory_steps"
+    assert "error" not in result
+    assert result["empty_trajectory"] is True
+    assert result["num_steps"] == 0
+    assert result["trajectory"]["steps"] == []
 
 
 def test_evaluate_instance_accepts_symbol_only_final_context() -> None:

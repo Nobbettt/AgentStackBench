@@ -1,5 +1,6 @@
-# Fork note: Modified by Norbert Laszlo on 2026-04-17 from upstream ContextBench.
-# Summary of changes: cover safe repo-root path inference, trace guards, and effective file normalization for coding-agent parsers.
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-08 from upstream ContextBench.
+# Summary of changes: cover trace guards, read-span inference, and effective file normalization.
 
 from __future__ import annotations
 
@@ -132,11 +133,268 @@ def test_infer_retrieval_step_ignores_rg_file_lists_without_line_hits(tmp_path) 
     assert step is None
 
 
+def test_infer_retrieval_step_ignores_broad_rg_line_hits(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/zsh -lc 'rg -n \"target\" src tests -g \"*.py\"'"
+    output = "src/a.py:10: target\ntests/test_a.py:20: target\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step is None
+
+
+def test_infer_retrieval_step_keeps_single_file_search_file_only(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/zsh -lc 'rg -n \"target\" src/a.py'"
+    output = "src/a.py:10: target\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step == {"files": ["src/a.py"], "spans": {}, "symbols": {}}
+
+
 def test_infer_retrieval_step_ignores_find_file_lists(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     command = "/bin/zsh -lc 'find . -name \"*.py\"'"
     output = "./pkg/mod.py\n./tests/test_mod.py\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step is None
+
+
+def test_infer_retrieval_step_ignores_truncated_find_file_lists(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/zsh -lc \"find . -name '*.py' | sort | sed -n '1,80p'\""
+    output = "./pkg/mod.py\n./tests/test_mod.py\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step is None
+
+
+def test_infer_retrieval_step_from_plain_sed_range(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc \"sed -n '10,20p' src/a.py\""
+    output = "def first():\n    pass\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step == {
+        "files": ["src/a.py"],
+        "spans": {"src/a.py": [{"start": 10, "end": 20}]},
+        "symbols": {},
+    }
+
+
+def test_infer_retrieval_step_from_nl_pipe_sed_range(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc \"nl -ba src/a.py | sed -n '70,230p'\""
+    output = "    70\tdef first():\n   230\t    return value\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step == {
+        "files": ["src/a.py"],
+        "spans": {"src/a.py": [{"start": 70, "end": 230}]},
+        "symbols": {},
+    }
+
+
+def test_infer_retrieval_step_from_multiline_nl_pipe_sed_ranges(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = (
+        '/bin/bash -lc "nl -ba src/a.py | sed -n '
+        "'70,230p'\n"
+        "nl -ba tests/test_a.py | sed -n '45,70p'\""
+    )
+    output = "    70\tdef first():\n    45\tdef test_first():\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step == {
+        "files": ["src/a.py", "tests/test_a.py"],
+        "spans": {
+            "src/a.py": [{"start": 70, "end": 230}],
+            "tests/test_a.py": [{"start": 45, "end": 70}],
+        },
+        "symbols": {},
+    }
+
+
+def test_infer_retrieval_step_from_direct_head_range(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc 'head -n 50 src/a.py'"
+    output = "first line\nsecond line\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step == {
+        "files": ["src/a.py"],
+        "spans": {"src/a.py": [{"start": 1, "end": 50}]},
+        "symbols": {},
+    }
+
+
+def test_infer_retrieval_step_does_not_treat_head_after_file_list_as_read_span(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc 'rg --files src tests | head -n 50'"
+    output = "src/a.py\ntests/test_a.py\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step is None
+
+
+def test_infer_retrieval_step_keeps_plain_cat_file_only(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc 'cat pyproject.toml'"
+    output = "[project]\nname = 'demo'\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step == {"files": ["pyproject.toml"], "spans": {}, "symbols": {}}
+
+
+def test_infer_retrieval_step_ignores_empty_cat_output(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc 'cat pyproject.toml'"
+
+    step = infer_retrieval_step_from_command(command, output_text="", workspace_path=workspace)
+
+    assert step is None
+
+
+def test_infer_retrieval_step_ignores_redirected_cat_probe(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc 'cat .babelrc 2>/dev/null || echo no-babelrc'"
+
+    step = infer_retrieval_step_from_command(command, output_text="no-babelrc\n", workspace_path=workspace)
+
+    assert step is None
+
+
+def test_infer_retrieval_step_ignores_negative_head_count(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc 'head -n -5 src/a.py'"
+
+    step = infer_retrieval_step_from_command(command, output_text="content\n", workspace_path=workspace)
+
+    assert step is None
+
+
+def test_infer_retrieval_step_keeps_compact_head_count(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc 'head -5 src/a.py'"
+
+    step = infer_retrieval_step_from_command(command, output_text="line\n", workspace_path=workspace)
+
+    assert step == {
+        "files": ["src/a.py"],
+        "spans": {"src/a.py": [{"start": 1, "end": 5}]},
+        "symbols": {},
+    }
+
+
+def test_infer_retrieval_step_uses_numbered_output_for_nl_without_sed(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc 'nl -ba src/a.py'"
+    output = "     1\tdef first():\n    42\t    return value\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step == {
+        "files": ["src/a.py"],
+        "spans": {"src/a.py": [{"start": 1, "end": 42}]},
+        "symbols": {},
+    }
+
+
+def test_infer_retrieval_step_scores_followup_sed_range_without_grep_hit_span(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc \"rg -n 'target' src/a.py && sed -n '30,60p' src/a.py\""
+    output = "src/a.py:35: target\ncontext text\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step == {
+        "files": ["src/a.py"],
+        "spans": {"src/a.py": [{"start": 30, "end": 60}]},
+        "symbols": {},
+    }
+
+
+def test_infer_retrieval_step_handles_pipe_before_single_file_search(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc \"printf 'target' | rg target src/a.py\""
+
+    step = infer_retrieval_step_from_command(command, output_text="target\n", workspace_path=workspace)
+
+    assert step == {"files": ["src/a.py"], "spans": {}, "symbols": {}}
+
+
+def test_infer_retrieval_step_ignores_empty_single_file_search(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc 'rg missing src/a.py'"
+
+    step = infer_retrieval_step_from_command(command, output_text="", workspace_path=workspace)
+
+    assert step is None
+
+
+def test_infer_retrieval_step_ignores_quiet_single_file_search(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc 'rg -q target src/a.py'"
+
+    step = infer_retrieval_step_from_command(command, output_text="", workspace_path=workspace)
+
+    assert step is None
+
+
+def test_infer_retrieval_step_ignores_redirected_single_file_search(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc 'rg target src/a.py >/tmp/hits.txt'"
+
+    step = infer_retrieval_step_from_command(command, output_text="target\n", workspace_path=workspace)
+
+    assert step is None
+
+
+def test_infer_retrieval_step_ignores_file_listing_search(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc 'rg -l target src/a.py'"
+
+    step = infer_retrieval_step_from_command(command, output_text="src/a.py\n", workspace_path=workspace)
+
+    assert step is None
+
+
+def test_infer_retrieval_step_ignores_remote_sed_ranges(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc \"curl -L https://example.com/src/a.py | sed -n '1,50p'\""
+    output = "remote content\n"
 
     step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
 

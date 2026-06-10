@@ -49,12 +49,6 @@ def checkout(
     worktree_root = os.path.join(tmp_root, "contextbench_worktrees", repo_key)
     worktree_dir = _worktree_dir(worktree_root, commit, workspace_key)
 
-    # Fast path: worktree already exists at the right commit
-    if os.path.isdir(worktree_dir) and _verify_commit(worktree_dir, commit):
-        if sparse_list:
-            _ensure_sparse_checkout(worktree_dir, commit, sparse_list, verbose=verbose)
-        return worktree_dir
-
     lock_path = os.path.join(cache_dir, f"{repo_key}.lock")
     with _file_lock(lock_path):
         # Ensure base repo exists (only when not using an existing local clone)
@@ -92,6 +86,8 @@ def checkout(
 
         # If another process created it while we waited for the lock, reuse it.
         if os.path.isdir(worktree_dir) and _verify_commit(worktree_dir, commit):
+            if not _clean_existing_worktree(worktree_dir, commit, verbose=verbose):
+                return None
             if sparse_list:
                 _ensure_sparse_checkout(worktree_dir, commit, sparse_list, verbose=verbose)
             return worktree_dir
@@ -120,6 +116,8 @@ def checkout(
                 wt = _git(wt_args, cwd=base_dir, show_progress=verbose, timeout=1800)
             # If it failed because the directory/worktree exists, try to reuse.
             if os.path.isdir(worktree_dir) and _verify_commit(worktree_dir, commit):
+                if not _clean_existing_worktree(worktree_dir, commit, verbose=verbose):
+                    return None
                 if sparse_list:
                     _ensure_sparse_checkout(worktree_dir, commit, sparse_list, verbose=verbose)
                 return worktree_dir
@@ -186,6 +184,15 @@ def _clear_stale_worktree_registration(base_dir: str, worktree_dir: str, *, verb
         shutil.rmtree(worktree_dir, ignore_errors=True)
         recovered = True
     return recovered
+
+
+def _clean_existing_worktree(worktree_dir: str, commit: str, *, verbose: bool) -> bool:
+    """Reset a reused evaluator worktree to the exact benchmark commit."""
+    reset = _git(["reset", "--hard", commit], cwd=worktree_dir, show_progress=verbose, timeout=600)
+    if reset.returncode != 0:
+        return False
+    clean = _git(["clean", "-ffdx"], cwd=worktree_dir, show_progress=verbose, timeout=600)
+    return clean.returncode == 0
 
 def _normalize_url(url: str) -> str:
     """Convert git URL to directory-safe name."""

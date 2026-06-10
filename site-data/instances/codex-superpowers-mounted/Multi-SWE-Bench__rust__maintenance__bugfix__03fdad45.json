@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-19T05:48:30Z",
       "completedAt": "2026-05-19T05:51:33Z",
       "durationMs": 182179,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 686914,
@@ -25,50 +40,72 @@
         "total_tokens": 694535,
         "cache_read_input_tokens": 544768
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 22,
+        "readToolCalls": 0,
+        "editToolCalls": 1
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/CHANGELOG.md b/CHANGELOG.md\nindex 2335717..ac5d8d5 100644\n--- a/CHANGELOG.md\n+++ b/CHANGELOG.md\n@@ -1,3 +1,8 @@\n+# 1.6.1 (July 13, 2024)\n+\n+This release fixes a bug where `Bytes::is_unique` returns incorrect values when\n+the `Bytes` originates from a shared `BytesMut`. (#718)\n+\n # 1.6.0 (March 22, 2024)\n \n ### Added\ndiff --git a/Cargo.toml b/Cargo.toml\nindex 793582a..ef44fbb 100644\n--- a/Cargo.toml\n+++ b/Cargo.toml\n@@ -4,7 +4,7 @@ name = \"bytes\"\n # When releasing to crates.io:\n # - Update CHANGELOG.md.\n # - Create \"v1.x.y\" git tag.\n-version = \"1.6.0\"\n+version = \"1.6.1\"\n edition = \"2018\"\n rust-version = \"1.39\"\n license = \"MIT\"\ndiff --git a/src/bytes_mut.rs b/src/bytes_mut.rs\nindex f2a3dab..2829a7c 100644\n--- a/src/bytes_mut.rs\n+++ b/src/bytes_mut.rs\n@@ -1780,7 +1780,7 @@ static SHARED_VTABLE: Vtable = Vtable {\n     clone: shared_v_clone,\n     to_vec: shared_v_to_vec,\n     to_mut: shared_v_to_mut,\n-    is_unique: crate::bytes::shared_is_unique,\n+    is_unique: shared_v_is_unique,\n     drop: shared_v_drop,\n };\n \n@@ -1843,6 +1843,12 @@ unsafe fn shared_v_to_mut(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> B\n     }\n }\n \n+unsafe fn shared_v_is_unique(data: &AtomicPtr<()>) -> bool {\n+    let shared = data.load(Ordering::Acquire);\n+    let ref_count = (*shared.cast::<Shared>()).ref_count.load(Ordering::Relaxed);\n+    ref_count == 1\n+}\n+\n unsafe fn shared_v_drop(data: &mut AtomicPtr<()>, _ptr: *const u8, _len: usize) {\n     data.with_mut(|shared| {\n         release_shared(*shared as *mut Shared);\ndiff --git a/tests/test_bytes.rs b/tests/test_bytes.rs\nindex 017ce66..8e5d0ae 100644\n--- a/tests/test_bytes.rs\n+++ b/tests/test_bytes.rs\n@@ -1173,6 +1173,15 @@ fn shared_is_unique() {\n     assert!(c.is_unique());\n }\n \n+#[test]\n+fn mut_shared_is_unique() {\n+    let mut b = BytesMut::from(LONG);\n+    let c = b.split().freeze();\n+    assert!(!c.is_unique());\n+    drop(b);\n+    assert!(c.is_unique());\n+}\n+\n #[test]\n fn test_bytesmut_from_bytes_static() {\n     let bs = b\"1b23exfcz3r\";\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Patched the 1.6.1 merge contents into `master`. The functional fix is in [`src/bytes_mut.rs`](<worktree>/src/bytes_mut.rs:1779): `BytesMut`'s shared `Bytes` vtable now uses a dedicated `shared_v_is_unique` implementation that reads the `bytes_mut::Shared::ref_count` field instead of reusing `bytes::shared_is_unique` against a different layout. I also added the regression test [`mut_shared_is_unique`](<worktree>/tests/test_bytes.rs:1177), and applied the 1.6.1 release metadata updates in [`Cargo.toml`](<worktree>/Cargo.toml:7) and [`CHANGELOG.md`](<worktree>/CHANGELOG.md:1).\n\nVerification: `git diff --check` passed. Full Rust build/test verification could not run because `cargo` and `rustc` are not installed in this environment.",
         "notes": "Attempted `cargo test` and `cargo test mut_shared_is_unique -- --exact`, but both failed immediately because `cargo` is not installed (`/bin/bash: cargo: command not found`). `rustc` is also unavailable. Offline verification was limited to `git diff --check` and direct inspection of the patched code.",
         "retrievedContextFiles": [
-          "<worktree>/src/bytes_mut.rs",
-          "<worktree>/tests/test_bytes.rs",
-          "<worktree>/Cargo.toml",
-          "<worktree>/CHANGELOG.md"
+          "src/bytes_mut.rs",
+          "tests/test_bytes.rs",
+          "Cargo.toml",
+          "CHANGELOG.md"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/src/bytes_mut.rs",
+            "file": "src/bytes_mut.rs",
             "start": 1779,
             "end": 1854
           },
           {
-            "file": "<worktree>/tests/test_bytes.rs",
+            "file": "tests/test_bytes.rs",
             "start": 1166,
             "end": 1183
           },
           {
-            "file": "<worktree>/Cargo.toml",
+            "file": "Cargo.toml",
             "start": 1,
             "end": 8
           },
           {
-            "file": "<worktree>/CHANGELOG.md",
+            "file": "CHANGELOG.md",
             "start": 1,
             "end": 6
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/src/bytes_mut.rs",
+            "file": "src/bytes_mut.rs",
             "name": "SHARED_VTABLE"
           },
           {
-            "file": "<worktree>/src/bytes_mut.rs",
+            "file": "src/bytes_mut.rs",
             "name": "shared_v_is_unique"
           },
           {
-            "file": "<worktree>/tests/test_bytes.rs",
+            "file": "tests/test_bytes.rs",
             "name": "mut_shared_is_unique"
           }
         ]
@@ -77,739 +114,13 @@
         "predSteps": [
           {
             "files": [
-              "src/bytes.rs",
-              "src/bytes_mut.rs",
-              "tests/test_bytes.rs"
+              "src/bytes.rs"
             ],
             "spans": {
-              "tests/test_bytes.rs": [
-                {
-                  "start": 327,
-                  "end": 327
-                },
-                {
-                  "start": 559,
-                  "end": 559
-                },
-                {
-                  "start": 562,
-                  "end": 562
-                },
-                {
-                  "start": 691,
-                  "end": 691
-                },
-                {
-                  "start": 1002,
-                  "end": 1002
-                },
-                {
-                  "start": 1014,
-                  "end": 1014
-                },
-                {
-                  "start": 1050,
-                  "end": 1050
-                },
-                {
-                  "start": 1054,
-                  "end": 1054
-                },
-                {
-                  "start": 1144,
-                  "end": 1144
-                },
-                {
-                  "start": 1146,
-                  "end": 1146
-                },
-                {
-                  "start": 1150,
-                  "end": 1150
-                },
-                {
-                  "start": 1153,
-                  "end": 1153
-                },
-                {
-                  "start": 1157,
-                  "end": 1157
-                },
-                {
-                  "start": 1161,
-                  "end": 1161
-                },
-                {
-                  "start": 1163,
-                  "end": 1163
-                },
-                {
-                  "start": 1167,
-                  "end": 1167
-                },
-                {
-                  "start": 1171,
-                  "end": 1171
-                },
-                {
-                  "start": 1173,
-                  "end": 1173
-                },
-                {
-                  "start": 1199,
-                  "end": 1199
-                },
-                {
-                  "start": 1209,
-                  "end": 1209
-                },
-                {
-                  "start": 1214,
-                  "end": 1214
-                }
-              ],
               "src/bytes.rs": [
                 {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 73,
-                  "end": 73
-                },
-                {
-                  "start": 78,
-                  "end": 78
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 229,
-                  "end": 229
-                },
-                {
-                  "start": 231,
-                  "end": 231
-                },
-                {
-                  "start": 233,
-                  "end": 233
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 527,
-                  "end": 527
-                },
-                {
-                  "start": 862,
-                  "end": 862
-                },
-                {
-                  "start": 868,
-                  "end": 868
-                },
-                {
-                  "start": 872,
-                  "end": 872
-                },
-                {
-                  "start": 878,
-                  "end": 878
-                },
-                {
-                  "start": 967,
-                  "end": 967
-                },
-                {
-                  "start": 986,
-                  "end": 986
-                },
-                {
-                  "start": 1000,
-                  "end": 1000
-                },
-                {
-                  "start": 1008,
-                  "end": 1008
-                },
-                {
-                  "start": 1013,
-                  "end": 1013
-                },
-                {
-                  "start": 1014,
-                  "end": 1014
-                },
-                {
-                  "start": 1017,
-                  "end": 1017
-                },
-                {
-                  "start": 1020,
-                  "end": 1020
-                },
-                {
-                  "start": 1021,
-                  "end": 1021
-                },
-                {
-                  "start": 1031,
-                  "end": 1031
-                },
-                {
-                  "start": 1032,
-                  "end": 1032
-                },
-                {
-                  "start": 1035,
-                  "end": 1035
-                },
-                {
-                  "start": 1040,
-                  "end": 1040
-                },
-                {
-                  "start": 1057,
-                  "end": 1057
-                },
-                {
-                  "start": 1058,
-                  "end": 1058
-                },
-                {
-                  "start": 1061,
-                  "end": 1061
-                },
-                {
-                  "start": 1069,
-                  "end": 1069
-                },
-                {
-                  "start": 1081,
-                  "end": 1081
-                },
-                {
-                  "start": 1082,
-                  "end": 1082
-                },
-                {
-                  "start": 1087,
-                  "end": 1087
-                },
-                {
-                  "start": 1088,
-                  "end": 1088
-                },
-                {
-                  "start": 1093,
-                  "end": 1093
-                },
-                {
-                  "start": 1094,
-                  "end": 1094
-                },
-                {
-                  "start": 1095,
-                  "end": 1095
-                },
-                {
-                  "start": 1098,
-                  "end": 1098
-                },
-                {
-                  "start": 1101,
-                  "end": 1101
-                },
-                {
-                  "start": 1108,
-                  "end": 1108
-                },
-                {
-                  "start": 1109,
-                  "end": 1109
-                },
-                {
-                  "start": 1112,
-                  "end": 1112
-                },
-                {
-                  "start": 1115,
-                  "end": 1115
-                },
-                {
                   "start": 1120,
-                  "end": 1120
-                },
-                {
-                  "start": 1124,
-                  "end": 1124
-                },
-                {
-                  "start": 1128,
-                  "end": 1128
-                },
-                {
-                  "start": 1129,
-                  "end": 1129
-                },
-                {
-                  "start": 1130,
-                  "end": 1130
-                },
-                {
-                  "start": 1133,
-                  "end": 1133
-                },
-                {
-                  "start": 1137,
-                  "end": 1137
-                },
-                {
-                  "start": 1142,
-                  "end": 1142
-                },
-                {
-                  "start": 1143,
-                  "end": 1143
-                },
-                {
-                  "start": 1144,
-                  "end": 1144
-                },
-                {
-                  "start": 1147,
-                  "end": 1147
-                },
-                {
-                  "start": 1176,
-                  "end": 1176
-                },
-                {
-                  "start": 1181,
-                  "end": 1181
-                },
-                {
-                  "start": 1182,
-                  "end": 1182
-                },
-                {
-                  "start": 1183,
-                  "end": 1183
-                },
-                {
-                  "start": 1184,
-                  "end": 1184
-                },
-                {
-                  "start": 1185,
-                  "end": 1185
-                },
-                {
-                  "start": 1192,
-                  "end": 1192
-                },
-                {
-                  "start": 1193,
-                  "end": 1193
-                },
-                {
-                  "start": 1194,
-                  "end": 1194
-                },
-                {
-                  "start": 1197,
-                  "end": 1197
-                },
-                {
-                  "start": 1201,
-                  "end": 1201
-                },
-                {
-                  "start": 1203,
-                  "end": 1203
-                },
-                {
-                  "start": 1204,
-                  "end": 1204
-                },
-                {
-                  "start": 1210,
-                  "end": 1210
-                },
-                {
-                  "start": 1211,
-                  "end": 1211
-                },
-                {
-                  "start": 1212,
-                  "end": 1212
-                },
-                {
-                  "start": 1213,
-                  "end": 1213
-                },
-                {
-                  "start": 1221,
-                  "end": 1221
-                },
-                {
-                  "start": 1226,
-                  "end": 1226
-                },
-                {
-                  "start": 1227,
-                  "end": 1227
-                },
-                {
-                  "start": 1230,
-                  "end": 1230
-                },
-                {
-                  "start": 1236,
-                  "end": 1236
-                },
-                {
-                  "start": 1242,
-                  "end": 1242
-                },
-                {
-                  "start": 1243,
-                  "end": 1243
-                },
-                {
-                  "start": 1245,
-                  "end": 1245
-                },
-                {
-                  "start": 1246,
-                  "end": 1246
-                },
-                {
-                  "start": 1247,
-                  "end": 1247
-                },
-                {
-                  "start": 1248,
-                  "end": 1248
-                },
-                {
-                  "start": 1260,
-                  "end": 1260
-                },
-                {
-                  "start": 1265,
-                  "end": 1265
-                },
-                {
-                  "start": 1266,
-                  "end": 1266
-                },
-                {
-                  "start": 1269,
-                  "end": 1269
-                },
-                {
-                  "start": 1270,
-                  "end": 1270
-                },
-                {
-                  "start": 1271,
-                  "end": 1271
-                },
-                {
-                  "start": 1275,
-                  "end": 1275
-                },
-                {
-                  "start": 1276,
-                  "end": 1276
-                },
-                {
-                  "start": 1277,
-                  "end": 1277
-                },
-                {
-                  "start": 1281,
-                  "end": 1281
-                },
-                {
-                  "start": 1282,
-                  "end": 1282
-                },
-                {
-                  "start": 1291,
-                  "end": 1291
-                },
-                {
-                  "start": 1315,
-                  "end": 1315
-                },
-                {
-                  "start": 1324,
-                  "end": 1324
-                },
-                {
-                  "start": 1329,
-                  "end": 1329
-                },
-                {
-                  "start": 1338,
-                  "end": 1338
-                },
-                {
-                  "start": 1342,
-                  "end": 1342
-                },
-                {
-                  "start": 1350,
-                  "end": 1350
-                },
-                {
-                  "start": 1358,
-                  "end": 1358
-                },
-                {
-                  "start": 1359,
-                  "end": 1359
-                },
-                {
-                  "start": 1361,
-                  "end": 1361
-                },
-                {
-                  "start": 1368,
-                  "end": 1368
-                }
-              ],
-              "src/bytes_mut.rs": [
-                {
-                  "start": 24,
-                  "end": 24
-                },
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 68,
-                  "end": 68
-                },
-                {
-                  "start": 85,
-                  "end": 85
-                },
-                {
-                  "start": 225,
-                  "end": 225
-                },
-                {
-                  "start": 671,
-                  "end": 671
-                },
-                {
-                  "start": 673,
-                  "end": 673
-                },
-                {
-                  "start": 686,
-                  "end": 686
-                },
-                {
-                  "start": 690,
-                  "end": 690
-                },
-                {
-                  "start": 760,
-                  "end": 760
-                },
-                {
-                  "start": 771,
-                  "end": 771
-                },
-                {
-                  "start": 773,
-                  "end": 773
-                },
-                {
-                  "start": 979,
-                  "end": 979
-                },
-                {
-                  "start": 1016,
-                  "end": 1016
-                },
-                {
-                  "start": 1034,
-                  "end": 1034
-                },
-                {
-                  "start": 1040,
-                  "end": 1040
-                },
-                {
-                  "start": 1044,
-                  "end": 1044
-                },
-                {
-                  "start": 1046,
-                  "end": 1046
-                },
-                {
-                  "start": 1058,
-                  "end": 1058
-                },
-                {
-                  "start": 1061,
-                  "end": 1061
-                },
-                {
-                  "start": 1133,
-                  "end": 1133
-                },
-                {
-                  "start": 1427,
-                  "end": 1427
-                },
-                {
-                  "start": 1435,
-                  "end": 1435
-                },
-                {
-                  "start": 1468,
-                  "end": 1468
-                },
-                {
-                  "start": 1474,
-                  "end": 1474
-                },
-                {
-                  "start": 1724,
-                  "end": 1724
-                },
-                {
-                  "start": 1726,
-                  "end": 1726
-                },
-                {
-                  "start": 1727,
-                  "end": 1727
-                },
-                {
-                  "start": 1729,
-                  "end": 1729
-                },
-                {
-                  "start": 1780,
-                  "end": 1780
-                },
-                {
-                  "start": 1781,
-                  "end": 1781
-                },
-                {
-                  "start": 1782,
-                  "end": 1782
-                },
-                {
-                  "start": 1783,
-                  "end": 1783
-                },
-                {
-                  "start": 1784,
-                  "end": 1784
-                },
-                {
-                  "start": 1787,
-                  "end": 1787
-                },
-                {
-                  "start": 1788,
-                  "end": 1788
-                },
-                {
-                  "start": 1789,
-                  "end": 1789
-                },
-                {
-                  "start": 1791,
-                  "end": 1791
-                },
-                {
-                  "start": 1795,
-                  "end": 1795
-                },
-                {
-                  "start": 1796,
-                  "end": 1796
-                },
-                {
-                  "start": 1798,
-                  "end": 1798
-                },
-                {
-                  "start": 1799,
-                  "end": 1799
-                },
-                {
-                  "start": 1801,
-                  "end": 1801
-                },
-                {
-                  "start": 1802,
-                  "end": 1802
-                },
-                {
-                  "start": 1803,
-                  "end": 1803
-                },
-                {
-                  "start": 1812,
-                  "end": 1812
-                },
-                {
-                  "start": 1817,
-                  "end": 1817
-                },
-                {
-                  "start": 1818,
-                  "end": 1818
-                },
-                {
-                  "start": 1820,
-                  "end": 1820
-                },
-                {
-                  "start": 1821,
-                  "end": 1821
-                },
-                {
-                  "start": 1825,
-                  "end": 1825
-                },
-                {
-                  "start": 1837,
-                  "end": 1837
-                },
-                {
-                  "start": 1841,
-                  "end": 1841
-                },
-                {
-                  "start": 1846,
-                  "end": 1846
-                },
-                {
-                  "start": 1847,
-                  "end": 1847
-                },
-                {
-                  "start": 1848,
-                  "end": 1848
+                  "end": 1295
                 }
               ]
             },
@@ -817,801 +128,150 @@
           },
           {
             "files": [
-              "src/bytes.rs"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "src/bytes_mut.rs"
             ],
-            "spans": {},
+            "spans": {
+              "src/bytes_mut.rs": [
+                {
+                  "start": 1450,
+                  "end": 1855
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/test_bytes.rs"
             ],
-            "spans": {},
+            "spans": {
+              "tests/test_bytes.rs": [
+                {
+                  "start": 1140,
+                  "end": 1235
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "Cargo.toml"
             ],
-            "spans": {},
+            "spans": {
+              "Cargo.toml": [
+                {
+                  "start": 1,
+                  "end": 20
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "CHANGELOG.md"
             ],
-            "spans": {},
+            "spans": {
+              "CHANGELOG.md": [
+                {
+                  "start": 1,
+                  "end": 20
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_bytes.rs"
+            ],
+            "spans": {
+              "tests/test_bytes.rs": [
+                {
+                  "start": 1160,
+                  "end": 1195
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/bytes_mut.rs"
+            ],
+            "spans": {
+              "src/bytes_mut.rs": [
+                {
+                  "start": 1778,
+                  "end": 1858
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_bytes.rs"
+            ],
+            "spans": {
+              "tests/test_bytes.rs": [
+                {
+                  "start": 1166,
+                  "end": 1192
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "CHANGELOG.md",
+              "Cargo.toml"
+            ],
+            "spans": {
+              "Cargo.toml": [
+                {
+                  "start": 1,
+                  "end": 12
+                }
+              ],
+              "CHANGELOG.md": [
+                {
+                  "start": 1,
+                  "end": 10
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "<worktree>/CHANGELOG.md",
-          "<worktree>/Cargo.toml",
-          "<worktree>/src/bytes_mut.rs",
-          "<worktree>/tests/test_bytes.rs",
           "CHANGELOG.md",
           "Cargo.toml",
-          "src/bytes.rs",
           "src/bytes_mut.rs",
           "tests/test_bytes.rs"
         ],
         "predSpans": {
-          "tests/test_bytes.rs": [
-            {
-              "start": 327,
-              "end": 327
-            },
-            {
-              "start": 559,
-              "end": 559
-            },
-            {
-              "start": 562,
-              "end": 562
-            },
-            {
-              "start": 691,
-              "end": 691
-            },
-            {
-              "start": 1002,
-              "end": 1002
-            },
-            {
-              "start": 1014,
-              "end": 1014
-            },
-            {
-              "start": 1050,
-              "end": 1050
-            },
-            {
-              "start": 1054,
-              "end": 1054
-            },
-            {
-              "start": 1144,
-              "end": 1144
-            },
-            {
-              "start": 1146,
-              "end": 1146
-            },
-            {
-              "start": 1150,
-              "end": 1150
-            },
-            {
-              "start": 1153,
-              "end": 1153
-            },
-            {
-              "start": 1157,
-              "end": 1157
-            },
-            {
-              "start": 1161,
-              "end": 1161
-            },
-            {
-              "start": 1163,
-              "end": 1163
-            },
-            {
-              "start": 1167,
-              "end": 1167
-            },
-            {
-              "start": 1171,
-              "end": 1171
-            },
-            {
-              "start": 1173,
-              "end": 1173
-            },
-            {
-              "start": 1199,
-              "end": 1199
-            },
-            {
-              "start": 1209,
-              "end": 1209
-            },
-            {
-              "start": 1214,
-              "end": 1214
-            }
-          ],
-          "src/bytes.rs": [
-            {
-              "start": 58,
-              "end": 58
-            },
-            {
-              "start": 73,
-              "end": 73
-            },
-            {
-              "start": 78,
-              "end": 78
-            },
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 229,
-              "end": 229
-            },
-            {
-              "start": 231,
-              "end": 231
-            },
-            {
-              "start": 233,
-              "end": 233
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 527,
-              "end": 527
-            },
-            {
-              "start": 862,
-              "end": 862
-            },
-            {
-              "start": 868,
-              "end": 868
-            },
-            {
-              "start": 872,
-              "end": 872
-            },
-            {
-              "start": 878,
-              "end": 878
-            },
-            {
-              "start": 967,
-              "end": 967
-            },
-            {
-              "start": 986,
-              "end": 986
-            },
-            {
-              "start": 1000,
-              "end": 1000
-            },
-            {
-              "start": 1008,
-              "end": 1008
-            },
-            {
-              "start": 1013,
-              "end": 1013
-            },
-            {
-              "start": 1014,
-              "end": 1014
-            },
-            {
-              "start": 1017,
-              "end": 1017
-            },
-            {
-              "start": 1020,
-              "end": 1020
-            },
-            {
-              "start": 1021,
-              "end": 1021
-            },
-            {
-              "start": 1031,
-              "end": 1031
-            },
-            {
-              "start": 1032,
-              "end": 1032
-            },
-            {
-              "start": 1035,
-              "end": 1035
-            },
-            {
-              "start": 1040,
-              "end": 1040
-            },
-            {
-              "start": 1057,
-              "end": 1057
-            },
-            {
-              "start": 1058,
-              "end": 1058
-            },
-            {
-              "start": 1061,
-              "end": 1061
-            },
-            {
-              "start": 1069,
-              "end": 1069
-            },
-            {
-              "start": 1081,
-              "end": 1081
-            },
-            {
-              "start": 1082,
-              "end": 1082
-            },
-            {
-              "start": 1087,
-              "end": 1087
-            },
-            {
-              "start": 1088,
-              "end": 1088
-            },
-            {
-              "start": 1093,
-              "end": 1093
-            },
-            {
-              "start": 1094,
-              "end": 1094
-            },
-            {
-              "start": 1095,
-              "end": 1095
-            },
-            {
-              "start": 1098,
-              "end": 1098
-            },
-            {
-              "start": 1101,
-              "end": 1101
-            },
-            {
-              "start": 1108,
-              "end": 1108
-            },
-            {
-              "start": 1109,
-              "end": 1109
-            },
-            {
-              "start": 1112,
-              "end": 1112
-            },
-            {
-              "start": 1115,
-              "end": 1115
-            },
-            {
-              "start": 1120,
-              "end": 1120
-            },
-            {
-              "start": 1124,
-              "end": 1124
-            },
-            {
-              "start": 1128,
-              "end": 1128
-            },
-            {
-              "start": 1129,
-              "end": 1129
-            },
-            {
-              "start": 1130,
-              "end": 1130
-            },
-            {
-              "start": 1133,
-              "end": 1133
-            },
-            {
-              "start": 1137,
-              "end": 1137
-            },
-            {
-              "start": 1142,
-              "end": 1142
-            },
-            {
-              "start": 1143,
-              "end": 1143
-            },
-            {
-              "start": 1144,
-              "end": 1144
-            },
-            {
-              "start": 1147,
-              "end": 1147
-            },
-            {
-              "start": 1176,
-              "end": 1176
-            },
-            {
-              "start": 1181,
-              "end": 1181
-            },
-            {
-              "start": 1182,
-              "end": 1182
-            },
-            {
-              "start": 1183,
-              "end": 1183
-            },
-            {
-              "start": 1184,
-              "end": 1184
-            },
-            {
-              "start": 1185,
-              "end": 1185
-            },
-            {
-              "start": 1192,
-              "end": 1192
-            },
-            {
-              "start": 1193,
-              "end": 1193
-            },
-            {
-              "start": 1194,
-              "end": 1194
-            },
-            {
-              "start": 1197,
-              "end": 1197
-            },
-            {
-              "start": 1201,
-              "end": 1201
-            },
-            {
-              "start": 1203,
-              "end": 1203
-            },
-            {
-              "start": 1204,
-              "end": 1204
-            },
-            {
-              "start": 1210,
-              "end": 1210
-            },
-            {
-              "start": 1211,
-              "end": 1211
-            },
-            {
-              "start": 1212,
-              "end": 1212
-            },
-            {
-              "start": 1213,
-              "end": 1213
-            },
-            {
-              "start": 1221,
-              "end": 1221
-            },
-            {
-              "start": 1226,
-              "end": 1226
-            },
-            {
-              "start": 1227,
-              "end": 1227
-            },
-            {
-              "start": 1230,
-              "end": 1230
-            },
-            {
-              "start": 1236,
-              "end": 1236
-            },
-            {
-              "start": 1242,
-              "end": 1242
-            },
-            {
-              "start": 1243,
-              "end": 1243
-            },
-            {
-              "start": 1245,
-              "end": 1245
-            },
-            {
-              "start": 1246,
-              "end": 1246
-            },
-            {
-              "start": 1247,
-              "end": 1247
-            },
-            {
-              "start": 1248,
-              "end": 1248
-            },
-            {
-              "start": 1260,
-              "end": 1260
-            },
-            {
-              "start": 1265,
-              "end": 1265
-            },
-            {
-              "start": 1266,
-              "end": 1266
-            },
-            {
-              "start": 1269,
-              "end": 1269
-            },
-            {
-              "start": 1270,
-              "end": 1270
-            },
-            {
-              "start": 1271,
-              "end": 1271
-            },
-            {
-              "start": 1275,
-              "end": 1275
-            },
-            {
-              "start": 1276,
-              "end": 1276
-            },
-            {
-              "start": 1277,
-              "end": 1277
-            },
-            {
-              "start": 1281,
-              "end": 1281
-            },
-            {
-              "start": 1282,
-              "end": 1282
-            },
-            {
-              "start": 1291,
-              "end": 1291
-            },
-            {
-              "start": 1315,
-              "end": 1315
-            },
-            {
-              "start": 1324,
-              "end": 1324
-            },
-            {
-              "start": 1329,
-              "end": 1329
-            },
-            {
-              "start": 1338,
-              "end": 1338
-            },
-            {
-              "start": 1342,
-              "end": 1342
-            },
-            {
-              "start": 1350,
-              "end": 1350
-            },
-            {
-              "start": 1358,
-              "end": 1358
-            },
-            {
-              "start": 1359,
-              "end": 1359
-            },
-            {
-              "start": 1361,
-              "end": 1361
-            },
-            {
-              "start": 1368,
-              "end": 1368
-            }
-          ],
           "src/bytes_mut.rs": [
-            {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 68,
-              "end": 68
-            },
-            {
-              "start": 85,
-              "end": 85
-            },
-            {
-              "start": 225,
-              "end": 225
-            },
-            {
-              "start": 671,
-              "end": 671
-            },
-            {
-              "start": 673,
-              "end": 673
-            },
-            {
-              "start": 686,
-              "end": 686
-            },
-            {
-              "start": 690,
-              "end": 690
-            },
-            {
-              "start": 760,
-              "end": 760
-            },
-            {
-              "start": 771,
-              "end": 771
-            },
-            {
-              "start": 773,
-              "end": 773
-            },
-            {
-              "start": 979,
-              "end": 979
-            },
-            {
-              "start": 1016,
-              "end": 1016
-            },
-            {
-              "start": 1034,
-              "end": 1034
-            },
-            {
-              "start": 1040,
-              "end": 1040
-            },
-            {
-              "start": 1044,
-              "end": 1044
-            },
-            {
-              "start": 1046,
-              "end": 1046
-            },
-            {
-              "start": 1058,
-              "end": 1058
-            },
-            {
-              "start": 1061,
-              "end": 1061
-            },
-            {
-              "start": 1133,
-              "end": 1133
-            },
-            {
-              "start": 1427,
-              "end": 1427
-            },
-            {
-              "start": 1435,
-              "end": 1435
-            },
-            {
-              "start": 1468,
-              "end": 1468
-            },
-            {
-              "start": 1474,
-              "end": 1474
-            },
-            {
-              "start": 1724,
-              "end": 1724
-            },
-            {
-              "start": 1726,
-              "end": 1726
-            },
-            {
-              "start": 1727,
-              "end": 1727
-            },
-            {
-              "start": 1729,
-              "end": 1729
-            },
-            {
-              "start": 1780,
-              "end": 1780
-            },
-            {
-              "start": 1781,
-              "end": 1781
-            },
-            {
-              "start": 1782,
-              "end": 1782
-            },
-            {
-              "start": 1783,
-              "end": 1783
-            },
-            {
-              "start": 1784,
-              "end": 1784
-            },
-            {
-              "start": 1787,
-              "end": 1787
-            },
-            {
-              "start": 1788,
-              "end": 1788
-            },
-            {
-              "start": 1789,
-              "end": 1789
-            },
-            {
-              "start": 1791,
-              "end": 1791
-            },
-            {
-              "start": 1795,
-              "end": 1795
-            },
-            {
-              "start": 1796,
-              "end": 1796
-            },
-            {
-              "start": 1798,
-              "end": 1798
-            },
-            {
-              "start": 1799,
-              "end": 1799
-            },
-            {
-              "start": 1801,
-              "end": 1801
-            },
-            {
-              "start": 1802,
-              "end": 1802
-            },
-            {
-              "start": 1803,
-              "end": 1803
-            },
-            {
-              "start": 1812,
-              "end": 1812
-            },
-            {
-              "start": 1817,
-              "end": 1817
-            },
-            {
-              "start": 1818,
-              "end": 1818
-            },
-            {
-              "start": 1820,
-              "end": 1820
-            },
-            {
-              "start": 1821,
-              "end": 1821
-            },
-            {
-              "start": 1825,
-              "end": 1825
-            },
-            {
-              "start": 1837,
-              "end": 1837
-            },
-            {
-              "start": 1841,
-              "end": 1841
-            },
-            {
-              "start": 1846,
-              "end": 1846
-            },
-            {
-              "start": 1847,
-              "end": 1847
-            },
-            {
-              "start": 1848,
-              "end": 1848
-            }
-          ],
-          "<worktree>/src/bytes_mut.rs": [
             {
               "start": 1779,
               "end": 1854
             }
           ],
-          "<worktree>/tests/test_bytes.rs": [
+          "tests/test_bytes.rs": [
             {
               "start": 1166,
               "end": 1183
             }
           ],
-          "<worktree>/Cargo.toml": [
+          "Cargo.toml": [
             {
               "start": 1,
               "end": 8
             }
           ],
-          "<worktree>/CHANGELOG.md": [
+          "CHANGELOG.md": [
             {
               "start": 1,
               "end": 6
@@ -1619,11 +279,11 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/src/bytes_mut.rs": [
+          "src/bytes_mut.rs": [
             "SHARED_VTABLE",
             "shared_v_is_unique"
           ],
-          "<worktree>/tests/test_bytes.rs": [
+          "tests/test_bytes.rs": [
             "mut_shared_is_unique"
           ]
         }
@@ -1633,10 +293,10 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.3333333333333333,
-              "symbol": 1.0,
-              "span": 0.6042065009560229,
-              "line": 0.34782608695652173
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
             }
           },
           {
@@ -1644,8 +304,8 @@
             "coverage": {
               "file": 0.3333333333333333,
               "symbol": 1.0,
-              "span": 0.6042065009560229,
-              "line": 0.34782608695652173
+              "span": 0.6290630975143403,
+              "line": 0.5652173913043478
             }
           },
           {
@@ -1653,26 +313,26 @@
             "coverage": {
               "file": 0.3333333333333333,
               "symbol": 1.0,
-              "span": 0.6042065009560229,
-              "line": 0.34782608695652173
+              "span": 0.6290630975143403,
+              "line": 0.5652173913043478
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.3333333333333333,
+              "file": 0.6666666666666666,
               "symbol": 1.0,
-              "span": 0.6042065009560229,
-              "line": 0.34782608695652173
+              "span": 0.9311663479923518,
+              "line": 0.8695652173913043
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.6666666666666666,
+              "file": 1.0,
               "symbol": 1.0,
-              "span": 0.6042065009560229,
-              "line": 0.34782608695652173
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -1680,22 +340,49 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.6042065009560229,
-              "line": 0.34782608695652173
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 7,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 8,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 9,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.5,
-          "symbol": 1.0,
-          "span": 0.6042065009560229,
-          "line": 0.34782608695652173
+          "file": 0.7037037037037037,
+          "symbol": 0.8888888888888888,
+          "span": 0.7988102825578925,
+          "line": 0.7777777777777778
         },
         "redundancy": {
-          "file": 0.375,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.5,
+          "symbol": 0.10784313725490191,
+          "span": 0.16872394005697067,
+          "line": 0.18438914027149322
         }
       },
       "fixOverlap": {
@@ -1805,7 +492,26 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/CHANGELOG.md",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/Cargo.toml",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/bytes_mut.rs",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/tests/test_bytes.rs",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "todo_list",
@@ -1852,7 +558,7 @@
           "kind": "command_execution",
           "status": "failed",
           "command": "/bin/bash -lc 'ls /usr/bin/cargo ~/.cargo/bin/cargo /opt/homebrew/bin/cargo'",
-          "output": "ls: cannot access '/usr/bin/cargo': No such file or directory\nls: cannot access '<contextbench-root>/.cache/agent-runtimes/codex/7eab8e332b474cccbd1c/home/.cargo/bin/cargo': No such file or directory\nls: cannot access '/opt/homebrew/bin/cargo': No such file or directory\n",
+          "output": "ls: cannot access '/usr/bin/cargo': No such file or directory\nls: cannot access '<agent-runtime>': No such file or directory\nls: cannot access '/opt/homebrew/bin/cargo': No such file or directory\n",
           "exitCode": 2
         },
         {
@@ -1944,9 +650,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-19T05:48:31Z",
       "completedAt": "2026-05-19T05:51:17Z",
       "durationMs": 165600,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 543397,
@@ -1955,38 +676,60 @@
         "total_tokens": 551134,
         "cache_read_input_tokens": 439424
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 23,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/bytes_mut.rs b/src/bytes_mut.rs\nindex f2a3dab..2829a7c 100644\n--- a/src/bytes_mut.rs\n+++ b/src/bytes_mut.rs\n@@ -1780,7 +1780,7 @@ static SHARED_VTABLE: Vtable = Vtable {\n     clone: shared_v_clone,\n     to_vec: shared_v_to_vec,\n     to_mut: shared_v_to_mut,\n-    is_unique: crate::bytes::shared_is_unique,\n+    is_unique: shared_v_is_unique,\n     drop: shared_v_drop,\n };\n \n@@ -1843,6 +1843,12 @@ unsafe fn shared_v_to_mut(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> B\n     }\n }\n \n+unsafe fn shared_v_is_unique(data: &AtomicPtr<()>) -> bool {\n+    let shared = data.load(Ordering::Acquire);\n+    let ref_count = (*shared.cast::<Shared>()).ref_count.load(Ordering::Relaxed);\n+    ref_count == 1\n+}\n+\n unsafe fn shared_v_drop(data: &mut AtomicPtr<()>, _ptr: *const u8, _len: usize) {\n     data.with_mut(|shared| {\n         release_shared(*shared as *mut Shared);\ndiff --git a/tests/test_bytes.rs b/tests/test_bytes.rs\nindex 017ce66..8e5d0ae 100644\n--- a/tests/test_bytes.rs\n+++ b/tests/test_bytes.rs\n@@ -1173,6 +1173,15 @@ fn shared_is_unique() {\n     assert!(c.is_unique());\n }\n \n+#[test]\n+fn mut_shared_is_unique() {\n+    let mut b = BytesMut::from(LONG);\n+    let c = b.split().freeze();\n+    assert!(!c.is_unique());\n+    drop(b);\n+    assert!(c.is_unique());\n+}\n+\n #[test]\n fn test_bytesmut_from_bytes_static() {\n     let bs = b\"1b23exfcz3r\";\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Adjusted `Bytes` values frozen from shared `BytesMut` to use a `bytes_mut`-specific uniqueness probe instead of `crate::bytes::shared_is_unique`, which was reading the wrong shared-state layout and could report incorrect `is_unique()` results. The vtable fix is in [src/bytes_mut.rs](<worktree>/src/bytes_mut.rs:1779), with the new `shared_v_is_unique` helper at [src/bytes_mut.rs](<worktree>/src/bytes_mut.rs:1846). I also added a regression test covering `BytesMut::split().freeze().is_unique()` transitions in [tests/test_bytes.rs](<worktree>/tests/test_bytes.rs:1176).\n\nVerification was limited by the benchmark runtime: no Rust toolchain is installed, so `cargo test`/`rustc` could not be run. I did verify the patch by inspecting the affected vtable wiring, the shared-state field names, and the resulting diff against the known upstream fix pattern.",
         "notes": "Applied the upstream-style 1.6.1 bugfix locally. Root cause: the `Bytes` vtable used for frozen shared `BytesMut` instances pointed `is_unique` at `bytes::shared_is_unique`, but that helper expects `bytes::Shared`, not `bytes_mut::Shared`. Runtime limitation: `/bin/bash` reported `cargo: command not found` and `rustc: command not found`, so no executable test/build verification was possible in this environment.",
         "retrievedContextFiles": [
-          "<worktree>/src/bytes_mut.rs",
-          "<worktree>/tests/test_bytes.rs"
+          "src/bytes_mut.rs",
+          "tests/test_bytes.rs"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/src/bytes_mut.rs",
+            "file": "src/bytes_mut.rs",
             "start": 1779,
             "end": 1855
           },
           {
-            "file": "<worktree>/tests/test_bytes.rs",
+            "file": "tests/test_bytes.rs",
             "start": 1166,
             "end": 1183
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/src/bytes_mut.rs",
+            "file": "src/bytes_mut.rs",
             "name": "SHARED_VTABLE"
           },
           {
-            "file": "<worktree>/src/bytes_mut.rs",
+            "file": "src/bytes_mut.rs",
             "name": "shared_v_is_unique"
           },
           {
-            "file": "<worktree>/tests/test_bytes.rs",
+            "file": "tests/test_bytes.rs",
             "name": "mut_shared_is_unique"
           }
         ]
@@ -1995,739 +738,55 @@
         "predSteps": [
           {
             "files": [
-              "src/bytes.rs",
-              "src/bytes_mut.rs",
               "tests/test_bytes.rs"
+            ],
+            "spans": {
+              "tests/test_bytes.rs": [
+                {
+                  "start": 1180,
+                  "end": 1235
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/bytes.rs"
             ],
             "spans": {
               "src/bytes.rs": [
                 {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 73,
-                  "end": 73
-                },
-                {
-                  "start": 78,
-                  "end": 78
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 229,
-                  "end": 229
-                },
-                {
-                  "start": 231,
-                  "end": 231
-                },
-                {
-                  "start": 233,
-                  "end": 233
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 527,
-                  "end": 527
-                },
-                {
-                  "start": 862,
-                  "end": 862
-                },
-                {
-                  "start": 868,
-                  "end": 868
-                },
-                {
-                  "start": 872,
-                  "end": 872
-                },
-                {
-                  "start": 878,
-                  "end": 878
-                },
-                {
-                  "start": 967,
-                  "end": 967
-                },
-                {
-                  "start": 986,
-                  "end": 986
-                },
-                {
-                  "start": 1000,
-                  "end": 1000
-                },
-                {
-                  "start": 1008,
-                  "end": 1008
-                },
-                {
-                  "start": 1013,
-                  "end": 1013
-                },
-                {
-                  "start": 1014,
-                  "end": 1014
-                },
-                {
-                  "start": 1017,
-                  "end": 1017
-                },
-                {
-                  "start": 1020,
-                  "end": 1020
-                },
-                {
-                  "start": 1021,
-                  "end": 1021
-                },
-                {
-                  "start": 1031,
-                  "end": 1031
-                },
-                {
-                  "start": 1032,
-                  "end": 1032
-                },
-                {
-                  "start": 1035,
-                  "end": 1035
-                },
-                {
-                  "start": 1040,
-                  "end": 1040
-                },
-                {
-                  "start": 1057,
-                  "end": 1057
-                },
-                {
-                  "start": 1058,
-                  "end": 1058
-                },
-                {
-                  "start": 1061,
-                  "end": 1061
-                },
-                {
-                  "start": 1069,
-                  "end": 1069
-                },
-                {
-                  "start": 1081,
-                  "end": 1081
-                },
-                {
-                  "start": 1082,
-                  "end": 1082
-                },
-                {
-                  "start": 1087,
-                  "end": 1087
-                },
-                {
-                  "start": 1088,
-                  "end": 1088
-                },
-                {
-                  "start": 1093,
-                  "end": 1093
-                },
-                {
-                  "start": 1094,
-                  "end": 1094
-                },
-                {
-                  "start": 1095,
-                  "end": 1095
-                },
-                {
-                  "start": 1098,
-                  "end": 1098
-                },
-                {
-                  "start": 1101,
-                  "end": 1101
-                },
-                {
-                  "start": 1108,
-                  "end": 1108
-                },
-                {
-                  "start": 1109,
-                  "end": 1109
-                },
-                {
-                  "start": 1112,
-                  "end": 1112
-                },
-                {
-                  "start": 1115,
-                  "end": 1115
-                },
-                {
-                  "start": 1120,
-                  "end": 1120
-                },
-                {
-                  "start": 1124,
-                  "end": 1124
-                },
-                {
                   "start": 1128,
-                  "end": 1128
-                },
-                {
-                  "start": 1129,
-                  "end": 1129
-                },
-                {
-                  "start": 1130,
-                  "end": 1130
-                },
-                {
-                  "start": 1133,
-                  "end": 1133
-                },
-                {
-                  "start": 1137,
-                  "end": 1137
-                },
-                {
-                  "start": 1142,
-                  "end": 1142
-                },
-                {
-                  "start": 1143,
-                  "end": 1143
-                },
-                {
-                  "start": 1144,
-                  "end": 1144
-                },
-                {
-                  "start": 1147,
-                  "end": 1147
-                },
-                {
-                  "start": 1176,
-                  "end": 1176
-                },
-                {
-                  "start": 1181,
-                  "end": 1181
-                },
-                {
-                  "start": 1182,
-                  "end": 1182
-                },
-                {
-                  "start": 1183,
-                  "end": 1183
-                },
-                {
-                  "start": 1184,
-                  "end": 1184
-                },
-                {
-                  "start": 1185,
-                  "end": 1185
-                },
-                {
-                  "start": 1192,
-                  "end": 1192
-                },
-                {
-                  "start": 1193,
-                  "end": 1193
-                },
-                {
-                  "start": 1194,
-                  "end": 1194
-                },
-                {
-                  "start": 1197,
-                  "end": 1197
-                },
-                {
-                  "start": 1201,
-                  "end": 1201
-                },
-                {
-                  "start": 1203,
-                  "end": 1203
-                },
-                {
-                  "start": 1204,
-                  "end": 1204
-                },
-                {
-                  "start": 1210,
-                  "end": 1210
-                },
-                {
-                  "start": 1211,
-                  "end": 1211
-                },
-                {
-                  "start": 1212,
-                  "end": 1212
-                },
-                {
-                  "start": 1213,
-                  "end": 1213
-                },
-                {
-                  "start": 1221,
-                  "end": 1221
-                },
-                {
-                  "start": 1226,
-                  "end": 1226
-                },
-                {
-                  "start": 1227,
-                  "end": 1227
-                },
-                {
-                  "start": 1230,
-                  "end": 1230
-                },
-                {
-                  "start": 1236,
-                  "end": 1236
-                },
-                {
-                  "start": 1242,
-                  "end": 1242
-                },
-                {
-                  "start": 1243,
-                  "end": 1243
-                },
-                {
-                  "start": 1245,
-                  "end": 1245
-                },
-                {
-                  "start": 1246,
-                  "end": 1246
-                },
-                {
-                  "start": 1247,
-                  "end": 1247
-                },
-                {
-                  "start": 1248,
-                  "end": 1248
-                },
-                {
-                  "start": 1260,
-                  "end": 1260
-                },
-                {
-                  "start": 1265,
-                  "end": 1265
-                },
-                {
-                  "start": 1266,
-                  "end": 1266
-                },
-                {
-                  "start": 1269,
-                  "end": 1269
-                },
-                {
-                  "start": 1270,
-                  "end": 1270
-                },
-                {
-                  "start": 1271,
-                  "end": 1271
-                },
-                {
-                  "start": 1275,
-                  "end": 1275
-                },
-                {
-                  "start": 1276,
-                  "end": 1276
-                },
-                {
-                  "start": 1277,
-                  "end": 1277
-                },
-                {
-                  "start": 1281,
-                  "end": 1281
-                },
-                {
-                  "start": 1282,
-                  "end": 1282
-                },
-                {
-                  "start": 1291,
-                  "end": 1291
-                },
-                {
-                  "start": 1315,
-                  "end": 1315
-                },
-                {
-                  "start": 1324,
-                  "end": 1324
-                },
-                {
-                  "start": 1329,
-                  "end": 1329
-                },
-                {
-                  "start": 1338,
-                  "end": 1338
-                },
-                {
-                  "start": 1342,
-                  "end": 1342
-                },
-                {
-                  "start": 1350,
-                  "end": 1350
-                },
-                {
-                  "start": 1358,
-                  "end": 1358
-                },
-                {
-                  "start": 1359,
-                  "end": 1359
-                },
-                {
-                  "start": 1361,
-                  "end": 1361
-                },
-                {
-                  "start": 1368,
-                  "end": 1368
+                  "end": 1285
                 }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/bytes_mut.rs"
+            ],
+            "spans": {
               "src/bytes_mut.rs": [
                 {
-                  "start": 24,
-                  "end": 24
-                },
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 68,
-                  "end": 68
-                },
-                {
-                  "start": 85,
-                  "end": 85
-                },
-                {
-                  "start": 225,
-                  "end": 225
-                },
-                {
-                  "start": 671,
-                  "end": 671
-                },
-                {
-                  "start": 673,
-                  "end": 673
-                },
-                {
-                  "start": 686,
-                  "end": 686
-                },
-                {
-                  "start": 690,
-                  "end": 690
-                },
-                {
-                  "start": 760,
-                  "end": 760
-                },
-                {
-                  "start": 771,
-                  "end": 771
-                },
-                {
-                  "start": 773,
-                  "end": 773
-                },
-                {
-                  "start": 979,
-                  "end": 979
-                },
-                {
-                  "start": 1016,
-                  "end": 1016
-                },
-                {
-                  "start": 1034,
-                  "end": 1034
-                },
-                {
-                  "start": 1040,
-                  "end": 1040
-                },
-                {
-                  "start": 1044,
-                  "end": 1044
-                },
-                {
-                  "start": 1046,
-                  "end": 1046
-                },
-                {
-                  "start": 1058,
-                  "end": 1058
-                },
-                {
-                  "start": 1061,
-                  "end": 1061
-                },
-                {
-                  "start": 1133,
-                  "end": 1133
-                },
-                {
-                  "start": 1427,
-                  "end": 1427
-                },
-                {
-                  "start": 1435,
-                  "end": 1435
-                },
-                {
-                  "start": 1468,
-                  "end": 1468
-                },
-                {
-                  "start": 1474,
-                  "end": 1474
-                },
-                {
-                  "start": 1724,
-                  "end": 1724
-                },
-                {
-                  "start": 1726,
-                  "end": 1726
-                },
-                {
-                  "start": 1727,
-                  "end": 1727
-                },
-                {
-                  "start": 1729,
-                  "end": 1729
-                },
-                {
-                  "start": 1780,
-                  "end": 1780
-                },
-                {
-                  "start": 1781,
-                  "end": 1781
-                },
-                {
-                  "start": 1782,
-                  "end": 1782
-                },
-                {
-                  "start": 1783,
-                  "end": 1783
-                },
-                {
-                  "start": 1784,
-                  "end": 1784
-                },
-                {
-                  "start": 1787,
-                  "end": 1787
-                },
-                {
-                  "start": 1788,
-                  "end": 1788
-                },
-                {
-                  "start": 1789,
-                  "end": 1789
-                },
-                {
-                  "start": 1791,
-                  "end": 1791
-                },
-                {
-                  "start": 1795,
-                  "end": 1795
-                },
-                {
-                  "start": 1796,
-                  "end": 1796
-                },
-                {
-                  "start": 1798,
-                  "end": 1798
-                },
-                {
-                  "start": 1799,
-                  "end": 1799
-                },
-                {
-                  "start": 1801,
-                  "end": 1801
-                },
-                {
-                  "start": 1802,
-                  "end": 1802
-                },
-                {
-                  "start": 1803,
-                  "end": 1803
-                },
-                {
-                  "start": 1812,
-                  "end": 1812
-                },
-                {
-                  "start": 1817,
-                  "end": 1817
-                },
-                {
-                  "start": 1818,
-                  "end": 1818
-                },
-                {
-                  "start": 1820,
-                  "end": 1820
-                },
-                {
-                  "start": 1821,
-                  "end": 1821
-                },
-                {
-                  "start": 1825,
-                  "end": 1825
-                },
-                {
-                  "start": 1837,
-                  "end": 1837
-                },
-                {
-                  "start": 1841,
-                  "end": 1841
-                },
-                {
-                  "start": 1846,
-                  "end": 1846
-                },
-                {
-                  "start": 1847,
-                  "end": 1847
-                },
-                {
-                  "start": 1848,
-                  "end": 1848
+                  "start": 60,
+                  "end": 140
                 }
-              ],
-              "tests/test_bytes.rs": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/bytes_mut.rs"
+            ],
+            "spans": {
+              "src/bytes_mut.rs": [
                 {
-                  "start": 327,
-                  "end": 327
-                },
-                {
-                  "start": 559,
-                  "end": 559
-                },
-                {
-                  "start": 562,
-                  "end": 562
-                },
-                {
-                  "start": 691,
-                  "end": 691
-                },
-                {
-                  "start": 1002,
-                  "end": 1002
-                },
-                {
-                  "start": 1014,
-                  "end": 1014
-                },
-                {
-                  "start": 1050,
-                  "end": 1050
-                },
-                {
-                  "start": 1054,
-                  "end": 1054
-                },
-                {
-                  "start": 1144,
-                  "end": 1144
-                },
-                {
-                  "start": 1146,
-                  "end": 1146
-                },
-                {
-                  "start": 1150,
-                  "end": 1150
-                },
-                {
-                  "start": 1153,
-                  "end": 1153
-                },
-                {
-                  "start": 1157,
-                  "end": 1157
-                },
-                {
-                  "start": 1161,
-                  "end": 1161
-                },
-                {
-                  "start": 1163,
-                  "end": 1163
-                },
-                {
-                  "start": 1167,
-                  "end": 1167
-                },
-                {
-                  "start": 1171,
-                  "end": 1171
-                },
-                {
-                  "start": 1173,
-                  "end": 1173
-                },
-                {
-                  "start": 1199,
-                  "end": 1199
-                },
-                {
-                  "start": 1209,
-                  "end": 1209
-                },
-                {
-                  "start": 1214,
-                  "end": 1214
+                  "start": 1768,
+                  "end": 1855
                 }
               ]
             },
@@ -2737,777 +796,57 @@
             "files": [
               "tests/test_bytes.rs"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/bytes.rs"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "https:/patch-diff.githubusercontent.com/raw/tokio-rs/bytes/pull/718.patch"
-            ],
-            "spans": {},
+            "spans": {
+              "tests/test_bytes.rs": [
+                {
+                  "start": 1138,
+                  "end": 1185
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/bytes_mut.rs"
             ],
-            "spans": {},
+            "spans": {
+              "src/bytes_mut.rs": [
+                {
+                  "start": 1774,
+                  "end": 1855
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_bytes.rs"
+            ],
+            "spans": {
+              "tests/test_bytes.rs": [
+                {
+                  "start": 1160,
+                  "end": 1195
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "<worktree>/src/bytes_mut.rs",
-          "<worktree>/tests/test_bytes.rs",
-          "https:/patch-diff.githubusercontent.com/raw/tokio-rs/bytes/pull/718.patch",
-          "src/bytes.rs",
           "src/bytes_mut.rs",
           "tests/test_bytes.rs"
         ],
         "predSpans": {
-          "src/bytes.rs": [
-            {
-              "start": 58,
-              "end": 58
-            },
-            {
-              "start": 73,
-              "end": 73
-            },
-            {
-              "start": 78,
-              "end": 78
-            },
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 229,
-              "end": 229
-            },
-            {
-              "start": 231,
-              "end": 231
-            },
-            {
-              "start": 233,
-              "end": 233
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 527,
-              "end": 527
-            },
-            {
-              "start": 862,
-              "end": 862
-            },
-            {
-              "start": 868,
-              "end": 868
-            },
-            {
-              "start": 872,
-              "end": 872
-            },
-            {
-              "start": 878,
-              "end": 878
-            },
-            {
-              "start": 967,
-              "end": 967
-            },
-            {
-              "start": 986,
-              "end": 986
-            },
-            {
-              "start": 1000,
-              "end": 1000
-            },
-            {
-              "start": 1008,
-              "end": 1008
-            },
-            {
-              "start": 1013,
-              "end": 1013
-            },
-            {
-              "start": 1014,
-              "end": 1014
-            },
-            {
-              "start": 1017,
-              "end": 1017
-            },
-            {
-              "start": 1020,
-              "end": 1020
-            },
-            {
-              "start": 1021,
-              "end": 1021
-            },
-            {
-              "start": 1031,
-              "end": 1031
-            },
-            {
-              "start": 1032,
-              "end": 1032
-            },
-            {
-              "start": 1035,
-              "end": 1035
-            },
-            {
-              "start": 1040,
-              "end": 1040
-            },
-            {
-              "start": 1057,
-              "end": 1057
-            },
-            {
-              "start": 1058,
-              "end": 1058
-            },
-            {
-              "start": 1061,
-              "end": 1061
-            },
-            {
-              "start": 1069,
-              "end": 1069
-            },
-            {
-              "start": 1081,
-              "end": 1081
-            },
-            {
-              "start": 1082,
-              "end": 1082
-            },
-            {
-              "start": 1087,
-              "end": 1087
-            },
-            {
-              "start": 1088,
-              "end": 1088
-            },
-            {
-              "start": 1093,
-              "end": 1093
-            },
-            {
-              "start": 1094,
-              "end": 1094
-            },
-            {
-              "start": 1095,
-              "end": 1095
-            },
-            {
-              "start": 1098,
-              "end": 1098
-            },
-            {
-              "start": 1101,
-              "end": 1101
-            },
-            {
-              "start": 1108,
-              "end": 1108
-            },
-            {
-              "start": 1109,
-              "end": 1109
-            },
-            {
-              "start": 1112,
-              "end": 1112
-            },
-            {
-              "start": 1115,
-              "end": 1115
-            },
-            {
-              "start": 1120,
-              "end": 1120
-            },
-            {
-              "start": 1124,
-              "end": 1124
-            },
-            {
-              "start": 1128,
-              "end": 1128
-            },
-            {
-              "start": 1129,
-              "end": 1129
-            },
-            {
-              "start": 1130,
-              "end": 1130
-            },
-            {
-              "start": 1133,
-              "end": 1133
-            },
-            {
-              "start": 1137,
-              "end": 1137
-            },
-            {
-              "start": 1142,
-              "end": 1142
-            },
-            {
-              "start": 1143,
-              "end": 1143
-            },
-            {
-              "start": 1144,
-              "end": 1144
-            },
-            {
-              "start": 1147,
-              "end": 1147
-            },
-            {
-              "start": 1176,
-              "end": 1176
-            },
-            {
-              "start": 1181,
-              "end": 1181
-            },
-            {
-              "start": 1182,
-              "end": 1182
-            },
-            {
-              "start": 1183,
-              "end": 1183
-            },
-            {
-              "start": 1184,
-              "end": 1184
-            },
-            {
-              "start": 1185,
-              "end": 1185
-            },
-            {
-              "start": 1192,
-              "end": 1192
-            },
-            {
-              "start": 1193,
-              "end": 1193
-            },
-            {
-              "start": 1194,
-              "end": 1194
-            },
-            {
-              "start": 1197,
-              "end": 1197
-            },
-            {
-              "start": 1201,
-              "end": 1201
-            },
-            {
-              "start": 1203,
-              "end": 1203
-            },
-            {
-              "start": 1204,
-              "end": 1204
-            },
-            {
-              "start": 1210,
-              "end": 1210
-            },
-            {
-              "start": 1211,
-              "end": 1211
-            },
-            {
-              "start": 1212,
-              "end": 1212
-            },
-            {
-              "start": 1213,
-              "end": 1213
-            },
-            {
-              "start": 1221,
-              "end": 1221
-            },
-            {
-              "start": 1226,
-              "end": 1226
-            },
-            {
-              "start": 1227,
-              "end": 1227
-            },
-            {
-              "start": 1230,
-              "end": 1230
-            },
-            {
-              "start": 1236,
-              "end": 1236
-            },
-            {
-              "start": 1242,
-              "end": 1242
-            },
-            {
-              "start": 1243,
-              "end": 1243
-            },
-            {
-              "start": 1245,
-              "end": 1245
-            },
-            {
-              "start": 1246,
-              "end": 1246
-            },
-            {
-              "start": 1247,
-              "end": 1247
-            },
-            {
-              "start": 1248,
-              "end": 1248
-            },
-            {
-              "start": 1260,
-              "end": 1260
-            },
-            {
-              "start": 1265,
-              "end": 1265
-            },
-            {
-              "start": 1266,
-              "end": 1266
-            },
-            {
-              "start": 1269,
-              "end": 1269
-            },
-            {
-              "start": 1270,
-              "end": 1270
-            },
-            {
-              "start": 1271,
-              "end": 1271
-            },
-            {
-              "start": 1275,
-              "end": 1275
-            },
-            {
-              "start": 1276,
-              "end": 1276
-            },
-            {
-              "start": 1277,
-              "end": 1277
-            },
-            {
-              "start": 1281,
-              "end": 1281
-            },
-            {
-              "start": 1282,
-              "end": 1282
-            },
-            {
-              "start": 1291,
-              "end": 1291
-            },
-            {
-              "start": 1315,
-              "end": 1315
-            },
-            {
-              "start": 1324,
-              "end": 1324
-            },
-            {
-              "start": 1329,
-              "end": 1329
-            },
-            {
-              "start": 1338,
-              "end": 1338
-            },
-            {
-              "start": 1342,
-              "end": 1342
-            },
-            {
-              "start": 1350,
-              "end": 1350
-            },
-            {
-              "start": 1358,
-              "end": 1358
-            },
-            {
-              "start": 1359,
-              "end": 1359
-            },
-            {
-              "start": 1361,
-              "end": 1361
-            },
-            {
-              "start": 1368,
-              "end": 1368
-            }
-          ],
           "src/bytes_mut.rs": [
-            {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 68,
-              "end": 68
-            },
-            {
-              "start": 85,
-              "end": 85
-            },
-            {
-              "start": 225,
-              "end": 225
-            },
-            {
-              "start": 671,
-              "end": 671
-            },
-            {
-              "start": 673,
-              "end": 673
-            },
-            {
-              "start": 686,
-              "end": 686
-            },
-            {
-              "start": 690,
-              "end": 690
-            },
-            {
-              "start": 760,
-              "end": 760
-            },
-            {
-              "start": 771,
-              "end": 771
-            },
-            {
-              "start": 773,
-              "end": 773
-            },
-            {
-              "start": 979,
-              "end": 979
-            },
-            {
-              "start": 1016,
-              "end": 1016
-            },
-            {
-              "start": 1034,
-              "end": 1034
-            },
-            {
-              "start": 1040,
-              "end": 1040
-            },
-            {
-              "start": 1044,
-              "end": 1044
-            },
-            {
-              "start": 1046,
-              "end": 1046
-            },
-            {
-              "start": 1058,
-              "end": 1058
-            },
-            {
-              "start": 1061,
-              "end": 1061
-            },
-            {
-              "start": 1133,
-              "end": 1133
-            },
-            {
-              "start": 1427,
-              "end": 1427
-            },
-            {
-              "start": 1435,
-              "end": 1435
-            },
-            {
-              "start": 1468,
-              "end": 1468
-            },
-            {
-              "start": 1474,
-              "end": 1474
-            },
-            {
-              "start": 1724,
-              "end": 1724
-            },
-            {
-              "start": 1726,
-              "end": 1726
-            },
-            {
-              "start": 1727,
-              "end": 1727
-            },
-            {
-              "start": 1729,
-              "end": 1729
-            },
-            {
-              "start": 1780,
-              "end": 1780
-            },
-            {
-              "start": 1781,
-              "end": 1781
-            },
-            {
-              "start": 1782,
-              "end": 1782
-            },
-            {
-              "start": 1783,
-              "end": 1783
-            },
-            {
-              "start": 1784,
-              "end": 1784
-            },
-            {
-              "start": 1787,
-              "end": 1787
-            },
-            {
-              "start": 1788,
-              "end": 1788
-            },
-            {
-              "start": 1789,
-              "end": 1789
-            },
-            {
-              "start": 1791,
-              "end": 1791
-            },
-            {
-              "start": 1795,
-              "end": 1795
-            },
-            {
-              "start": 1796,
-              "end": 1796
-            },
-            {
-              "start": 1798,
-              "end": 1798
-            },
-            {
-              "start": 1799,
-              "end": 1799
-            },
-            {
-              "start": 1801,
-              "end": 1801
-            },
-            {
-              "start": 1802,
-              "end": 1802
-            },
-            {
-              "start": 1803,
-              "end": 1803
-            },
-            {
-              "start": 1812,
-              "end": 1812
-            },
-            {
-              "start": 1817,
-              "end": 1817
-            },
-            {
-              "start": 1818,
-              "end": 1818
-            },
-            {
-              "start": 1820,
-              "end": 1820
-            },
-            {
-              "start": 1821,
-              "end": 1821
-            },
-            {
-              "start": 1825,
-              "end": 1825
-            },
-            {
-              "start": 1837,
-              "end": 1837
-            },
-            {
-              "start": 1841,
-              "end": 1841
-            },
-            {
-              "start": 1846,
-              "end": 1846
-            },
-            {
-              "start": 1847,
-              "end": 1847
-            },
-            {
-              "start": 1848,
-              "end": 1848
-            }
-          ],
-          "tests/test_bytes.rs": [
-            {
-              "start": 327,
-              "end": 327
-            },
-            {
-              "start": 559,
-              "end": 559
-            },
-            {
-              "start": 562,
-              "end": 562
-            },
-            {
-              "start": 691,
-              "end": 691
-            },
-            {
-              "start": 1002,
-              "end": 1002
-            },
-            {
-              "start": 1014,
-              "end": 1014
-            },
-            {
-              "start": 1050,
-              "end": 1050
-            },
-            {
-              "start": 1054,
-              "end": 1054
-            },
-            {
-              "start": 1144,
-              "end": 1144
-            },
-            {
-              "start": 1146,
-              "end": 1146
-            },
-            {
-              "start": 1150,
-              "end": 1150
-            },
-            {
-              "start": 1153,
-              "end": 1153
-            },
-            {
-              "start": 1157,
-              "end": 1157
-            },
-            {
-              "start": 1161,
-              "end": 1161
-            },
-            {
-              "start": 1163,
-              "end": 1163
-            },
-            {
-              "start": 1167,
-              "end": 1167
-            },
-            {
-              "start": 1171,
-              "end": 1171
-            },
-            {
-              "start": 1173,
-              "end": 1173
-            },
-            {
-              "start": 1199,
-              "end": 1199
-            },
-            {
-              "start": 1209,
-              "end": 1209
-            },
-            {
-              "start": 1214,
-              "end": 1214
-            }
-          ],
-          "<worktree>/src/bytes_mut.rs": [
             {
               "start": 1779,
               "end": 1855
             }
           ],
-          "<worktree>/tests/test_bytes.rs": [
+          "tests/test_bytes.rs": [
             {
               "start": 1166,
               "end": 1183
@@ -3515,11 +854,11 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/src/bytes_mut.rs": [
+          "src/bytes_mut.rs": [
             "SHARED_VTABLE",
             "shared_v_is_unique"
           ],
-          "<worktree>/tests/test_bytes.rs": [
+          "tests/test_bytes.rs": [
             "mut_shared_is_unique"
           ]
         }
@@ -3547,7 +886,7 @@
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
+              "file": 0.3333333333333333,
               "symbol": 0.0,
               "span": 0.0,
               "line": 0.0
@@ -3556,19 +895,19 @@
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.3333333333333333,
+              "symbol": 1.0,
+              "span": 0.6290630975143403,
+              "line": 0.5652173913043478
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.3333333333333333,
+              "symbol": 1.0,
+              "span": 0.6290630975143403,
+              "line": 0.5652173913043478
             }
           },
           {
@@ -3576,8 +915,8 @@
             "coverage": {
               "file": 0.3333333333333333,
               "symbol": 1.0,
-              "span": 0.6042065009560229,
-              "line": 0.34782608695652173
+              "span": 0.6290630975143403,
+              "line": 0.5652173913043478
             }
           },
           {
@@ -3585,49 +924,22 @@
             "coverage": {
               "file": 0.3333333333333333,
               "symbol": 1.0,
-              "span": 0.6042065009560229,
-              "line": 0.34782608695652173
-            }
-          },
-          {
-            "step": 8,
-            "coverage": {
-              "file": 0.3333333333333333,
-              "symbol": 1.0,
-              "span": 0.6042065009560229,
-              "line": 0.34782608695652173
-            }
-          },
-          {
-            "step": 9,
-            "coverage": {
-              "file": 0.3333333333333333,
-              "symbol": 1.0,
-              "span": 0.6042065009560229,
-              "line": 0.34782608695652173
-            }
-          },
-          {
-            "step": 10,
-            "coverage": {
-              "file": 0.3333333333333333,
-              "symbol": 1.0,
-              "span": 0.6042065009560229,
-              "line": 0.34782608695652173
+              "span": 0.6290630975143403,
+              "line": 0.5652173913043478
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.16666666666666666,
-          "symbol": 0.5,
-          "span": 0.30210325047801145,
-          "line": 0.17391304347826086
+          "file": 0.23809523809523808,
+          "symbol": 0.5714285714285714,
+          "span": 0.3594646271510516,
+          "line": 0.32298136645962733
         },
         "redundancy": {
-          "file": 0.5,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.5714285714285714,
+          "symbol": 0.24390243902439024,
+          "span": 0.20228080014956062,
+          "line": 0.2258652094717668
         }
       },
       "fixOverlap": {
@@ -3646,35 +958,35 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/b2fa3ec138c577dce8d6/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/b2fa3ec138c577dce8d6/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/b2fa3ec138c577dce8d6/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/b2fa3ec138c577dce8d6/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/b2fa3ec138c577dce8d6/home/.agents/skills/superpowers/systematic-debugging/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: systematic-debugging\ndescription: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes\n---\n\n# Systematic Debugging\n\n## Overview\n\nRandom fixes waste time and create new bugs. Quick patches mask underlying issues.\n\n**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.\n\n**Violating the letter of this process is violating the spirit of debugging.**\n\n## The Iron Law\n\n```\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST\n```\n\nIf you haven't completed Phase 1, you cannot propose fixes.\n\n## When to Use\n\nUse for ANY technical issue:\n- Test failures\n- Bugs in production\n- Unexpected behavior\n- Performance problems\n- Build failures\n- Integration issues\n\n**Use this ESPECIALLY when:**\n- Under time pressure (emergencies make guessing tempting)\n- \"Just one quick fix\" seems obvious\n- You've already tried multiple fixes\n- Previous fix didn't work\n- You don't fully understand the issue\n\n**Don't skip when:**\n- Issue seems simple (simple bugs have root causes too)\n- You're in a hurry (rushing guarantees rework)\n- Manager wants it fixed NOW (systematic is faster than thrashing)\n\n## The Four Phases\n\nYou MUST complete each phase before proceeding to the next.\n\n### Phase 1: Root Cause Investigation\n\n**BEFORE attempting ANY fix:**\n\n1. **Read Error Messages Carefully**\n   - Don't skip past errors or warnings\n   - They often contain the exact solution\n   - Read stack traces completely\n   - Note line numbers, file paths, error codes\n\n2. **Reproduce Consistently**\n   - Can you trigger it reliably?\n   - What are the exact steps?\n   - Does it happen every time?\n   - If not reproducible \u2192 gather more data, don't guess\n\n3. **Check Recent Changes**\n   - What changed that could cause this?\n   - Git diff, recent commits\n   - New dependencies, config changes\n   - Environmental differences\n\n4. **Gather Evidence in Multi-Component Systems**\n\n   **WHEN system has multiple components (CI \u2192 build \u2192 signing, API \u2192 service \u2192 database):**\n\n   **BEFORE proposing fixes, add diagnostic instrumentation:**\n   ```\n   For EACH component boundary:\n     - Log what data enters component\n     - Log what data exits component\n     - Verify environment/config propagation\n     - Check state at each layer\n\n   Run once to gather evidence showing WHERE it breaks\n   THEN analyze evidence to identify failing component\n   THEN investigate that specific component\n   ```\n\n   **Example (multi-layer system):**\n   ```bash\n   # Layer 1: Workflow\n   echo \"=== Secrets available in workflow: ===\"\n   echo \"IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}\"\n\n   # Layer 2: Build script\n   echo \"=== Env vars in build script: ===\"\n   env | grep IDENTITY || echo \"IDENTITY not in environment\"\n\n   # Layer 3: Signing script\n   echo \"=== Keychain state: ===\"\n   security list-keychains\n   security find-identity -v\n\n   # Layer 4: Actual signing\n   codesign --sign \"$IDENTITY\" --verbose=4 \"$APP\"\n   ```\n\n   **This reveals:** Which layer fails (secrets \u2192 workflow \u2713, workflow \u2192 build \u2717)\n\n5. **Trace Data Flow**\n\n   **WHEN error is deep in call stack:**\n\n   See `root-cause-tracing.md` in this directory for the complete backward tracing technique.\n\n   **Quick version:**\n   - Where does bad value originate?\n   - What called this with bad value?\n   - Keep tracing up until you find the source\n   - Fix at source, not at symptom\n\n### Phase 2: Pattern Analysis\n\n**Find the pattern before fixing:**\n\n1. **Find Working Examples**\n   - Locate similar working code in same codebase\n   - What works that's similar to what's broken?\n\n2. **Compare Against References**\n   - If implementing pattern, read reference implementation COMPLETELY\n   - Don't skim - read every line\n   - Understand the pattern fully before applying\n\n3. **Identify Differences**\n   - What's different between working and broken?\n   - List every difference, however small\n   - Don't assume \"that can't matter\"\n\n4. **Understand Dependencies**\n   - What other components does this need?\n   - \u2026",
           "exitCode": 0
         },
@@ -3779,12 +1091,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/test_bytes.rs",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/test_bytes.rs",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/bytes_mut.rs",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/bytes_mut.rs",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",

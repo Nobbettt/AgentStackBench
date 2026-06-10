@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState } from "react";
-import { AlertCircle, CheckSquare, FilePenLine, MessageSquareText, Search, Terminal } from "lucide-react";
+import { AlertCircle, CheckSquare, FilePenLine, MessageSquareText, Search, Terminal, Wrench } from "lucide-react";
 
 import type { ComparisonInstanceDetail } from "@/data/comparisons";
 import { HelpIcon } from "@/components/comparison/shared";
@@ -13,6 +13,8 @@ type TraceFilter = "all" | TraceEntry["kind"] | "failures";
 const traceFilters: Array<{ id: TraceFilter; label: string }> = [
   { id: "all", label: "All" },
   { id: "command_execution", label: "Commands" },
+  { id: "tool_use", label: "Tools" },
+  { id: "tool_result", label: "Tool Results" },
   { id: "assistant_message", label: "Assistant" },
   { id: "file_change", label: "File Changes" },
   { id: "todo_list", label: "Todos" },
@@ -34,7 +36,7 @@ export function TraceSection({ variants }: { variants: ComparisonInstanceDetail[
     <section className="space-y-4">
       <SectionTitleWithHelp
         title="Trace"
-        explanation="Index-aligned trace of command executions, assistant messages, file changes, and todo events exported for each variant."
+        explanation="Index-aligned trace of command executions, tool calls/results, assistant messages, file changes, and todo events exported for each variant."
       />
       <TraceSummary variants={variants} />
       <TraceControls
@@ -221,6 +223,7 @@ function TraceTimelineRow({
 function TraceEventCard({ entry, index }: { entry: TraceEntry; index: number }) {
   const body = traceEntryBody(entry);
   const failure = traceEntryIsFailure(entry);
+  const fileChangeItems = entry.kind === "file_change" ? fileChangeItemsFromEntry(entry) : [];
 
   return (
     <details className={cn("group rounded-md border p-4", failure ? "border-rose-200 bg-rose-50/50" : "bg-background")}>
@@ -237,14 +240,37 @@ function TraceEventCard({ entry, index }: { entry: TraceEntry; index: number }) 
           <span className="shrink-0 text-xs tabular-nums text-muted-foreground">#{index + 1}</span>
         </div>
       </summary>
-      {body ? (
+      {fileChangeItems.length > 0 ? (
+        <FileChangeBody changes={fileChangeItems} />
+      ) : body ? (
         <pre className="mt-4 max-h-96 overflow-auto rounded-md bg-muted/20 p-3 text-xs leading-6">
           {body}
         </pre>
       ) : (
-        <p className="mt-4 text-sm text-muted-foreground">No event body recorded.</p>
+        <p className="mt-4 text-sm text-muted-foreground">{traceEntryEmptyBodyLabel(entry)}</p>
       )}
     </details>
+  );
+}
+
+function FileChangeBody({ changes }: { changes: Array<{ path: string; kind?: string; description?: string }> }) {
+  return (
+    <div className="mt-4 divide-y rounded-md border bg-muted/10">
+      {changes.map((change, index) => {
+        const action = humanizeSkillName(change.kind ?? "changed");
+        return (
+          <div key={`${change.path}-${index}`} className="grid gap-2 px-3 py-2 text-sm sm:grid-cols-[7rem_minmax(0,1fr)] sm:items-start">
+            <span className="inline-flex w-fit items-center rounded border bg-background px-2 py-0.5 text-xs font-medium text-muted-foreground">
+              {action}
+            </span>
+            <div className="min-w-0">
+              <div className="break-all font-mono text-xs leading-5">{change.path}</div>
+              {change.description ? <div className="mt-1 text-xs text-muted-foreground">{change.description}</div> : null}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -264,6 +290,7 @@ function TraceKindBadge({ entry }: { entry: TraceEntry }) {
 
 function traceKindIcon(kind: TraceEntry["kind"]) {
   if (kind === "command_execution") return Terminal;
+  if (kind === "tool_use" || kind === "tool_result") return Wrench;
   if (kind === "assistant_message") return MessageSquareText;
   if (kind === "file_change") return FilePenLine;
   return CheckSquare;
@@ -282,18 +309,23 @@ function traceStats(entries: TraceEntry[]) {
 
 function traceKindLabel(kind: TraceEntry["kind"]): string {
   if (kind === "command_execution") return "Command";
+  if (kind === "tool_use") return "Tool";
+  if (kind === "tool_result") return "Tool Result";
   if (kind === "assistant_message") return "Assistant";
   if (kind === "file_change") return "File Change";
   return "Todo";
 }
 
 function traceEntryTitle(entry: TraceEntry): string {
-  if (entry.command) return entry.command;
+  if (entry.command) return commandTraceTitle(entry) ?? compactCommand(entry.command);
+  if (entry.kind === "todo_list") return todoTraceTitle(entry) ?? traceKindLabel(entry.kind);
+  if (entry.kind === "file_change") return fileChangeTraceTitle(entry);
   const text = entry.text ?? entry.output ?? payloadText(entry.payload);
   return firstNonEmptyLine(text) || traceKindLabel(entry.kind);
 }
 
 function traceEntryBody(entry: TraceEntry): string {
+  if (entry.kind === "file_change" && !entry.text && !entry.output && (payloadIsEmpty(entry.payload) || fileChangeItemsFromEntry(entry).length > 0)) return "";
   return entry.text ?? entry.output ?? payloadText(entry.payload);
 }
 
@@ -301,8 +333,283 @@ function payloadText(payload: Record<string, unknown> | undefined): string {
   return payload ? JSON.stringify(payload, null, 2) : "";
 }
 
+function payloadIsEmpty(payload: Record<string, unknown> | undefined): boolean {
+  return !payload || Object.keys(payload).length === 0;
+}
+
+function traceEntryEmptyBodyLabel(entry: TraceEntry): string {
+  if (entry.kind === "file_change") return "No file-change metadata was exported for this event.";
+  return "No event body recorded.";
+}
+
 function firstNonEmptyLine(value: string): string {
   return value.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
+}
+
+function todoTraceTitle(entry: TraceEntry): string | null {
+  const items = todoItemsFromEntry(entry);
+  if (items.length === 0) return null;
+
+  const completedCount = items.filter((item) => item.completed).length;
+  const activeItem = items.find((item) => !item.completed);
+  if (activeItem) {
+    return `Todo: ${trimLongText(activeItem.text, 90)} (${completedCount}/${items.length} done)`;
+  }
+
+  return `Todo list complete (${completedCount}/${items.length} done)`;
+}
+
+function todoItemsFromEntry(entry: TraceEntry): Array<{ text: string; completed: boolean }> {
+  const payloadItems = todoItemsFromValue(entry.payload);
+  if (payloadItems.length > 0) return payloadItems;
+
+  const rawText = entry.text ?? entry.output;
+  if (!rawText) return [];
+
+  try {
+    return todoItemsFromValue(JSON.parse(rawText) as unknown);
+  } catch {
+    return [];
+  }
+}
+
+function todoItemsFromValue(value: unknown): Array<{ text: string; completed: boolean }> {
+  if (!isRecord(value)) return [];
+  const items = value.items;
+  if (!Array.isArray(items)) return [];
+
+  return items
+    .map((item) => {
+      if (!isRecord(item) || typeof item.text !== "string") return null;
+      return {
+        text: item.text,
+        completed: Boolean(item.completed) || item.status === "completed",
+      };
+    })
+    .filter((item): item is { text: string; completed: boolean } => item !== null);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function fileChangeTraceTitle(entry: TraceEntry): string {
+  const payload = entry.payload;
+  if (!payload || payloadIsEmpty(payload)) return "File changed (details unavailable)";
+
+  const changes = fileChangeItemsFromEntry(entry);
+  if (changes.length > 1) {
+    const verbs = Array.from(new Set(changes.map((change) => humanizeSkillName(change.kind ?? "changed"))));
+    const action = verbs.length === 1 ? verbs[0] : "Changed";
+    return `${action} ${changes.length} files`;
+  }
+  if (changes.length === 1) {
+    const action = humanizeSkillName(changes[0].kind ?? "changed");
+    return `File ${action.toLowerCase()}: ${changes[0].path}`;
+  }
+
+  const description = stringPayloadValue(payload, "description");
+  if (description) return trimLongText(description, 100);
+
+  const path = stringPayloadValue(payload, "path") ?? stringPayloadValue(payload, "file") ?? stringPayloadValue(payload, "source_path");
+  const changeType = stringPayloadValue(payload, "change_type") ?? stringPayloadValue(payload, "kind");
+  const action = changeType ? humanizeSkillName(changeType) : "Changed";
+  if (path) return `File ${action.toLowerCase()}: ${path}`;
+
+  return "File changed";
+}
+
+function fileChangeItemsFromEntry(entry: TraceEntry): Array<{ path: string; kind?: string; description?: string }> {
+  const payload = entry.payload;
+  if (!payload) return [];
+
+  const changes = fileChangeItemsFromPayload(payload);
+  if (changes.length > 0) return changes;
+
+  const path = stringPayloadValue(payload, "path") ?? stringPayloadValue(payload, "file") ?? stringPayloadValue(payload, "source_path");
+  if (!path) return [];
+
+  const kind = stringPayloadValue(payload, "change_type") ?? stringPayloadValue(payload, "kind") ?? undefined;
+  const description = stringPayloadValue(payload, "description") ?? undefined;
+  return [{ path, kind, description }];
+}
+
+function fileChangeItemsFromPayload(payload: Record<string, unknown>): Array<{ path: string; kind?: string; description?: string }> {
+  const rawChanges = payload.changes;
+  if (!Array.isArray(rawChanges)) return [];
+  return rawChanges
+    .map((change): { path: string; kind?: string; description?: string } | null => {
+      if (!isRecord(change)) return null;
+      const path = stringPayloadValue(change, "path");
+      if (!path) return null;
+      const kind = stringPayloadValue(change, "change_type") ?? stringPayloadValue(change, "kind");
+      const description = stringPayloadValue(change, "description");
+      return {
+        path,
+        ...(kind ? { kind } : {}),
+        ...(description ? { description } : {}),
+      };
+    })
+    .filter((change): change is { path: string; kind?: string; description?: string } => change !== null);
+}
+
+function stringPayloadValue(payload: Record<string, unknown>, key: string): string | null {
+  const value = payload[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function commandTraceTitle(entry: TraceEntry): string | null {
+  if (!entry.command) return null;
+
+  const command = unwrapShellCommand(entry.command);
+  const body = traceEntryBody(entry);
+  const skillName = skillNameFromTraceBody(body);
+  if (skillName && (command.includes("<agent-runtime>") || command.includes("SKILL.md"))) {
+    return `Read skill: ${skillName}`;
+  }
+
+  const fileRead = fileReadFromCommand(command);
+  if (fileRead) {
+    const action = fileRead.numbered ? "Inspect numbered lines" : "Read file";
+    return `${action}: ${fileRead.path}${fileRead.range ? ` (${fileRead.range})` : ""}`;
+  }
+
+  const searchPattern = searchPatternFromCommand(command);
+  if (searchPattern) return `Search code for: ${searchPattern}`;
+
+  const formatterTargets = formatterTargetsFromCommand(command);
+  if (formatterTargets) return `Format files: ${formatterTargets}`;
+
+  const testCommand = testTitleFromCommand(command);
+  if (testCommand) return testCommand;
+
+  if (/\bgit\s+status\b/.test(command)) return "Check git status";
+  if (/\bgit\s+diff\s+--check\b/.test(command)) return "Check diff for whitespace errors";
+  if (/\bgit\s+diff\b/.test(command)) return "Review git diff";
+  if (/\bgit\s+show\b/.test(command)) return "Inspect git commit";
+  if (/\b(?:python3?|[^ ]*\/python)\s+-m\s+pip\s+install\b|\b(?:pip|[^ ]*\/pip)\s+install\b/.test(command)) return "Install Python dependencies";
+  if (/\b(?:python3?|[^ ]*\/python)\s+-m\s+venv\b/.test(command)) return "Create Python virtual environment";
+  if (/\b(?:npm|yarn|pnpm)\s+(?:install|ci)\b/.test(command)) return "Install JavaScript dependencies";
+  if (/\b(?:npm|yarn|pnpm)\s+run\s+build\b/.test(command)) return "Run frontend build";
+  if (/\b(?:npm|yarn|pnpm)\s+run\b/.test(command)) return `Run script: ${scriptNameFromCommand(command) ?? compactCommand(command)}`;
+  if (/^pwd\b/.test(command)) return "Check working directory";
+  if (/^ls\b|\s+ls\b/.test(command)) return "List files";
+  if (/\bwhich\s+\S+|\bcommand\s+-v\s+\S+/.test(command)) return "Check tool availability";
+  if (/\brm\s+-rf\s+\.venv\b/.test(command)) return "Remove Python virtual environment";
+  if (/\bcat\b/.test(command)) {
+    const path = command.match(/\bcat\s+(.+)$/)?.[1]?.trim();
+    return path ? `Read file: ${trimShellOperators(path)}` : "Read file";
+  }
+
+  return null;
+}
+
+function unwrapShellCommand(command: string): string {
+  const trimmed = command.trim();
+  const shellMatch = trimmed.match(/^\/bin\/(?:ba|z)?sh\s+-lc\s+([\s\S]+)$/);
+  if (!shellMatch) return trimmed;
+
+  const shellArgument = shellMatch[1].trim();
+  const quote = shellArgument[0];
+  if ((quote === "'" || quote === "\"") && shellArgument.endsWith(quote)) {
+    return shellArgument.slice(1, -1);
+  }
+  return shellArgument;
+}
+
+function skillNameFromTraceBody(body: string): string | null {
+  const frontmatterName = body.match(/^---\s*\n[\s\S]*?\bname:\s*([^\n]+)\n[\s\S]*?\n---/);
+  if (frontmatterName) return humanizeSkillName(frontmatterName[1]);
+
+  const heading = body.match(/^#\s+(.+)$/m);
+  return heading ? heading[1].trim() : null;
+}
+
+function humanizeSkillName(value: string): string {
+  const normalized = value.trim().replace(/^["']|["']$/g, "");
+  if (!normalized.includes("-") && /[A-Z]/.test(normalized)) return normalized;
+  return normalized
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((word) => word[0]?.toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function fileReadFromCommand(command: string): { path: string; range?: string; numbered?: boolean } | null {
+  const sedMatch = command.match(/\bsed\s+-n\s+['"]?(\d+,\d+)p['"]?\s+([^;&|]+)/);
+  if (sedMatch) {
+    return { path: trimShellOperators(sedMatch[2]), range: sedMatch[1].replace(",", "-") };
+  }
+
+  const numberedMatch = command.match(/\bnl\s+-ba\s+([^;&|]+)\s*\|\s*sed\s+-n\s+['"]?(\d+,\d+)p['"]?/);
+  if (numberedMatch) {
+    return { path: trimShellOperators(numberedMatch[1]), range: numberedMatch[2].replace(",", "-"), numbered: true };
+  }
+
+  const headMatch = command.match(/\bhead\s+(?:-\d+\s+|-n\s+\d+\s+)?([^;&|]+)/);
+  if (headMatch) return { path: trimShellOperators(headMatch[1]) };
+
+  const tailMatch = command.match(/\btail\s+(?:-\d+\s+|-n\s+\d+\s+)?([^;&|]+)/);
+  if (tailMatch) return { path: trimShellOperators(tailMatch[1]) };
+
+  return null;
+}
+
+function searchPatternFromCommand(command: string): string | null {
+  const rgMatch = command.match(/\brg(?:\s+-[^\s]+)*\s+((?:"(?:\\.|[^"])+")|(?:'(?:\\.|[^'])+')|[^\s|;&]+)/);
+  if (!rgMatch) return null;
+  return unquoteShellValue(rgMatch[1]);
+}
+
+function formatterTargetsFromCommand(command: string): string | null {
+  const gofmtMatch = command.match(/\bgofmt\s+-w\s+(.+)$/);
+  if (gofmtMatch) return trimLongText(gofmtMatch[1].trim(), 80);
+
+  const prettierMatch = command.match(/\bprettier\s+(?:--write|-w)\s+(.+)$/);
+  if (prettierMatch) return trimLongText(prettierMatch[1].trim(), 80);
+
+  const blackMatch = command.match(/\bblack\s+(.+)$/);
+  if (blackMatch) return trimLongText(blackMatch[1].trim(), 80);
+
+  return null;
+}
+
+function testTitleFromCommand(command: string): string | null {
+  if (/\bgo\s+test\b/.test(command)) return `Run Go tests: ${testTargetFromCommand(command, "go test")}`;
+  if (/\bpytest\b/.test(command)) return `Run pytest: ${testTargetFromCommand(command, "pytest")}`;
+  if (/\btests\/runtests\.py\b/.test(command)) return `Run Django tests: ${testTargetAfter(command, "tests/runtests.py")}`;
+  if (/\b(?:npm|yarn|pnpm)\s+(?:test|run\s+test)\b/.test(command)) return "Run JavaScript tests";
+  if (/\bcargo\s+test\b/.test(command)) return "Run Rust tests";
+  if (/\bmvn\s+test\b/.test(command)) return "Run Maven tests";
+  return null;
+}
+
+function testTargetFromCommand(command: string, marker: string): string {
+  return trimLongText(command.slice(command.indexOf(marker) + marker.length).trim() || "all", 80);
+}
+
+function testTargetAfter(command: string, marker: string): string {
+  return trimLongText(command.slice(command.indexOf(marker) + marker.length).trim() || "all", 80);
+}
+
+function scriptNameFromCommand(command: string): string | null {
+  return command.match(/\b(?:npm|yarn|pnpm)\s+run\s+([^\s]+)/)?.[1] ?? null;
+}
+
+function compactCommand(command: string): string {
+  return trimLongText(unwrapShellCommand(command), 110);
+}
+
+function trimShellOperators(value: string): string {
+  return unquoteShellValue(value.trim().replace(/\s*(?:&&|\|\||[;|]).*$/, ""));
+}
+
+function unquoteShellValue(value: string): string {
+  return value.trim().replace(/^["']|["']$/g, "").replace(/\\"/g, "\"").replace(/\\'/g, "'");
+}
+
+function trimLongText(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`;
 }
 
 function traceEntryIsFailure(entry: TraceEntry): boolean {

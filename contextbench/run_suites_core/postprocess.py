@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import queue
@@ -107,6 +108,62 @@ _POSTPROCESS_REQUIRED_PARSER_LANGUAGES = (
     "tsx",
     "typescript",
 )
+
+
+def _default_evaluation_workspace_key(out_path: Path) -> str:
+    resolved = str(out_path.resolve())
+    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:12]
+    return safe_path_component(f"eval-{out_path.stem}-{digest}-pid-{os.getpid()}")
+
+
+def _write_jsonl_atomic(path: Path, rows: list[dict[str, object]]) -> None:
+    ensure_dir(path.parent)
+    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False))
+                handle.write("\n")
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+
+
+def _final_prediction_has_context(pred_data: dict[str, object]) -> bool:
+    traj_data = pred_data.get("traj_data")
+    if not isinstance(traj_data, dict):
+        return False
+    return bool(
+        traj_data.get("pred_files")
+        or traj_data.get("pred_spans")
+        or traj_data.get("pred_symbols")
+    )
+
+
+def _assert_evaluation_artifact_consistent(
+    *,
+    results: list[dict[str, object]],
+    predictions_by_instance_id: dict[str, dict[str, object]],
+) -> None:
+    inconsistent_ids = [
+        str(row.get("instance_id"))
+        for row in results
+        if row.get("error") == "no_context_extracted"
+        and _final_prediction_has_context(predictions_by_instance_id.get(str(row.get("instance_id"))) or {})
+    ]
+    if not inconsistent_ids:
+        return
+    sample = ", ".join(inconsistent_ids[:10])
+    suffix = "" if len(inconsistent_ids) <= 10 else f", ... ({len(inconsistent_ids)} total)"
+    raise RuntimeError(
+        "Evaluation artifact is inconsistent: predictions contain final context but "
+        f"evaluation produced no_context_extracted for {sample}{suffix}. "
+        "Rerun evaluation with isolated worktrees; this usually indicates a stale or raced evaluation output."
+    )
 
 
 @dataclass(frozen=True)
@@ -2797,6 +2854,8 @@ def evaluate_prediction_file(
     cache_dir: Path,
     out_path: Path,
     selected_task_count: int | None = None,
+    workspace_key: str | None = None,
+    tmp_root: Path | None = None,
 ) -> dict[str, object]:
     if not treesitter_available():
         raise RuntimeError("Tree-sitter is not available for evaluation")
@@ -2804,6 +2863,12 @@ def evaluate_prediction_file(
     started_at = time.time()
     gold_loader = GoldLoader(str(gold_path))
     pred_rows = load_pred(str(pred_path))
+    predictions_by_instance_id = {
+        str(row.get("instance_id") or row.get("original_inst_id")): row
+        for row in pred_rows
+        if row.get("instance_id") or row.get("original_inst_id")
+    }
+    effective_workspace_key = workspace_key or _default_evaluation_workspace_key(out_path)
     total_rows = len(pred_rows)
     progress_every = 10 if total_rows >= 50 else 1
     print(
@@ -2821,15 +2886,24 @@ def evaluate_prediction_file(
             if index % progress_every == 0 or index == total_rows:
                 print(f"[postprocess] evaluation progress {index}/{total_rows}", flush=True)
             continue
-        results.append(evaluate_instance(instance_id, gold_ctx, pred_data, str(cache_dir)))
+        results.append(
+            evaluate_instance(
+                instance_id,
+                gold_ctx,
+                pred_data,
+                str(cache_dir),
+                workspace_key=effective_workspace_key,
+                tmp_root=str(tmp_root) if tmp_root is not None else None,
+            )
+        )
         if index % progress_every == 0 or index == total_rows:
             print(f"[postprocess] evaluation progress {index}/{total_rows}", flush=True)
 
-    ensure_dir(out_path.parent)
-    with open(out_path, "w", encoding="utf-8") as handle:
-        for row in results:
-            handle.write(json.dumps(row, ensure_ascii=False))
-            handle.write("\n")
+    _assert_evaluation_artifact_consistent(
+        results=results,
+        predictions_by_instance_id=predictions_by_instance_id,
+    )
+    _write_jsonl_atomic(out_path, results)
 
     error_counts = dict(Counter(str(row.get("error")) for row in results if row.get("error")))
     summary = aggregate_results(results)

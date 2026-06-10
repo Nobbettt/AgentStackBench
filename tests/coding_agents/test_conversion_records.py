@@ -299,6 +299,31 @@ def test_convert_records_with_summary_fails_outside_workspace_context(tmp_path) 
     assert "SKILL.md" in summary["conversion_errors"][0]["invalid_paths"][0]
 
 
+def test_convert_records_with_summary_fails_contextbench_root_placeholder_context() -> None:
+    record = {
+        "agent": "codex",
+        "instance_id": "task-1",
+        "workspace_path": "<worktree>",
+        "repo_url": "https://github.com/example/repo.git",
+        "commit": "abc123",
+        "model_patch": "",
+        "final_output": {
+            "task_id": "task-1",
+            "status": "completed",
+            "retrieved_context_files": [
+                "<contextbench-root>/.cache/agent-runtimes/codex/abc/home/.agents/skills/superpowers/SKILL.md"
+            ],
+        },
+    }
+
+    predictions, summary = convert_records_with_summary([record], expected_agent="codex")
+
+    assert predictions == []
+    assert summary["conversion_error_count"] == 1
+    assert summary["conversion_errors"][0]["error"] == "invalid_predicted_context_path"
+    assert "<contextbench-root>" in summary["conversion_errors"][0]["invalid_paths"][0]
+
+
 def test_convert_run_record_drops_trace_inferred_paths_outside_workspace(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     skill_path = tmp_path / "runtime-home" / ".agents" / "skills" / "superpowers" / "SKILL.md"
@@ -509,8 +534,8 @@ def test_convert_run_record_preserves_symbols_when_merging_duplicate_steps() -> 
                     "type": "item.completed",
                     "item": {
                         "type": "command_execution",
-                        "command": "/bin/zsh -lc 'rg -n \"class Foo\" a.py'",
-                        "aggregated_output": "a.py:1:class Foo:\n",
+                        "command": "/bin/zsh -lc \"sed -n '1,1p' a.py\"",
+                        "aggregated_output": "class Foo:\n",
                     },
                 }
             ],

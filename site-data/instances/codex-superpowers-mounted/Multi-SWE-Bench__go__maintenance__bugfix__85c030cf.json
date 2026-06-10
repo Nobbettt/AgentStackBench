@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-19T02:52:58Z",
       "completedAt": "2026-05-19T02:56:17Z",
       "durationMs": 198727,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 915377,
@@ -25,54 +40,76 @@
         "total_tokens": 924272,
         "cache_read_input_tokens": 835456
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 28,
+        "readToolCalls": 0,
+        "editToolCalls": 5
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/pkg/cmd/repo/view/view.go b/pkg/cmd/repo/view/view.go\nindex a508317b..ee6cea62 100644\n--- a/pkg/cmd/repo/view/view.go\n+++ b/pkg/cmd/repo/view/view.go\n@@ -8,6 +8,7 @@ import (\n \n \t\"github.com/MakeNowJust/heredoc\"\n \t\"github.com/cli/cli/api\"\n+\t\"github.com/cli/cli/internal/ghinstance\"\n \t\"github.com/cli/cli/internal/ghrepo\"\n \t\"github.com/cli/cli/pkg/cmdutil\"\n \t\"github.com/cli/cli/pkg/iostreams\"\n@@ -38,6 +39,9 @@ func NewCmdView(f *cmdutil.Factory, runF func(*ViewOptions) error) *cobra.Comman\n \n With no argument, the repository for the current directory is displayed.\n \n+If the \"OWNER/\" portion of the \"OWNER/REPO\" repository argument is omitted, it\n+defaults to the name of the authenticating user.\n+\n With '--web', open the repository in a web browser instead.`,\n \t\tArgs: cobra.MaximumNArgs(1),\n \t\tRunE: func(c *cobra.Command, args []string) error {\n@@ -61,6 +65,7 @@ func viewRun(opts *ViewOptions) error {\n \tif err != nil {\n \t\treturn err\n \t}\n+\tapiClient := api.NewClientFromHTTP(httpClient)\n \n \tvar toView ghrepo.Interface\n \tif opts.RepoArg == \"\" {\n@@ -71,14 +76,20 @@ func viewRun(opts *ViewOptions) error {\n \t\t}\n \t} else {\n \t\tvar err error\n-\t\ttoView, err = ghrepo.FromFullName(opts.RepoArg)\n+\t\trepoArg := opts.RepoArg\n+\t\tif !strings.Contains(repoArg, \":\") && !strings.Contains(repoArg, \"/\") {\n+\t\t\tcurrentUser, err := api.CurrentLoginName(apiClient, ghinstance.OverridableDefault())\n+\t\t\tif err != nil {\n+\t\t\t\treturn err\n+\t\t\t}\n+\t\t\trepoArg = currentUser + \"/\" + repoArg\n+\t\t}\n+\t\ttoView, err = ghrepo.FromFullName(repoArg)\n \t\tif err != nil {\n \t\t\treturn fmt.Errorf(\"argument error: %w\", err)\n \t\t}\n \t}\n \n-\tapiClient := api.NewClientFromHTTP(httpClient)\n-\n \trepo, err := api.GitHubRepo(apiClient, toView)\n \tif err != nil {\n \t\treturn err\ndiff --git a/pkg/cmd/repo/view/view_test.go b/pkg/cmd/repo/view/view_test.go\nindex 5a6d0870..f75827dc 100644\n--- a/pkg/cmd/repo/view/view_test.go\n+++ b/pkg/cmd/repo/view/view_test.go\n@@ -200,6 +200,20 @@ func Test_ViewRun(t *testing.T) {\n \t\t\t\tView this repository on GitHub: https://github.com/jill/valentine\n \t\t\t`),\n \t\t},\n+\t\t{\n+\t\t\tname:     \"name arg without owner\",\n+\t\t\trepoName: \"jill/valentine\",\n+\t\t\topts: &ViewOptions{\n+\t\t\t\tRepoArg: \"valentine\",\n+\t\t\t},\n+\t\t\tstdoutTTY: false,\n+\t\t\twantOut: heredoc.Doc(`\n+\t\t\t\tname:\tjill/valentine\n+\t\t\t\tdescription:\tsocial distancing\n+\t\t\t\t--\n+\t\t\t\t# truly cool readme check it out\n+\t\t\t`),\n+\t\t},\n \t\t{\n \t\t\tname:      \"no args\",\n \t\t\tstdoutTTY: true,\n@@ -231,6 +245,14 @@ func Test_ViewRun(t *testing.T) {\n \t\t}\n \n \t\treg := &httpmock.Registry{}\n+\t\tif tt.opts.RepoArg == \"valentine\" {\n+\t\t\treg.Register(\n+\t\t\t\thttpmock.GraphQL(`query UserCurrent\\b`),\n+\t\t\t\thttpmock.StringResponse(`\n+\t\t{ \"data\": { \"viewer\": {\n+\t\t\t\"login\": \"jill\"\n+\t\t}}}`))\n+\t\t}\n \t\treg.Register(\n \t\t\thttpmock.GraphQL(`query RepositoryInfo\\b`),\n \t\t\thttpmock.StringResponse(`\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Implemented `gh repo view` support for ownerless personal repository arguments when authenticated. `viewRun` now mirrors the existing `repo clone` behavior: if the supplied repository argument has neither `:` nor `/`, it resolves the current login with `api.CurrentLoginName(...)` and prefixes the repo name before normal parsing. I also updated the command help text and added a regression test covering `gh repo view <repo>` resolving to the authenticated user's repository.\n\nVerification: `git diff --check` passed. Repo-native Go verification could not run in this environment because both `go` and `gofmt` are unavailable, so I could not execute `go test ./pkg/cmd/repo/view` or format with `gofmt`.",
         "notes": "Offline verification was limited by the benchmark environment: `/bin/bash` reported `go: command not found` and `gofmt: command not found`. I therefore validated the patch by manual diff inspection and `git diff --check`, which passed.",
         "retrievedContextFiles": [
-          "<worktree>/pkg/cmd/repo/view/view.go",
-          "<worktree>/pkg/cmd/repo/view/view_test.go",
-          "<worktree>/pkg/cmd/repo/clone/clone.go",
-          "<worktree>/api/queries_user.go"
+          "pkg/cmd/repo/view/view.go",
+          "pkg/cmd/repo/view/view_test.go",
+          "pkg/cmd/repo/clone/clone.go",
+          "api/queries_user.go"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/pkg/cmd/repo/view/view.go",
+            "file": "pkg/cmd/repo/view/view.go",
             "start": 28,
             "end": 104
           },
           {
-            "file": "<worktree>/pkg/cmd/repo/view/view_test.go",
+            "file": "pkg/cmd/repo/view/view_test.go",
             "start": 146,
             "end": 285
           },
           {
-            "file": "<worktree>/pkg/cmd/repo/clone/clone.go",
+            "file": "pkg/cmd/repo/clone/clone.go",
             "start": 73,
             "end": 104
           },
           {
-            "file": "<worktree>/api/queries_user.go",
+            "file": "api/queries_user.go",
             "start": 7,
             "end": 15
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/pkg/cmd/repo/view/view.go",
+            "file": "pkg/cmd/repo/view/view.go",
             "name": "NewCmdView"
           },
           {
-            "file": "<worktree>/pkg/cmd/repo/view/view.go",
+            "file": "pkg/cmd/repo/view/view.go",
             "name": "viewRun"
           },
           {
-            "file": "<worktree>/pkg/cmd/repo/clone/clone.go",
+            "file": "pkg/cmd/repo/clone/clone.go",
             "name": "cloneRun"
           },
           {
-            "file": "<worktree>/api/queries_user.go",
+            "file": "api/queries_user.go",
             "name": "CurrentLoginName"
           }
         ]
@@ -81,1488 +118,13 @@
         "predSteps": [
           {
             "files": [
-              "api/client.go",
-              "api/client_test.go",
-              "api/pull_request_test.go",
-              "api/queries_issue.go",
-              "api/queries_issue_test.go",
-              "api/queries_org.go",
-              "api/queries_pr.go",
-              "api/queries_pr_test.go",
-              "api/queries_repo.go",
-              "api/queries_repo_test.go",
-              "api/queries_user.go",
-              "auth/oauth.go",
-              "context/blank_context.go",
-              "context/context.go",
-              "context/remote.go",
-              "context/remote_test.go",
-              "internal/ghrepo/repo.go",
-              "internal/ghrepo/repo_test.go",
-              "pkg/cmd/api/api.go",
-              "pkg/cmd/api/api_test.go",
-              "pkg/cmd/api/http.go",
-              "pkg/cmd/api/http_test.go",
-              "pkg/cmd/api/pagination.go",
-              "pkg/cmd/api/pagination_test.go",
-              "pkg/cmd/auth/auth.go",
-              "pkg/cmd/auth/client/client.go",
-              "pkg/cmd/auth/login/login.go",
-              "pkg/cmd/auth/login/login_test.go",
-              "pkg/cmd/auth/logout/logout.go",
-              "pkg/cmd/auth/logout/logout_test.go",
-              "pkg/cmd/auth/refresh/refresh.go",
-              "pkg/cmd/auth/refresh/refresh_test.go",
-              "pkg/cmd/auth/status/status.go",
-              "pkg/cmd/auth/status/status_test.go",
-              "pkg/cmd/factory/default.go",
-              "pkg/cmd/factory/http.go",
-              "pkg/cmd/factory/remote_resolver.go",
-              "pkg/cmd/factory/remote_resolver_test.go",
-              "pkg/cmd/repo/clone/clone.go",
-              "pkg/cmd/repo/clone/clone_test.go",
-              "pkg/cmd/repo/create/create.go",
-              "pkg/cmd/repo/create/create_test.go",
-              "pkg/cmd/repo/create/http.go",
-              "pkg/cmd/repo/create/http_test.go",
-              "pkg/cmd/repo/credits/credits.go",
-              "pkg/cmd/repo/fork/fork.go",
-              "pkg/cmd/repo/fork/forkResult.json",
-              "pkg/cmd/repo/fork/fork_test.go",
-              "pkg/cmd/repo/repo.go",
-              "pkg/cmd/repo/view/http.go",
-              "pkg/cmd/repo/view/view.go",
-              "pkg/cmd/repo/view/view_test.go",
-              "pkg/cmdutil/factory.go",
-              "pkg/cmdutil/repo_override.go",
-              "pkg/iostreams/iostreams.go"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "api/client_test.go",
-              "api/queries_issue.go",
-              "api/queries_issue_test.go",
-              "api/queries_pr.go",
-              "api/queries_pr_test.go",
-              "api/queries_repo.go",
-              "api/queries_repo_test.go",
-              "api/queries_user.go",
-              "context/context.go",
-              "context/remote_test.go",
-              "internal/config/config_setup.go",
-              "internal/ghrepo/repo.go",
-              "internal/ghrepo/repo_test.go",
-              "pkg/cmd/api/api.go",
-              "pkg/cmd/api/api_test.go",
-              "pkg/cmd/auth/login/login.go",
-              "pkg/cmd/auth/login/login_test.go",
-              "pkg/cmd/auth/logout/logout.go",
-              "pkg/cmd/auth/logout/logout_test.go",
-              "pkg/cmd/auth/refresh/refresh_test.go",
-              "pkg/cmd/auth/status/status.go",
-              "pkg/cmd/auth/status/status_test.go",
-              "pkg/cmd/factory/default.go",
-              "pkg/cmd/issue/close/close.go",
-              "pkg/cmd/issue/close/close_test.go",
-              "pkg/cmd/issue/create/create.go",
-              "pkg/cmd/issue/create/create_test.go",
-              "pkg/cmd/issue/list/list.go",
-              "pkg/cmd/issue/list/list_test.go",
-              "pkg/cmd/issue/reopen/reopen.go",
-              "pkg/cmd/issue/reopen/reopen_test.go",
-              "pkg/cmd/issue/status/status.go",
-              "pkg/cmd/issue/status/status_test.go",
-              "pkg/cmd/issue/view/view.go",
-              "pkg/cmd/issue/view/view_test.go",
-              "pkg/cmd/pr/checkout/checkout.go",
-              "pkg/cmd/pr/checkout/checkout_test.go",
-              "pkg/cmd/pr/close/close.go",
-              "pkg/cmd/pr/close/close_test.go",
-              "pkg/cmd/pr/create/create.go",
-              "pkg/cmd/pr/create/create_test.go",
-              "pkg/cmd/pr/diff/diff.go",
-              "pkg/cmd/pr/diff/diff_test.go",
-              "pkg/cmd/pr/list/list.go",
-              "pkg/cmd/pr/list/list_test.go",
-              "pkg/cmd/pr/merge/merge.go",
-              "pkg/cmd/pr/merge/merge_test.go",
-              "pkg/cmd/pr/ready/ready.go",
-              "pkg/cmd/pr/ready/ready_test.go",
-              "pkg/cmd/pr/reopen/reopen.go",
-              "pkg/cmd/pr/reopen/reopen_test.go",
-              "pkg/cmd/pr/review/review.go",
-              "pkg/cmd/pr/review/review_test.go",
-              "pkg/cmd/pr/shared/lookup.go",
-              "pkg/cmd/pr/shared/params.go",
-              "pkg/cmd/pr/shared/title_body_survey.go",
-              "pkg/cmd/pr/status/fixtures/prStatus.json",
-              "pkg/cmd/pr/status/fixtures/prStatusChecks.json",
-              "pkg/cmd/pr/status/fixtures/prStatusCurrentBranch.json",
-              "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchClosed.json",
-              "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchClosedOnDefaultBranch.json",
-              "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchMerged.json",
-              "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchMergedOnDefaultBranch.json",
-              "pkg/cmd/pr/status/status.go",
-              "pkg/cmd/pr/status/status_test.go",
-              "pkg/cmd/pr/view/fixtures/prViewPreviewWithMetadataByNumber.json",
-              "pkg/cmd/pr/view/fixtures/prViewPreviewWithReviewersByNumber.json",
-              "pkg/cmd/pr/view/fixtures/prView_NoActiveBranch.json",
-              "pkg/cmd/pr/view/view.go",
-              "pkg/cmd/pr/view/view_test.go",
-              "pkg/cmd/repo/clone/clone.go",
-              "pkg/cmd/repo/clone/clone_test.go",
-              "pkg/cmd/repo/create/create.go",
-              "pkg/cmd/repo/credits/credits.go",
-              "pkg/cmd/repo/fork/fork.go",
-              "pkg/cmd/repo/fork/fork_test.go",
-              "pkg/cmd/repo/repo.go",
-              "pkg/cmd/repo/view/view.go",
-              "pkg/cmd/repo/view/view_test.go",
-              "pkg/cmd/root/root.go",
-              "pkg/cmdutil/factory.go",
-              "pkg/cmdutil/repo_override.go",
-              "pkg/httpmock/legacy.go"
+              "pkg/cmd/repo/view/view.go"
             ],
             "spans": {
-              "api/client_test.go": [
-                {
-                  "start": 35,
-                  "end": 35
-                }
-              ],
-              "api/queries_pr_test.go": [
-                {
-                  "start": 39,
-                  "end": 39
-                }
-              ],
-              "api/queries_issue_test.go": [
-                {
-                  "start": 42,
-                  "end": 42
-                }
-              ],
-              "api/queries_user.go": [
-                {
-                  "start": 7,
-                  "end": 7
-                }
-              ],
-              "api/queries_repo.go": [
-                {
-                  "start": 95,
-                  "end": 95
-                },
-                {
-                  "start": 197,
-                  "end": 197
-                },
-                {
-                  "start": 204,
-                  "end": 204
-                },
-                {
-                  "start": 237,
-                  "end": 237
-                },
-                {
-                  "start": 238,
-                  "end": 238
-                },
-                {
-                  "start": 242,
-                  "end": 242
-                },
-                {
-                  "start": 245,
-                  "end": 245
-                },
-                {
-                  "start": 306,
-                  "end": 306
-                },
-                {
-                  "start": 330,
-                  "end": 330
-                },
-                {
-                  "start": 441,
-                  "end": 441
-                },
-                {
-                  "start": 453,
-                  "end": 453
-                },
-                {
-                  "start": 464,
-                  "end": 464
-                },
-                {
-                  "start": 532,
-                  "end": 532
-                },
-                {
-                  "start": 551,
-                  "end": 551
-                }
-              ],
-              "api/queries_issue.go": [
-                {
-                  "start": 146,
-                  "end": 146
-                },
-                {
-                  "start": 149,
-                  "end": 149
-                },
-                {
-                  "start": 155,
-                  "end": 155
-                },
-                {
-                  "start": 161,
-                  "end": 161
-                },
-                {
-                  "start": 173,
-                  "end": 173
-                }
-              ],
-              "api/queries_repo_test.go": [
-                {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 17,
-                  "end": 17
-                },
-                {
-                  "start": 145,
-                  "end": 145
-                },
-                {
-                  "start": 148,
-                  "end": 148
-                }
-              ],
-              "api/queries_pr.go": [
-                {
-                  "start": 89,
-                  "end": 89
-                },
-                {
-                  "start": 295,
-                  "end": 295
-                },
-                {
-                  "start": 310,
-                  "end": 310
-                },
-                {
-                  "start": 321,
-                  "end": 321
-                },
-                {
-                  "start": 329,
-                  "end": 329
-                },
-                {
-                  "start": 340,
-                  "end": 340
-                },
-                {
-                  "start": 341,
-                  "end": 341
-                },
-                {
-                  "start": 349,
-                  "end": 349
-                },
-                {
-                  "start": 350,
-                  "end": 350
-                },
-                {
-                  "start": 363,
-                  "end": 363
-                },
-                {
-                  "start": 365,
-                  "end": 365
-                },
-                {
-                  "start": 385,
-                  "end": 385
-                },
-                {
-                  "start": 437,
-                  "end": 437
-                },
-                {
-                  "start": 544,
-                  "end": 544
-                },
-                {
-                  "start": 690,
-                  "end": 690
-                },
-                {
-                  "start": 692,
-                  "end": 692
-                },
-                {
-                  "start": 695,
-                  "end": 695
-                }
-              ],
-              "internal/ghrepo/repo_test.go": [
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 177,
-                  "end": 177
-                }
-              ],
-              "pkg/httpmock/legacy.go": [
-                {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 92,
-                  "end": 92
-                },
-                {
-                  "start": 100,
-                  "end": 100
-                }
-              ],
-              "pkg/cmdutil/repo_override.go": [
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 21,
-                  "end": 21
-                }
-              ],
-              "pkg/cmdutil/factory.go": [
-                {
-                  "start": 15,
-                  "end": 15
-                }
-              ],
-              "internal/ghrepo/repo.go": [
-                {
-                  "start": 38,
-                  "end": 38
-                },
-                {
-                  "start": 40,
-                  "end": 40
-                }
-              ],
-              "internal/config/config_setup.go": [
-                {
-                  "start": 97,
-                  "end": 97
-                }
-              ],
-              "context/remote_test.go": [
-                {
-                  "start": 111,
-                  "end": 111
-                },
-                {
-                  "start": 148,
-                  "end": 148
-                },
-                {
-                  "start": 209,
-                  "end": 209
-                }
-              ],
-              "context/context.go": [
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 78,
-                  "end": 78
-                },
-                {
-                  "start": 80,
-                  "end": 80
-                },
-                {
-                  "start": 107,
-                  "end": 107
-                }
-              ],
-              "pkg/cmd/repo/repo.go": [
-                {
-                  "start": 22,
-                  "end": 22
-                }
-              ],
-              "pkg/cmd/factory/default.go": [
-                {
-                  "start": 52,
-                  "end": 52
-                }
-              ],
-              "pkg/cmd/api/api.go": [
-                {
-                  "start": 41,
-                  "end": 41
-                },
-                {
-                  "start": 49,
-                  "end": 49
-                },
-                {
-                  "start": 106,
-                  "end": 106
-                },
-                {
-                  "start": 301,
-                  "end": 301
-                }
-              ],
-              "pkg/cmd/api/api_test.go": [
-                {
-                  "start": 656,
-                  "end": 656
-                },
-                {
-                  "start": 738,
-                  "end": 738
-                },
-                {
-                  "start": 749,
-                  "end": 749
-                },
-                {
-                  "start": 762,
-                  "end": 762
-                },
-                {
-                  "start": 778,
-                  "end": 778
-                },
-                {
-                  "start": 794,
-                  "end": 794
-                }
-              ],
-              "pkg/cmd/repo/clone/clone.go": [
-                {
-                  "start": 88,
-                  "end": 88
-                },
-                {
-                  "start": 94,
-                  "end": 94
-                }
-              ],
-              "pkg/cmd/repo/credits/credits.go": [
-                {
-                  "start": 26,
-                  "end": 26
-                },
-                {
-                  "start": 37,
-                  "end": 37
-                },
-                {
-                  "start": 74,
-                  "end": 74
-                },
-                {
-                  "start": 125,
-                  "end": 125
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                }
-              ],
-              "pkg/cmd/repo/fork/fork_test.go": [
-                {
-                  "start": 40,
-                  "end": 40
-                }
-              ],
-              "pkg/cmd/repo/fork/fork.go": [
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 46,
-                  "end": 46
-                },
-                {
-                  "start": 89,
-                  "end": 89
-                },
-                {
-                  "start": 119,
-                  "end": 119
-                }
-              ],
-              "pkg/cmd/repo/view/view_test.go": [
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 228,
-                  "end": 228
-                },
-                {
-                  "start": 229,
-                  "end": 229
-                },
-                {
-                  "start": 315,
-                  "end": 315
-                },
-                {
-                  "start": 381,
-                  "end": 381
-                },
-                {
-                  "start": 451,
-                  "end": 451
-                }
-              ],
               "pkg/cmd/repo/view/view.go": [
                 {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                },
-                {
-                  "start": 68,
-                  "end": 68
-                },
-                {
-                  "start": 74,
-                  "end": 74
-                }
-              ],
-              "pkg/cmd/pr/reopen/reopen.go": [
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 39,
-                  "end": 39
-                },
-                {
-                  "start": 62,
-                  "end": 62
-                }
-              ],
-              "pkg/cmd/auth/login/login.go": [
-                {
-                  "start": 178,
-                  "end": 178
-                },
-                {
-                  "start": 272,
-                  "end": 272
-                }
-              ],
-              "pkg/cmd/auth/login/login_test.go": [
-                {
-                  "start": 298,
-                  "end": 298
-                },
-                {
-                  "start": 321,
-                  "end": 321
-                },
-                {
-                  "start": 338,
-                  "end": 338
-                },
-                {
-                  "start": 401,
-                  "end": 401
-                }
-              ],
-              "pkg/cmd/auth/logout/logout_test.go": [
-                {
-                  "start": 141,
-                  "end": 141
-                }
-              ],
-              "pkg/cmd/auth/refresh/refresh_test.go": [
-                {
-                  "start": 217,
-                  "end": 217
-                }
-              ],
-              "pkg/cmd/auth/status/status.go": [
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 166,
-                  "end": 166
-                }
-              ],
-              "pkg/cmd/pr/review/review_test.go": [
-                {
-                  "start": 38,
-                  "end": 38
-                }
-              ],
-              "pkg/cmd/auth/logout/logout.go": [
-                {
-                  "start": 123,
-                  "end": 123
-                }
-              ],
-              "pkg/cmd/pr/review/review.go": [
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 71,
-                  "end": 71
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                }
-              ],
-              "pkg/cmd/auth/status/status_test.go": [
-                {
-                  "start": 141,
-                  "end": 141
-                },
-                {
-                  "start": 158,
-                  "end": 158
-                },
-                {
-                  "start": 175,
-                  "end": 175
-                },
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 208,
-                  "end": 208
-                },
-                {
-                  "start": 225,
-                  "end": 225
-                },
-                {
-                  "start": 228,
-                  "end": 228
-                }
-              ],
-              "pkg/cmd/pr/list/list.go": [
-                {
-                  "start": 22,
-                  "end": 22
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 80,
-                  "end": 80
-                }
-              ],
-              "pkg/cmd/pr/list/list_test.go": [
-                {
-                  "start": 40,
-                  "end": 40
-                }
-              ],
-              "pkg/cmd/pr/reopen/reopen_test.go": [
-                {
-                  "start": 33,
-                  "end": 33
-                }
-              ],
-              "pkg/cmd/pr/create/create.go": [
-                {
-                  "start": 43,
-                  "end": 43
-                },
-                {
-                  "start": 66,
-                  "end": 66
-                },
-                {
-                  "start": 84,
-                  "end": 84
-                },
-                {
-                  "start": 85,
-                  "end": 85
-                },
-                {
-                  "start": 102,
-                  "end": 102
-                },
-                {
-                  "start": 128,
-                  "end": 128
-                },
-                {
-                  "start": 237,
-                  "end": 237
-                }
-              ],
-              "pkg/cmd/pr/create/create_test.go": [
-                {
-                  "start": 567,
-                  "end": 567
-                },
-                {
-                  "start": 577,
-                  "end": 577
-                },
-                {
-                  "start": 585,
-                  "end": 585
-                }
-              ],
-              "pkg/cmd/pr/view/view_test.go": [
-                {
-                  "start": 45,
-                  "end": 45
-                },
-                {
-                  "start": 97,
-                  "end": 97
-                },
-                {
-                  "start": 109,
-                  "end": 109
-                },
-                {
-                  "start": 117,
-                  "end": 117
-                },
-                {
-                  "start": 120,
-                  "end": 120
-                },
-                {
-                  "start": 129,
-                  "end": 129
-                },
-                {
-                  "start": 186,
-                  "end": 186
-                },
-                {
-                  "start": 201,
-                  "end": 201
-                },
-                {
-                  "start": 282,
-                  "end": 282
-                },
-                {
-                  "start": 291,
-                  "end": 291
-                },
-                {
-                  "start": 294,
-                  "end": 294
-                },
-                {
-                  "start": 297,
-                  "end": 297
-                }
-              ],
-              "pkg/cmd/pr/view/view.go": [
-                {
-                  "start": 26,
-                  "end": 26
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 114,
-                  "end": 114
-                },
-                {
-                  "start": 138,
-                  "end": 138
-                },
-                {
-                  "start": 139,
-                  "end": 139
-                },
-                {
-                  "start": 140,
-                  "end": 140
-                },
-                {
-                  "start": 185,
-                  "end": 185
-                },
-                {
-                  "start": 190,
-                  "end": 190
-                },
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 206,
-                  "end": 206
-                },
-                {
-                  "start": 207,
-                  "end": 207
-                },
-                {
-                  "start": 208,
-                  "end": 208
-                },
-                {
-                  "start": 214,
-                  "end": 214
-                },
-                {
-                  "start": 215,
-                  "end": 215
-                },
-                {
-                  "start": 218,
-                  "end": 218
-                },
-                {
-                  "start": 219,
-                  "end": 219
-                },
-                {
-                  "start": 220,
+                  "start": 1,
                   "end": 220
-                },
-                {
-                  "start": 221,
-                  "end": 221
-                },
-                {
-                  "start": 223,
-                  "end": 223
-                },
-                {
-                  "start": 225,
-                  "end": 225
-                },
-                {
-                  "start": 226,
-                  "end": 226
-                },
-                {
-                  "start": 229,
-                  "end": 229
-                },
-                {
-                  "start": 231,
-                  "end": 231
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 239,
-                  "end": 239
-                },
-                {
-                  "start": 240,
-                  "end": 240
-                },
-                {
-                  "start": 241,
-                  "end": 241
-                },
-                {
-                  "start": 249,
-                  "end": 249
-                },
-                {
-                  "start": 256,
-                  "end": 256
-                },
-                {
-                  "start": 258,
-                  "end": 258
-                },
-                {
-                  "start": 259,
-                  "end": 259
-                },
-                {
-                  "start": 260,
-                  "end": 260
-                },
-                {
-                  "start": 262,
-                  "end": 262
-                },
-                {
-                  "start": 269,
-                  "end": 269
-                },
-                {
-                  "start": 270,
-                  "end": 270
-                },
-                {
-                  "start": 271,
-                  "end": 271
-                },
-                {
-                  "start": 274,
-                  "end": 274
-                },
-                {
-                  "start": 280,
-                  "end": 280
-                },
-                {
-                  "start": 281,
-                  "end": 281
-                },
-                {
-                  "start": 282,
-                  "end": 282
-                },
-                {
-                  "start": 283,
-                  "end": 283
-                },
-                {
-                  "start": 284,
-                  "end": 284
-                },
-                {
-                  "start": 287,
-                  "end": 287
-                },
-                {
-                  "start": 288,
-                  "end": 288
-                },
-                {
-                  "start": 292,
-                  "end": 292
-                }
-              ],
-              "pkg/cmd/pr/view/fixtures/prView_NoActiveBranch.json": [
-                {
-                  "start": 7,
-                  "end": 7
-                }
-              ],
-              "pkg/cmd/pr/checkout/checkout.go": [
-                {
-                  "start": 26,
-                  "end": 26
-                },
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 89,
-                  "end": 89
-                }
-              ],
-              "pkg/cmd/pr/shared/title_body_survey.go": [
-                {
-                  "start": 37,
-                  "end": 37
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 152,
-                  "end": 152
-                },
-                {
-                  "start": 228,
-                  "end": 228
-                },
-                {
-                  "start": 229,
-                  "end": 229
-                },
-                {
-                  "start": 247,
-                  "end": 247
-                },
-                {
-                  "start": 283,
-                  "end": 283
-                },
-                {
-                  "start": 290,
-                  "end": 290
-                },
-                {
-                  "start": 293,
-                  "end": 293
-                },
-                {
-                  "start": 295,
-                  "end": 295
-                },
-                {
-                  "start": 297,
-                  "end": 297
-                },
-                {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 369,
-                  "end": 369
-                }
-              ],
-              "pkg/cmd/pr/close/close_test.go": [
-                {
-                  "start": 33,
-                  "end": 33
-                }
-              ],
-              "pkg/cmd/pr/ready/ready_test.go": [
-                {
-                  "start": 35,
-                  "end": 35
-                }
-              ],
-              "pkg/cmd/pr/ready/ready.go": [
-                {
-                  "start": 22,
-                  "end": 22
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 67,
-                  "end": 67
-                }
-              ],
-              "pkg/cmd/pr/merge/merge.go": [
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 65,
-                  "end": 65
-                },
-                {
-                  "start": 117,
-                  "end": 117
-                }
-              ],
-              "pkg/cmd/pr/close/close.go": [
-                {
-                  "start": 22,
-                  "end": 22
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 70,
-                  "end": 70
-                }
-              ],
-              "pkg/cmd/pr/shared/lookup.go": [
-                {
-                  "start": 22,
-                  "end": 22
-                }
-              ],
-              "pkg/cmd/pr/shared/params.go": [
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 87,
-                  "end": 87
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                },
-                {
-                  "start": 92,
-                  "end": 92
-                },
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 95,
-                  "end": 95
-                },
-                {
-                  "start": 97,
-                  "end": 97
-                },
-                {
-                  "start": 101,
-                  "end": 101
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                },
-                {
-                  "start": 105,
-                  "end": 105
-                },
-                {
-                  "start": 107,
-                  "end": 107
-                },
-                {
-                  "start": 109,
-                  "end": 109
-                },
-                {
-                  "start": 111,
-                  "end": 111
-                }
-              ],
-              "pkg/cmd/pr/diff/diff.go": [
-                {
-                  "start": 25,
-                  "end": 25
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 80,
-                  "end": 80
-                }
-              ],
-              "pkg/cmd/pr/status/status.go": [
-                {
-                  "start": 29,
-                  "end": 29
-                },
-                {
-                  "start": 51,
-                  "end": 51
-                },
-                {
-                  "start": 71,
-                  "end": 71
-                }
-              ],
-              "pkg/cmd/pr/merge/merge_test.go": [
-                {
-                  "start": 39,
-                  "end": 39
-                }
-              ],
-              "pkg/cmd/pr/diff/diff_test.go": [
-                {
-                  "start": 38,
-                  "end": 38
-                }
-              ],
-              "pkg/cmd/pr/status/status_test.go": [
-                {
-                  "start": 36,
-                  "end": 36
-                }
-              ],
-              "pkg/cmd/pr/checkout/checkout_test.go": [
-                {
-                  "start": 58,
-                  "end": 58
-                }
-              ],
-              "pkg/cmd/pr/view/fixtures/prViewPreviewWithMetadataByNumber.json": [
-                {
-                  "start": 16,
-                  "end": 16
-                }
-              ],
-              "pkg/cmd/pr/view/fixtures/prViewPreviewWithReviewersByNumber.json": [
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 22,
-                  "end": 22
-                },
-                {
-                  "start": 28,
-                  "end": 28
-                }
-              ],
-              "pkg/cmd/root/root.go": [
-                {
-                  "start": 111,
-                  "end": 111
-                },
-                {
-                  "start": 113,
-                  "end": 113
-                },
-                {
-                  "start": 122,
-                  "end": 122
-                },
-                {
-                  "start": 139,
-                  "end": 139
-                }
-              ],
-              "pkg/cmd/pr/status/fixtures/prStatusCurrentBranch.json": [
-                {
-                  "start": 52,
-                  "end": 52
-                }
-              ],
-              "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchClosedOnDefaultBranch.json": [
-                {
-                  "start": 20,
-                  "end": 20
-                }
-              ],
-              "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchMergedOnDefaultBranch.json": [
-                {
-                  "start": 20,
-                  "end": 20
-                }
-              ],
-              "pkg/cmd/pr/status/fixtures/prStatusChecks.json": [
-                {
-                  "start": 9,
-                  "end": 9
-                }
-              ],
-              "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchClosed.json": [
-                {
-                  "start": 38,
-                  "end": 38
-                }
-              ],
-              "pkg/cmd/pr/status/fixtures/prStatus.json": [
-                {
-                  "start": 24,
-                  "end": 24
-                }
-              ],
-              "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchMerged.json": [
-                {
-                  "start": 38,
-                  "end": 38
-                }
-              ],
-              "pkg/cmd/issue/reopen/reopen_test.go": [
-                {
-                  "start": 33,
-                  "end": 33
-                }
-              ],
-              "pkg/cmd/issue/close/close_test.go": [
-                {
-                  "start": 33,
-                  "end": 33
-                }
-              ],
-              "pkg/cmd/issue/close/close.go": [
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 39,
-                  "end": 39
-                },
-                {
-                  "start": 62,
-                  "end": 62
-                }
-              ],
-              "pkg/cmd/issue/view/view.go": [
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 78,
-                  "end": 78
-                }
-              ],
-              "pkg/cmd/issue/view/view_test.go": [
-                {
-                  "start": 42,
-                  "end": 42
-                }
-              ],
-              "pkg/cmd/issue/status/status.go": [
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 37,
-                  "end": 37
-                },
-                {
-                  "start": 56,
-                  "end": 56
-                },
-                {
-                  "start": 61,
-                  "end": 61
-                }
-              ],
-              "pkg/cmd/issue/create/create_test.go": [
-                {
-                  "start": 45,
-                  "end": 45
-                },
-                {
-                  "start": 139,
-                  "end": 139
-                }
-              ],
-              "pkg/cmd/issue/create/create.go": [
-                {
-                  "start": 24,
-                  "end": 24
-                },
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                }
-              ],
-              "pkg/cmd/issue/reopen/reopen.go": [
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 39,
-                  "end": 39
-                },
-                {
-                  "start": 62,
-                  "end": 62
-                }
-              ],
-              "pkg/cmd/issue/status/status_test.go": [
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 94,
-                  "end": 94
-                },
-                {
-                  "start": 134,
-                  "end": 134
-                }
-              ],
-              "pkg/cmd/issue/list/list_test.go": [
-                {
-                  "start": 44,
-                  "end": 44
-                }
-              ],
-              "pkg/cmd/issue/list/list.go": [
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 87,
-                  "end": 87
-                }
-              ],
-              "pkg/cmd/repo/create/create.go": [
-                {
-                  "start": 94,
-                  "end": 94
-                }
-              ],
-              "pkg/cmd/repo/clone/clone_test.go": [
-                {
-                  "start": 155,
-                  "end": 155
                 }
               ]
             },
@@ -1570,138 +132,69 @@
           },
           {
             "files": [
-              "pkg/cmd/repo/view/view.go"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "internal/ghrepo/repo.go"
             ],
-            "spans": {},
+            "spans": {
+              "internal/ghrepo/repo.go": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "pkg/cmd/repo/view/view_test.go"
             ],
-            "spans": {},
+            "spans": {
+              "pkg/cmd/repo/view/view_test.go": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/view/view_test.go"
+            ],
+            "spans": {
+              "pkg/cmd/repo/view/view_test.go": [
+                {
+                  "start": 260,
+                  "end": 560
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "api/queries_user.go"
             ],
-            "spans": {},
+            "spans": {
+              "api/queries_user.go": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "pkg/cmd/repo/clone/clone.go"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "api/queries_user.go",
-              "internal/config/config_setup.go",
-              "pkg/cmd/auth/login/login.go",
-              "pkg/cmd/auth/logout/logout.go",
-              "pkg/cmd/auth/status/status.go",
-              "pkg/cmd/issue/status/status.go",
-              "pkg/cmd/repo/clone/clone.go",
-              "pkg/cmd/repo/create/create.go",
-              "pkg/cmd/repo/credits/credits.go",
-              "pkg/cmd/repo/fork/fork.go",
-              "pkg/cmd/repo/view/view.go"
-            ],
             "spans": {
-              "internal/config/config_setup.go": [
-                {
-                  "start": 97,
-                  "end": 97
-                }
-              ],
-              "api/queries_user.go": [
-                {
-                  "start": 7,
-                  "end": 7
-                }
-              ],
-              "pkg/cmd/repo/create/create.go": [
-                {
-                  "start": 94,
-                  "end": 94
-                },
-                {
-                  "start": 96,
-                  "end": 96
-                }
-              ],
-              "pkg/cmd/auth/login/login.go": [
-                {
-                  "start": 178,
-                  "end": 178
-                },
-                {
-                  "start": 272,
-                  "end": 272
-                }
-              ],
-              "pkg/cmd/repo/credits/credits.go": [
-                {
-                  "start": 130,
-                  "end": 130
-                }
-              ],
-              "pkg/cmd/repo/view/view.go": [
-                {
-                  "start": 74,
-                  "end": 74
-                },
-                {
-                  "start": 76,
-                  "end": 76
-                }
-              ],
-              "pkg/cmd/auth/logout/logout.go": [
-                {
-                  "start": 123,
-                  "end": 123
-                }
-              ],
-              "pkg/cmd/auth/status/status.go": [
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 166,
-                  "end": 166
-                }
-              ],
               "pkg/cmd/repo/clone/clone.go": [
                 {
-                  "start": 88,
-                  "end": 88
-                }
-              ],
-              "pkg/cmd/repo/fork/fork.go": [
-                {
-                  "start": 119,
-                  "end": 119
-                },
-                {
-                  "start": 121,
-                  "end": 121
-                }
-              ],
-              "pkg/cmd/issue/status/status.go": [
-                {
-                  "start": 61,
-                  "end": 61
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -1711,222 +204,151 @@
             "files": [
               "internal/ghrepo/repo_test.go"
             ],
-            "spans": {},
+            "spans": {
+              "internal/ghrepo/repo_test.go": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "pkg/cmd/repo/repo.go"
             ],
-            "spans": {},
+            "spans": {
+              "pkg/cmd/repo/repo.go": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "pkg/cmd/repo/clone/clone_test.go"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "pkg/cmd/auth/login/login.go",
-              "pkg/cmd/auth/login/login_test.go",
-              "pkg/cmd/auth/logout/logout.go",
-              "pkg/cmd/auth/logout/logout_test.go",
-              "pkg/cmd/auth/refresh/refresh_test.go",
-              "pkg/cmd/auth/status/status.go",
-              "pkg/cmd/auth/status/status_test.go",
-              "pkg/cmd/issue/status/status.go",
-              "pkg/cmd/issue/status/status_test.go",
-              "pkg/cmd/repo/clone/clone.go",
               "pkg/cmd/repo/clone/clone_test.go"
             ],
             "spans": {
               "pkg/cmd/repo/clone/clone_test.go": [
                 {
-                  "start": 153,
-                  "end": 153
-                },
-                {
-                  "start": 153,
-                  "end": 153
+                  "start": 1,
+                  "end": 260
                 }
-              ],
-              "pkg/cmd/auth/login/login_test.go": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/view/view.go"
+            ],
+            "spans": {
+              "pkg/cmd/repo/view/view.go": [
                 {
-                  "start": 297,
-                  "end": 297
-                },
-                {
-                  "start": 298,
-                  "end": 298
-                },
-                {
-                  "start": 320,
-                  "end": 320
-                },
-                {
-                  "start": 321,
-                  "end": 321
-                },
-                {
-                  "start": 337,
-                  "end": 337
-                },
-                {
-                  "start": 338,
-                  "end": 338
-                },
-                {
-                  "start": 400,
-                  "end": 400
-                },
-                {
-                  "start": 401,
-                  "end": 401
+                  "start": 1,
+                  "end": 180
                 }
-              ],
-              "pkg/cmd/auth/login/login.go": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/view/view.go"
+            ],
+            "spans": {
+              "pkg/cmd/repo/view/view.go": [
                 {
-                  "start": 178,
-                  "end": 178
-                },
-                {
-                  "start": 272,
-                  "end": 272
-                }
-              ],
-              "pkg/cmd/auth/status/status.go": [
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 166,
-                  "end": 166
-                }
-              ],
-              "pkg/cmd/auth/refresh/refresh_test.go": [
-                {
-                  "start": 216,
-                  "end": 216
-                },
-                {
-                  "start": 217,
-                  "end": 217
-                }
-              ],
-              "pkg/cmd/issue/status/status.go": [
-                {
-                  "start": 61,
-                  "end": 61
-                }
-              ],
-              "pkg/cmd/issue/status/status_test.go": [
-                {
-                  "start": 62,
-                  "end": 62
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 94,
-                  "end": 94
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                },
-                {
-                  "start": 134,
-                  "end": 134
-                }
-              ],
-              "pkg/cmd/auth/logout/logout.go": [
-                {
-                  "start": 123,
-                  "end": 123
-                }
-              ],
-              "pkg/cmd/auth/logout/logout_test.go": [
-                {
-                  "start": 140,
+                  "start": 1,
                   "end": 140
-                },
-                {
-                  "start": 141,
-                  "end": 141
                 }
-              ],
-              "pkg/cmd/auth/status/status_test.go": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/view/view_test.go"
+            ],
+            "spans": {
+              "pkg/cmd/repo/view/view_test.go": [
                 {
-                  "start": 140,
-                  "end": 140
-                },
-                {
-                  "start": 141,
-                  "end": 141
-                },
-                {
-                  "start": 157,
-                  "end": 157
-                },
-                {
-                  "start": 158,
-                  "end": 158
-                },
-                {
-                  "start": 174,
-                  "end": 174
-                },
-                {
-                  "start": 175,
-                  "end": 175
-                },
-                {
-                  "start": 190,
-                  "end": 190
-                },
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 207,
-                  "end": 207
-                },
-                {
-                  "start": 208,
-                  "end": 208
-                },
-                {
-                  "start": 224,
-                  "end": 224
-                },
-                {
-                  "start": 225,
-                  "end": 225
-                },
-                {
-                  "start": 227,
-                  "end": 227
-                },
-                {
-                  "start": 228,
-                  "end": 228
+                  "start": 120,
+                  "end": 260
                 }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/view/view_test.go"
+            ],
+            "spans": {
+              "pkg/cmd/repo/view/view_test.go": [
+                {
+                  "start": 180,
+                  "end": 235
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/view/view_test.go"
+            ],
+            "spans": {
+              "pkg/cmd/repo/view/view_test.go": [
+                {
+                  "start": 120,
+                  "end": 290
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/view/view.go"
+            ],
+            "spans": {
+              "pkg/cmd/repo/view/view.go": [
+                {
+                  "start": 1,
+                  "end": 130
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/clone/clone.go"
+            ],
+            "spans": {
               "pkg/cmd/repo/clone/clone.go": [
                 {
-                  "start": 88,
-                  "end": 88
+                  "start": 70,
+                  "end": 105
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "api/queries_user.go"
+            ],
+            "spans": {
+              "api/queries_user.go": [
+                {
+                  "start": 1,
+                  "end": 40
                 }
               ]
             },
@@ -1934,1554 +356,31 @@
           }
         ],
         "predFiles": [
-          "<worktree>/api/queries_user.go",
-          "<worktree>/pkg/cmd/repo/clone/clone.go",
-          "<worktree>/pkg/cmd/repo/view/view.go",
-          "<worktree>/pkg/cmd/repo/view/view_test.go",
-          "api/client.go",
-          "api/client_test.go",
-          "api/pull_request_test.go",
-          "api/queries_issue.go",
-          "api/queries_issue_test.go",
-          "api/queries_org.go",
-          "api/queries_pr.go",
-          "api/queries_pr_test.go",
-          "api/queries_repo.go",
-          "api/queries_repo_test.go",
           "api/queries_user.go",
-          "auth/oauth.go",
-          "context/blank_context.go",
-          "context/context.go",
-          "context/remote.go",
-          "context/remote_test.go",
-          "internal/config/config_setup.go",
-          "internal/ghrepo/repo.go",
-          "internal/ghrepo/repo_test.go",
-          "pkg/cmd/api/api.go",
-          "pkg/cmd/api/api_test.go",
-          "pkg/cmd/api/http.go",
-          "pkg/cmd/api/http_test.go",
-          "pkg/cmd/api/pagination.go",
-          "pkg/cmd/api/pagination_test.go",
-          "pkg/cmd/auth/auth.go",
-          "pkg/cmd/auth/client/client.go",
-          "pkg/cmd/auth/login/login.go",
-          "pkg/cmd/auth/login/login_test.go",
-          "pkg/cmd/auth/logout/logout.go",
-          "pkg/cmd/auth/logout/logout_test.go",
-          "pkg/cmd/auth/refresh/refresh.go",
-          "pkg/cmd/auth/refresh/refresh_test.go",
-          "pkg/cmd/auth/status/status.go",
-          "pkg/cmd/auth/status/status_test.go",
-          "pkg/cmd/factory/default.go",
-          "pkg/cmd/factory/http.go",
-          "pkg/cmd/factory/remote_resolver.go",
-          "pkg/cmd/factory/remote_resolver_test.go",
-          "pkg/cmd/issue/close/close.go",
-          "pkg/cmd/issue/close/close_test.go",
-          "pkg/cmd/issue/create/create.go",
-          "pkg/cmd/issue/create/create_test.go",
-          "pkg/cmd/issue/list/list.go",
-          "pkg/cmd/issue/list/list_test.go",
-          "pkg/cmd/issue/reopen/reopen.go",
-          "pkg/cmd/issue/reopen/reopen_test.go",
-          "pkg/cmd/issue/status/status.go",
-          "pkg/cmd/issue/status/status_test.go",
-          "pkg/cmd/issue/view/view.go",
-          "pkg/cmd/issue/view/view_test.go",
-          "pkg/cmd/pr/checkout/checkout.go",
-          "pkg/cmd/pr/checkout/checkout_test.go",
-          "pkg/cmd/pr/close/close.go",
-          "pkg/cmd/pr/close/close_test.go",
-          "pkg/cmd/pr/create/create.go",
-          "pkg/cmd/pr/create/create_test.go",
-          "pkg/cmd/pr/diff/diff.go",
-          "pkg/cmd/pr/diff/diff_test.go",
-          "pkg/cmd/pr/list/list.go",
-          "pkg/cmd/pr/list/list_test.go",
-          "pkg/cmd/pr/merge/merge.go",
-          "pkg/cmd/pr/merge/merge_test.go",
-          "pkg/cmd/pr/ready/ready.go",
-          "pkg/cmd/pr/ready/ready_test.go",
-          "pkg/cmd/pr/reopen/reopen.go",
-          "pkg/cmd/pr/reopen/reopen_test.go",
-          "pkg/cmd/pr/review/review.go",
-          "pkg/cmd/pr/review/review_test.go",
-          "pkg/cmd/pr/shared/lookup.go",
-          "pkg/cmd/pr/shared/params.go",
-          "pkg/cmd/pr/shared/title_body_survey.go",
-          "pkg/cmd/pr/status/fixtures/prStatus.json",
-          "pkg/cmd/pr/status/fixtures/prStatusChecks.json",
-          "pkg/cmd/pr/status/fixtures/prStatusCurrentBranch.json",
-          "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchClosed.json",
-          "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchClosedOnDefaultBranch.json",
-          "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchMerged.json",
-          "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchMergedOnDefaultBranch.json",
-          "pkg/cmd/pr/status/status.go",
-          "pkg/cmd/pr/status/status_test.go",
-          "pkg/cmd/pr/view/fixtures/prViewPreviewWithMetadataByNumber.json",
-          "pkg/cmd/pr/view/fixtures/prViewPreviewWithReviewersByNumber.json",
-          "pkg/cmd/pr/view/fixtures/prView_NoActiveBranch.json",
-          "pkg/cmd/pr/view/view.go",
-          "pkg/cmd/pr/view/view_test.go",
           "pkg/cmd/repo/clone/clone.go",
-          "pkg/cmd/repo/clone/clone_test.go",
-          "pkg/cmd/repo/create/create.go",
-          "pkg/cmd/repo/create/create_test.go",
-          "pkg/cmd/repo/create/http.go",
-          "pkg/cmd/repo/create/http_test.go",
-          "pkg/cmd/repo/credits/credits.go",
-          "pkg/cmd/repo/fork/fork.go",
-          "pkg/cmd/repo/fork/forkResult.json",
-          "pkg/cmd/repo/fork/fork_test.go",
-          "pkg/cmd/repo/repo.go",
-          "pkg/cmd/repo/view/http.go",
           "pkg/cmd/repo/view/view.go",
-          "pkg/cmd/repo/view/view_test.go",
-          "pkg/cmd/root/root.go",
-          "pkg/cmdutil/factory.go",
-          "pkg/cmdutil/repo_override.go",
-          "pkg/httpmock/legacy.go",
-          "pkg/iostreams/iostreams.go"
+          "pkg/cmd/repo/view/view_test.go"
         ],
         "predSpans": {
-          "api/client_test.go": [
+          "pkg/cmd/repo/view/view.go": [
             {
-              "start": 35,
-              "end": 35
-            }
-          ],
-          "api/queries_pr_test.go": [
-            {
-              "start": 39,
-              "end": 39
-            }
-          ],
-          "api/queries_issue_test.go": [
-            {
-              "start": 42,
-              "end": 42
-            }
-          ],
-          "api/queries_user.go": [
-            {
-              "start": 7,
-              "end": 7
-            }
-          ],
-          "api/queries_repo.go": [
-            {
-              "start": 95,
-              "end": 95
-            },
-            {
-              "start": 197,
-              "end": 197
-            },
-            {
-              "start": 204,
-              "end": 204
-            },
-            {
-              "start": 237,
-              "end": 237
-            },
-            {
-              "start": 238,
-              "end": 238
-            },
-            {
-              "start": 242,
-              "end": 242
-            },
-            {
-              "start": 245,
-              "end": 245
-            },
-            {
-              "start": 306,
-              "end": 306
-            },
-            {
-              "start": 330,
-              "end": 330
-            },
-            {
-              "start": 441,
-              "end": 441
-            },
-            {
-              "start": 453,
-              "end": 453
-            },
-            {
-              "start": 464,
-              "end": 464
-            },
-            {
-              "start": 532,
-              "end": 532
-            },
-            {
-              "start": 551,
-              "end": 551
-            }
-          ],
-          "api/queries_issue.go": [
-            {
-              "start": 146,
-              "end": 146
-            },
-            {
-              "start": 149,
-              "end": 149
-            },
-            {
-              "start": 155,
-              "end": 155
-            },
-            {
-              "start": 161,
-              "end": 161
-            },
-            {
-              "start": 173,
-              "end": 173
-            }
-          ],
-          "api/queries_repo_test.go": [
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 17,
-              "end": 17
-            },
-            {
-              "start": 145,
-              "end": 145
-            },
-            {
-              "start": 148,
-              "end": 148
-            }
-          ],
-          "api/queries_pr.go": [
-            {
-              "start": 89,
-              "end": 89
-            },
-            {
-              "start": 295,
-              "end": 295
-            },
-            {
-              "start": 310,
-              "end": 310
-            },
-            {
-              "start": 321,
-              "end": 321
-            },
-            {
-              "start": 329,
-              "end": 329
-            },
-            {
-              "start": 340,
-              "end": 340
-            },
-            {
-              "start": 341,
-              "end": 341
-            },
-            {
-              "start": 349,
-              "end": 349
-            },
-            {
-              "start": 350,
-              "end": 350
-            },
-            {
-              "start": 363,
-              "end": 363
-            },
-            {
-              "start": 365,
-              "end": 365
-            },
-            {
-              "start": 385,
-              "end": 385
-            },
-            {
-              "start": 437,
-              "end": 437
-            },
-            {
-              "start": 544,
-              "end": 544
-            },
-            {
-              "start": 690,
-              "end": 690
-            },
-            {
-              "start": 692,
-              "end": 692
-            },
-            {
-              "start": 695,
-              "end": 695
-            }
-          ],
-          "internal/ghrepo/repo_test.go": [
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 177,
-              "end": 177
-            }
-          ],
-          "pkg/httpmock/legacy.go": [
-            {
-              "start": 76,
-              "end": 76
-            },
-            {
-              "start": 92,
-              "end": 92
-            },
-            {
-              "start": 100,
-              "end": 100
-            }
-          ],
-          "pkg/cmdutil/repo_override.go": [
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 21,
-              "end": 21
-            }
-          ],
-          "pkg/cmdutil/factory.go": [
-            {
-              "start": 15,
-              "end": 15
-            }
-          ],
-          "internal/ghrepo/repo.go": [
-            {
-              "start": 38,
-              "end": 38
-            },
-            {
-              "start": 40,
-              "end": 40
-            }
-          ],
-          "internal/config/config_setup.go": [
-            {
-              "start": 97,
-              "end": 97
-            }
-          ],
-          "context/remote_test.go": [
-            {
-              "start": 111,
-              "end": 111
-            },
-            {
-              "start": 148,
-              "end": 148
-            },
-            {
-              "start": 209,
-              "end": 209
-            }
-          ],
-          "context/context.go": [
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 78,
-              "end": 78
-            },
-            {
-              "start": 80,
-              "end": 80
-            },
-            {
-              "start": 107,
-              "end": 107
-            }
-          ],
-          "pkg/cmd/repo/repo.go": [
-            {
-              "start": 22,
-              "end": 22
-            }
-          ],
-          "pkg/cmd/factory/default.go": [
-            {
-              "start": 52,
-              "end": 52
-            }
-          ],
-          "pkg/cmd/api/api.go": [
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
-              "start": 49,
-              "end": 49
-            },
-            {
-              "start": 106,
-              "end": 106
-            },
-            {
-              "start": 301,
-              "end": 301
-            }
-          ],
-          "pkg/cmd/api/api_test.go": [
-            {
-              "start": 656,
-              "end": 656
-            },
-            {
-              "start": 738,
-              "end": 738
-            },
-            {
-              "start": 749,
-              "end": 749
-            },
-            {
-              "start": 762,
-              "end": 762
-            },
-            {
-              "start": 778,
-              "end": 778
-            },
-            {
-              "start": 794,
-              "end": 794
-            }
-          ],
-          "pkg/cmd/repo/clone/clone.go": [
-            {
-              "start": 88,
-              "end": 88
-            },
-            {
-              "start": 94,
-              "end": 94
-            }
-          ],
-          "pkg/cmd/repo/credits/credits.go": [
-            {
-              "start": 26,
-              "end": 26
-            },
-            {
-              "start": 37,
-              "end": 37
-            },
-            {
-              "start": 74,
-              "end": 74
-            },
-            {
-              "start": 125,
-              "end": 125
-            },
-            {
-              "start": 130,
-              "end": 130
-            }
-          ],
-          "pkg/cmd/repo/fork/fork_test.go": [
-            {
-              "start": 40,
-              "end": 40
-            }
-          ],
-          "pkg/cmd/repo/fork/fork.go": [
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 46,
-              "end": 46
-            },
-            {
-              "start": 89,
-              "end": 89
-            },
-            {
-              "start": 119,
-              "end": 119
-            },
-            {
-              "start": 121,
-              "end": 121
+              "start": 28,
+              "end": 104
             }
           ],
           "pkg/cmd/repo/view/view_test.go": [
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 228,
-              "end": 228
-            },
-            {
-              "start": 229,
-              "end": 229
-            },
-            {
-              "start": 315,
-              "end": 315
-            },
-            {
-              "start": 381,
-              "end": 381
-            },
-            {
-              "start": 451,
-              "end": 451
-            }
-          ],
-          "pkg/cmd/repo/view/view.go": [
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 68,
-              "end": 68
-            },
-            {
-              "start": 74,
-              "end": 74
-            },
-            {
-              "start": 76,
-              "end": 76
-            }
-          ],
-          "pkg/cmd/pr/reopen/reopen.go": [
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 39,
-              "end": 39
-            },
-            {
-              "start": 62,
-              "end": 62
-            }
-          ],
-          "pkg/cmd/auth/login/login.go": [
-            {
-              "start": 178,
-              "end": 178
-            },
-            {
-              "start": 272,
-              "end": 272
-            }
-          ],
-          "pkg/cmd/auth/login/login_test.go": [
-            {
-              "start": 297,
-              "end": 297
-            },
-            {
-              "start": 298,
-              "end": 298
-            },
-            {
-              "start": 320,
-              "end": 320
-            },
-            {
-              "start": 321,
-              "end": 321
-            },
-            {
-              "start": 337,
-              "end": 337
-            },
-            {
-              "start": 338,
-              "end": 338
-            },
-            {
-              "start": 400,
-              "end": 400
-            },
-            {
-              "start": 401,
-              "end": 401
-            }
-          ],
-          "pkg/cmd/auth/logout/logout_test.go": [
-            {
-              "start": 140,
-              "end": 140
-            },
-            {
-              "start": 141,
-              "end": 141
-            }
-          ],
-          "pkg/cmd/auth/refresh/refresh_test.go": [
-            {
-              "start": 216,
-              "end": 216
-            },
-            {
-              "start": 217,
-              "end": 217
-            }
-          ],
-          "pkg/cmd/auth/status/status.go": [
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 166,
-              "end": 166
-            }
-          ],
-          "pkg/cmd/pr/review/review_test.go": [
-            {
-              "start": 38,
-              "end": 38
-            }
-          ],
-          "pkg/cmd/auth/logout/logout.go": [
-            {
-              "start": 123,
-              "end": 123
-            }
-          ],
-          "pkg/cmd/pr/review/review.go": [
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 71,
-              "end": 71
-            },
-            {
-              "start": 104,
-              "end": 104
-            }
-          ],
-          "pkg/cmd/auth/status/status_test.go": [
-            {
-              "start": 140,
-              "end": 140
-            },
-            {
-              "start": 141,
-              "end": 141
-            },
-            {
-              "start": 157,
-              "end": 157
-            },
-            {
-              "start": 158,
-              "end": 158
-            },
-            {
-              "start": 174,
-              "end": 174
-            },
-            {
-              "start": 175,
-              "end": 175
-            },
-            {
-              "start": 190,
-              "end": 190
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 207,
-              "end": 207
-            },
-            {
-              "start": 208,
-              "end": 208
-            },
-            {
-              "start": 224,
-              "end": 224
-            },
-            {
-              "start": 225,
-              "end": 225
-            },
-            {
-              "start": 227,
-              "end": 227
-            },
-            {
-              "start": 228,
-              "end": 228
-            }
-          ],
-          "pkg/cmd/pr/list/list.go": [
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 80,
-              "end": 80
-            }
-          ],
-          "pkg/cmd/pr/list/list_test.go": [
-            {
-              "start": 40,
-              "end": 40
-            }
-          ],
-          "pkg/cmd/pr/reopen/reopen_test.go": [
-            {
-              "start": 33,
-              "end": 33
-            }
-          ],
-          "pkg/cmd/pr/create/create.go": [
-            {
-              "start": 43,
-              "end": 43
-            },
-            {
-              "start": 66,
-              "end": 66
-            },
-            {
-              "start": 84,
-              "end": 84
-            },
-            {
-              "start": 85,
-              "end": 85
-            },
-            {
-              "start": 102,
-              "end": 102
-            },
-            {
-              "start": 128,
-              "end": 128
-            },
-            {
-              "start": 237,
-              "end": 237
-            }
-          ],
-          "pkg/cmd/pr/create/create_test.go": [
-            {
-              "start": 567,
-              "end": 567
-            },
-            {
-              "start": 577,
-              "end": 577
-            },
-            {
-              "start": 585,
-              "end": 585
-            }
-          ],
-          "pkg/cmd/pr/view/view_test.go": [
-            {
-              "start": 45,
-              "end": 45
-            },
-            {
-              "start": 97,
-              "end": 97
-            },
-            {
-              "start": 109,
-              "end": 109
-            },
-            {
-              "start": 117,
-              "end": 117
-            },
-            {
-              "start": 120,
-              "end": 120
-            },
-            {
-              "start": 129,
-              "end": 129
-            },
-            {
-              "start": 186,
-              "end": 186
-            },
-            {
-              "start": 201,
-              "end": 201
-            },
-            {
-              "start": 282,
-              "end": 282
-            },
-            {
-              "start": 291,
-              "end": 291
-            },
-            {
-              "start": 294,
-              "end": 294
-            },
-            {
-              "start": 297,
-              "end": 297
-            }
-          ],
-          "pkg/cmd/pr/view/view.go": [
-            {
-              "start": 26,
-              "end": 26
-            },
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 82,
-              "end": 82
-            },
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 114,
-              "end": 114
-            },
-            {
-              "start": 138,
-              "end": 138
-            },
-            {
-              "start": 139,
-              "end": 139
-            },
-            {
-              "start": 140,
-              "end": 140
-            },
-            {
-              "start": 185,
-              "end": 185
-            },
-            {
-              "start": 190,
-              "end": 190
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 206,
-              "end": 206
-            },
-            {
-              "start": 207,
-              "end": 207
-            },
-            {
-              "start": 208,
-              "end": 208
-            },
-            {
-              "start": 214,
-              "end": 214
-            },
-            {
-              "start": 215,
-              "end": 215
-            },
-            {
-              "start": 218,
-              "end": 218
-            },
-            {
-              "start": 219,
-              "end": 219
-            },
-            {
-              "start": 220,
-              "end": 220
-            },
-            {
-              "start": 221,
-              "end": 221
-            },
-            {
-              "start": 223,
-              "end": 223
-            },
-            {
-              "start": 225,
-              "end": 225
-            },
-            {
-              "start": 226,
-              "end": 226
-            },
-            {
-              "start": 229,
-              "end": 229
-            },
-            {
-              "start": 231,
-              "end": 231
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 239,
-              "end": 239
-            },
-            {
-              "start": 240,
-              "end": 240
-            },
-            {
-              "start": 241,
-              "end": 241
-            },
-            {
-              "start": 249,
-              "end": 249
-            },
-            {
-              "start": 256,
-              "end": 256
-            },
-            {
-              "start": 258,
-              "end": 258
-            },
-            {
-              "start": 259,
-              "end": 259
-            },
-            {
-              "start": 260,
-              "end": 260
-            },
-            {
-              "start": 262,
-              "end": 262
-            },
-            {
-              "start": 269,
-              "end": 269
-            },
-            {
-              "start": 270,
-              "end": 270
-            },
-            {
-              "start": 271,
-              "end": 271
-            },
-            {
-              "start": 274,
-              "end": 274
-            },
-            {
-              "start": 280,
-              "end": 280
-            },
-            {
-              "start": 281,
-              "end": 281
-            },
-            {
-              "start": 282,
-              "end": 282
-            },
-            {
-              "start": 283,
-              "end": 283
-            },
-            {
-              "start": 284,
-              "end": 284
-            },
-            {
-              "start": 287,
-              "end": 287
-            },
-            {
-              "start": 288,
-              "end": 288
-            },
-            {
-              "start": 292,
-              "end": 292
-            }
-          ],
-          "pkg/cmd/pr/view/fixtures/prView_NoActiveBranch.json": [
-            {
-              "start": 7,
-              "end": 7
-            }
-          ],
-          "pkg/cmd/pr/checkout/checkout.go": [
-            {
-              "start": 26,
-              "end": 26
-            },
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 89,
-              "end": 89
-            }
-          ],
-          "pkg/cmd/pr/shared/title_body_survey.go": [
-            {
-              "start": 37,
-              "end": 37
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 152,
-              "end": 152
-            },
-            {
-              "start": 228,
-              "end": 228
-            },
-            {
-              "start": 229,
-              "end": 229
-            },
-            {
-              "start": 247,
-              "end": 247
-            },
-            {
-              "start": 283,
-              "end": 283
-            },
-            {
-              "start": 290,
-              "end": 290
-            },
-            {
-              "start": 293,
-              "end": 293
-            },
-            {
-              "start": 295,
-              "end": 295
-            },
-            {
-              "start": 297,
-              "end": 297
-            },
-            {
-              "start": 301,
-              "end": 301
-            },
-            {
-              "start": 369,
-              "end": 369
-            }
-          ],
-          "pkg/cmd/pr/close/close_test.go": [
-            {
-              "start": 33,
-              "end": 33
-            }
-          ],
-          "pkg/cmd/pr/ready/ready_test.go": [
-            {
-              "start": 35,
-              "end": 35
-            }
-          ],
-          "pkg/cmd/pr/ready/ready.go": [
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 67,
-              "end": 67
-            }
-          ],
-          "pkg/cmd/pr/merge/merge.go": [
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 65,
-              "end": 65
-            },
-            {
-              "start": 117,
-              "end": 117
-            }
-          ],
-          "pkg/cmd/pr/close/close.go": [
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 70,
-              "end": 70
-            }
-          ],
-          "pkg/cmd/pr/shared/lookup.go": [
-            {
-              "start": 22,
-              "end": 22
-            }
-          ],
-          "pkg/cmd/pr/shared/params.go": [
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 87,
-              "end": 87
-            },
-            {
-              "start": 91,
-              "end": 91
-            },
-            {
-              "start": 92,
-              "end": 92
-            },
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 95,
-              "end": 95
-            },
-            {
-              "start": 97,
-              "end": 97
-            },
-            {
-              "start": 101,
-              "end": 101
-            },
-            {
-              "start": 103,
-              "end": 103
-            },
-            {
-              "start": 105,
-              "end": 105
-            },
-            {
-              "start": 107,
-              "end": 107
-            },
-            {
-              "start": 109,
-              "end": 109
-            },
-            {
-              "start": 111,
-              "end": 111
-            }
-          ],
-          "pkg/cmd/pr/diff/diff.go": [
-            {
-              "start": 25,
-              "end": 25
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 80,
-              "end": 80
-            }
-          ],
-          "pkg/cmd/pr/status/status.go": [
-            {
-              "start": 29,
-              "end": 29
-            },
-            {
-              "start": 51,
-              "end": 51
-            },
-            {
-              "start": 71,
-              "end": 71
-            }
-          ],
-          "pkg/cmd/pr/merge/merge_test.go": [
-            {
-              "start": 39,
-              "end": 39
-            }
-          ],
-          "pkg/cmd/pr/diff/diff_test.go": [
-            {
-              "start": 38,
-              "end": 38
-            }
-          ],
-          "pkg/cmd/pr/status/status_test.go": [
-            {
-              "start": 36,
-              "end": 36
-            }
-          ],
-          "pkg/cmd/pr/checkout/checkout_test.go": [
-            {
-              "start": 58,
-              "end": 58
-            }
-          ],
-          "pkg/cmd/pr/view/fixtures/prViewPreviewWithMetadataByNumber.json": [
-            {
-              "start": 16,
-              "end": 16
-            }
-          ],
-          "pkg/cmd/pr/view/fixtures/prViewPreviewWithReviewersByNumber.json": [
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 28,
-              "end": 28
-            }
-          ],
-          "pkg/cmd/root/root.go": [
-            {
-              "start": 111,
-              "end": 111
-            },
-            {
-              "start": 113,
-              "end": 113
-            },
-            {
-              "start": 122,
-              "end": 122
-            },
-            {
-              "start": 139,
-              "end": 139
-            }
-          ],
-          "pkg/cmd/pr/status/fixtures/prStatusCurrentBranch.json": [
-            {
-              "start": 52,
-              "end": 52
-            }
-          ],
-          "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchClosedOnDefaultBranch.json": [
-            {
-              "start": 20,
-              "end": 20
-            }
-          ],
-          "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchMergedOnDefaultBranch.json": [
-            {
-              "start": 20,
-              "end": 20
-            }
-          ],
-          "pkg/cmd/pr/status/fixtures/prStatusChecks.json": [
-            {
-              "start": 9,
-              "end": 9
-            }
-          ],
-          "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchClosed.json": [
-            {
-              "start": 38,
-              "end": 38
-            }
-          ],
-          "pkg/cmd/pr/status/fixtures/prStatus.json": [
-            {
-              "start": 24,
-              "end": 24
-            }
-          ],
-          "pkg/cmd/pr/status/fixtures/prStatusCurrentBranchMerged.json": [
-            {
-              "start": 38,
-              "end": 38
-            }
-          ],
-          "pkg/cmd/issue/reopen/reopen_test.go": [
-            {
-              "start": 33,
-              "end": 33
-            }
-          ],
-          "pkg/cmd/issue/close/close_test.go": [
-            {
-              "start": 33,
-              "end": 33
-            }
-          ],
-          "pkg/cmd/issue/close/close.go": [
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 39,
-              "end": 39
-            },
-            {
-              "start": 62,
-              "end": 62
-            }
-          ],
-          "pkg/cmd/issue/view/view.go": [
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 78,
-              "end": 78
-            }
-          ],
-          "pkg/cmd/issue/view/view_test.go": [
-            {
-              "start": 42,
-              "end": 42
-            }
-          ],
-          "pkg/cmd/issue/status/status.go": [
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 37,
-              "end": 37
-            },
-            {
-              "start": 56,
-              "end": 56
-            },
-            {
-              "start": 61,
-              "end": 61
-            }
-          ],
-          "pkg/cmd/issue/create/create_test.go": [
-            {
-              "start": 45,
-              "end": 45
-            },
-            {
-              "start": 139,
-              "end": 139
-            }
-          ],
-          "pkg/cmd/issue/create/create.go": [
-            {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 60,
-              "end": 60
-            },
-            {
-              "start": 91,
-              "end": 91
-            }
-          ],
-          "pkg/cmd/issue/reopen/reopen.go": [
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 39,
-              "end": 39
-            },
-            {
-              "start": 62,
-              "end": 62
-            }
-          ],
-          "pkg/cmd/issue/status/status_test.go": [
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 62,
-              "end": 62
-            },
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 94,
-              "end": 94
-            },
-            {
-              "start": 133,
-              "end": 133
-            },
-            {
-              "start": 134,
-              "end": 134
-            }
-          ],
-          "pkg/cmd/issue/list/list_test.go": [
-            {
-              "start": 44,
-              "end": 44
-            }
-          ],
-          "pkg/cmd/issue/list/list.go": [
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 87,
-              "end": 87
-            }
-          ],
-          "pkg/cmd/repo/create/create.go": [
-            {
-              "start": 94,
-              "end": 94
-            },
-            {
-              "start": 96,
-              "end": 96
-            }
-          ],
-          "pkg/cmd/repo/clone/clone_test.go": [
-            {
-              "start": 153,
-              "end": 153
-            },
-            {
-              "start": 155,
-              "end": 155
-            }
-          ],
-          "<worktree>/pkg/cmd/repo/view/view.go": [
-            {
-              "start": 28,
-              "end": 104
-            }
-          ],
-          "<worktree>/pkg/cmd/repo/view/view_test.go": [
             {
               "start": 146,
               "end": 285
             }
           ],
-          "<worktree>/pkg/cmd/repo/clone/clone.go": [
+          "pkg/cmd/repo/clone/clone.go": [
             {
               "start": 73,
               "end": 104
             }
           ],
-          "<worktree>/api/queries_user.go": [
+          "api/queries_user.go": [
             {
               "start": 7,
               "end": 15
@@ -3489,14 +388,14 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/pkg/cmd/repo/view/view.go": [
+          "pkg/cmd/repo/view/view.go": [
             "NewCmdView",
             "viewRun"
           ],
-          "<worktree>/pkg/cmd/repo/clone/clone.go": [
+          "pkg/cmd/repo/clone/clone.go": [
             "cloneRun"
           ],
-          "<worktree>/api/queries_user.go": [
+          "api/queries_user.go": [
             "CurrentLoginName"
           ]
         }
@@ -3506,123 +405,168 @@
           {
             "step": 1,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.25,
+              "symbol": 0.125,
+              "span": 0.27793778801843316,
+              "line": 0.2986111111111111
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1201036866359447,
-              "line": 0.04861111111111111
+              "file": 0.5,
+              "symbol": 0.75,
+              "span": 0.6944124423963134,
+              "line": 0.6597222222222222
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1201036866359447,
-              "line": 0.04861111111111111
+              "file": 0.5,
+              "symbol": 0.75,
+              "span": 0.6944124423963134,
+              "line": 0.6597222222222222
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1201036866359447,
-              "line": 0.04861111111111111
+              "file": 0.5,
+              "symbol": 0.75,
+              "span": 0.6944124423963134,
+              "line": 0.6597222222222222
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1201036866359447,
-              "line": 0.04861111111111111
+              "file": 0.75,
+              "symbol": 0.875,
+              "span": 0.7871543778801844,
+              "line": 0.7708333333333334
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1201036866359447,
-              "line": 0.04861111111111111
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1201036866359447,
-              "line": 0.04861111111111111
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.13392857142857142,
-              "line": 0.05555555555555555
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.13392857142857142,
-              "line": 0.05555555555555555
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.13392857142857142,
-              "line": 0.05555555555555555
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.13392857142857142,
-              "line": 0.05555555555555555
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.13392857142857142,
-              "line": 0.05555555555555555
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 13,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 14,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 15,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 16,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 17,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 1.0,
-          "symbol": 0.4583333333333333,
-          "span": 0.11585541474654378,
-          "line": 0.04745370370370371
+          "file": 0.8529411764705882,
+          "symbol": 0.8970588235294118,
+          "span": 0.8910782054757387,
+          "line": 0.8852124183006536
         },
         "redundancy": {
-          "file": 0.375,
-          "symbol": 0.13407821229050276,
-          "span": 0.12889128675478823,
-          "line": 0.1031518624641834
+          "file": 0.5294117647058824,
+          "symbol": 0.3571428571428571,
+          "span": 0.3770946890640514,
+          "line": 0.2873194221508828
         }
       },
       "fixOverlap": {
@@ -3752,7 +696,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/pkg/cmd/repo/view/view.go",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/pkg/cmd/repo/view/view.go",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3764,12 +717,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/pkg/cmd/repo/view/view.go",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/pkg/cmd/repo/view/view.go",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/pkg/cmd/repo/view/view_test.go",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/pkg/cmd/repo/view/view_test.go",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3836,7 +807,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/pkg/cmd/repo/view/view_test.go",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/pkg/cmd/repo/view/view_test.go",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3848,7 +828,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/pkg/cmd/repo/view/view_test.go",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/pkg/cmd/repo/view/view_test.go",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3953,9 +942,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-19T02:52:56Z",
       "completedAt": "2026-05-19T02:56:55Z",
       "durationMs": 238668,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 987561,
@@ -3964,6 +968,28 @@
         "total_tokens": 999013,
         "cache_read_input_tokens": 904448
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 44,
+        "readToolCalls": 0,
+        "editToolCalls": 5
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/pkg/cmd/repo/view/view.go b/pkg/cmd/repo/view/view.go\nindex a508317b..41aa7a7e 100644\n--- a/pkg/cmd/repo/view/view.go\n+++ b/pkg/cmd/repo/view/view.go\n@@ -8,6 +8,7 @@ import (\n \n \t\"github.com/MakeNowJust/heredoc\"\n \t\"github.com/cli/cli/api\"\n+\t\"github.com/cli/cli/internal/ghinstance\"\n \t\"github.com/cli/cli/internal/ghrepo\"\n \t\"github.com/cli/cli/pkg/cmdutil\"\n \t\"github.com/cli/cli/pkg/iostreams\"\n@@ -38,6 +39,9 @@ func NewCmdView(f *cmdutil.Factory, runF func(*ViewOptions) error) *cobra.Comman\n \n With no argument, the repository for the current directory is displayed.\n \n+If the \"OWNER/\" portion of the \"OWNER/REPO\" repository argument is omitted, it\n+defaults to the name of the authenticating user.\n+\n With '--web', open the repository in a web browser instead.`,\n \t\tArgs: cobra.MaximumNArgs(1),\n \t\tRunE: func(c *cobra.Command, args []string) error {\n@@ -61,6 +65,7 @@ func viewRun(opts *ViewOptions) error {\n \tif err != nil {\n \t\treturn err\n \t}\n+\tapiClient := api.NewClientFromHTTP(httpClient)\n \n \tvar toView ghrepo.Interface\n \tif opts.RepoArg == \"\" {\n@@ -71,14 +76,21 @@ func viewRun(opts *ViewOptions) error {\n \t\t}\n \t} else {\n \t\tvar err error\n-\t\ttoView, err = ghrepo.FromFullName(opts.RepoArg)\n+\t\trepoArg := opts.RepoArg\n+\t\tif !strings.Contains(repoArg, \"/\") {\n+\t\t\tcurrentUser, err := api.CurrentLoginName(apiClient, ghinstance.OverridableDefault())\n+\t\t\tif err != nil {\n+\t\t\t\treturn err\n+\t\t\t}\n+\t\t\trepoArg = currentUser + \"/\" + repoArg\n+\t\t}\n+\n+\t\ttoView, err = ghrepo.FromFullName(repoArg)\n \t\tif err != nil {\n \t\t\treturn fmt.Errorf(\"argument error: %w\", err)\n \t\t}\n \t}\n \n-\tapiClient := api.NewClientFromHTTP(httpClient)\n-\n \trepo, err := api.GitHubRepo(apiClient, toView)\n \tif err != nil {\n \t\treturn err\ndiff --git a/pkg/cmd/repo/view/view_test.go b/pkg/cmd/repo/view/view_test.go\nindex 5a6d0870..818e693d 100644\n--- a/pkg/cmd/repo/view/view_test.go\n+++ b/pkg/cmd/repo/view/view_test.go\n@@ -200,6 +200,19 @@ func Test_ViewRun(t *testing.T) {\n \t\t\t\tView this repository on GitHub: https://github.com/jill/valentine\n \t\t\t`),\n \t\t},\n+\t\t{\n+\t\t\tname:     \"name arg without owner\",\n+\t\t\trepoName: \"jill/valentine\",\n+\t\t\topts: &ViewOptions{\n+\t\t\t\tRepoArg: \"valentine\",\n+\t\t\t},\n+\t\t\twantOut: heredoc.Doc(`\n+\t\t\t\tname:\tjill/valentine\n+\t\t\t\tdescription:\tsocial distancing\n+\t\t\t\t--\n+\t\t\t\t# truly cool readme check it out\n+\t\t\t`),\n+\t\t},\n \t\t{\n \t\t\tname:      \"no args\",\n \t\t\tstdoutTTY: true,\n@@ -231,6 +244,14 @@ func Test_ViewRun(t *testing.T) {\n \t\t}\n \n \t\treg := &httpmock.Registry{}\n+\t\tif tt.opts.RepoArg == \"valentine\" {\n+\t\t\treg.Register(\n+\t\t\t\thttpmock.GraphQL(`query UserCurrent\\b`),\n+\t\t\t\thttpmock.StringResponse(`\n+\t\t{ \"data\": { \"viewer\": {\n+\t\t\t\"login\": \"jill\"\n+\t\t}}}`))\n+\t\t}\n \t\treg.Register(\n \t\t\thttpmock.GraphQL(`query RepositoryInfo\\b`),\n \t\t\thttpmock.StringResponse(`\n",
       "finalOutput": {
         "status": "completed",
@@ -4034,53 +1060,167 @@
         "predSteps": [
           {
             "files": [
-              "api/queries_repo.go",
-              "api/queries_repo_test.go",
-              "internal/ghrepo/repo.go",
-              "internal/ghrepo/repo_test.go",
-              "pkg/cmd/repo/clone/clone.go",
-              "pkg/cmd/repo/clone/clone_test.go",
-              "pkg/cmd/repo/create/create.go",
-              "pkg/cmd/repo/create/create_test.go",
-              "pkg/cmd/repo/create/http.go",
-              "pkg/cmd/repo/create/http_test.go",
-              "pkg/cmd/repo/credits/credits.go",
-              "pkg/cmd/repo/fork/fork.go",
-              "pkg/cmd/repo/fork/forkResult.json",
-              "pkg/cmd/repo/fork/fork_test.go",
-              "pkg/cmd/repo/repo.go",
-              "pkg/cmd/repo/view/http.go",
-              "pkg/cmd/repo/view/view.go",
-              "pkg/cmd/repo/view/view_test.go",
-              "pkg/cmdutil/repo_override.go"
+              "pkg/cmd/repo/view/view.go"
             ],
-            "spans": {},
+            "spans": {
+              "pkg/cmd/repo/view/view.go": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "pkg/cmd/repo/repo.go",
+              "pkg/cmdutil/repo_override.go"
+            ],
+            "spans": {
+              "pkg/cmdutil/repo_override.go": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
               "pkg/cmd/repo/view/view_test.go"
             ],
             "spans": {
-              "pkg/cmd/repo/repo.go": [
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 22,
-                  "end": 22
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                }
-              ],
               "pkg/cmd/repo/view/view_test.go": [
                 {
-                  "start": 88,
-                  "end": 88
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "internal/ghrepo/repo.go"
+            ],
+            "spans": {
+              "internal/ghrepo/repo.go": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmdutil/factory.go"
+            ],
+            "spans": {
+              "pkg/cmdutil/factory.go": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/root/root.go"
+            ],
+            "spans": {
+              "pkg/cmd/root/root.go": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/clone/clone_test.go"
+            ],
+            "spans": {
+              "pkg/cmd/repo/clone/clone_test.go": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/clone/clone.go"
+            ],
+            "spans": {
+              "pkg/cmd/repo/clone/clone.go": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "api/queries_user.go"
+            ],
+            "spans": {
+              "api/queries_user.go": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/view/http.go"
+            ],
+            "spans": {
+              "pkg/cmd/repo/view/http.go": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/view/view_test.go"
+            ],
+            "spans": {
+              "pkg/cmd/repo/view/view_test.go": [
+                {
+                  "start": 220,
+                  "end": 420
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "Makefile"
+            ],
+            "spans": {
+              "Makefile": [
+                {
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -4090,289 +1230,11 @@
             "files": [
               "pkg/cmd/repo/view/view.go"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "pkg/cmdutil/repo_override.go"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "pkg/cmd/repo/view/view_test.go"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "internal/ghrepo/repo.go"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "pkg/cmdutil/factory.go"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "pkg/cmd/root/root.go"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "api/client_test.go",
-              "api/queries_issue.go",
-              "api/queries_pr.go",
-              "api/queries_repo.go",
-              "api/queries_user.go",
-              "internal/config/config_setup.go",
-              "pkg/cmd/auth/login/login.go",
-              "pkg/cmd/auth/logout/logout.go",
-              "pkg/cmd/auth/status/status.go",
-              "pkg/cmd/issue/create/create.go",
-              "pkg/cmd/issue/status/status.go",
-              "pkg/cmd/issue/view/view.go",
-              "pkg/cmd/pr/create/create.go",
-              "pkg/cmd/pr/status/status.go",
-              "pkg/cmd/pr/view/view.go",
-              "pkg/cmd/repo/clone/clone.go",
-              "pkg/cmd/repo/clone/clone_test.go"
-            ],
             "spans": {
-              "api/client_test.go": [
+              "pkg/cmd/repo/view/view.go": [
                 {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 38,
-                  "end": 38
-                }
-              ],
-              "api/queries_user.go": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 15,
-                  "end": 15
-                }
-              ],
-              "api/queries_issue.go": [
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 173,
-                  "end": 173
-                }
-              ],
-              "api/queries_repo.go": [
-                {
-                  "start": 29,
-                  "end": 29
-                },
-                {
-                  "start": 68,
-                  "end": 68
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                },
-                {
-                  "start": 70,
-                  "end": 70
-                },
-                {
-                  "start": 78,
-                  "end": 78
-                },
-                {
-                  "start": 79,
-                  "end": 79
-                },
-                {
-                  "start": 80,
+                  "start": 1,
                   "end": 80
-                },
-                {
-                  "start": 163,
-                  "end": 163
-                },
-                {
-                  "start": 245,
-                  "end": 245
-                },
-                {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 340,
-                  "end": 340
-                },
-                {
-                  "start": 343,
-                  "end": 343
-                }
-              ],
-              "api/queries_pr.go": [
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 236,
-                  "end": 236
-                },
-                {
-                  "start": 252,
-                  "end": 252
-                },
-                {
-                  "start": 340,
-                  "end": 340
-                },
-                {
-                  "start": 341,
-                  "end": 341
-                },
-                {
-                  "start": 364,
-                  "end": 364
-                },
-                {
-                  "start": 384,
-                  "end": 384
-                },
-                {
-                  "start": 386,
-                  "end": 386
-                }
-              ],
-              "pkg/cmd/pr/create/create.go": [
-                {
-                  "start": 260,
-                  "end": 260
-                }
-              ],
-              "pkg/cmd/pr/view/view.go": [
-                {
-                  "start": 111,
-                  "end": 111
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                },
-                {
-                  "start": 244,
-                  "end": 244
-                },
-                {
-                  "start": 245,
-                  "end": 245
-                }
-              ],
-              "pkg/cmd/auth/login/login.go": [
-                {
-                  "start": 178,
-                  "end": 178
-                },
-                {
-                  "start": 272,
-                  "end": 272
-                }
-              ],
-              "pkg/cmd/pr/status/status.go": [
-                {
-                  "start": 121,
-                  "end": 121
-                },
-                {
-                  "start": 122,
-                  "end": 122
-                }
-              ],
-              "pkg/cmd/auth/status/status.go": [
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 166,
-                  "end": 166
-                }
-              ],
-              "pkg/cmd/auth/logout/logout.go": [
-                {
-                  "start": 123,
-                  "end": 123
-                }
-              ],
-              "pkg/cmd/issue/status/status.go": [
-                {
-                  "start": 61,
-                  "end": 61
-                }
-              ],
-              "pkg/cmd/issue/view/view.go": [
-                {
-                  "start": 105,
-                  "end": 105
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                }
-              ],
-              "pkg/cmd/issue/create/create.go": [
-                {
-                  "start": 171,
-                  "end": 171
-                }
-              ],
-              "pkg/cmd/repo/clone/clone.go": [
-                {
-                  "start": 88,
-                  "end": 88
-                }
-              ],
-              "pkg/cmd/repo/clone/clone_test.go": [
-                {
-                  "start": 150,
-                  "end": 150
-                }
-              ],
-              "internal/config/config_setup.go": [
-                {
-                  "start": 81,
-                  "end": 81
-                },
-                {
-                  "start": 95,
-                  "end": 95
-                },
-                {
-                  "start": 97,
-                  "end": 97
                 }
               ]
             },
@@ -4380,64 +1242,27 @@
           },
           {
             "files": [
-              "pkg/cmd/repo/clone/clone_test.go"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "pkg/cmd/repo/clone/clone.go"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "api/queries_user.go"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "pkg/cmd/repo/view/http.go"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "pkg/cmd/repo/view/view.go",
-              "pkg/cmd/repo/view/view_test.go"
+              "pkg/cmd/repo/view/view.go"
             ],
             "spans": {
               "pkg/cmd/repo/view/view.go": [
                 {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 63,
-                  "end": 63
+                  "start": 1,
+                  "end": 120
                 }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/view/view_test.go"
+            ],
+            "spans": {
               "pkg/cmd/repo/view/view_test.go": [
                 {
-                  "start": 146,
-                  "end": 146
-                },
-                {
-                  "start": 294,
-                  "end": 294
-                },
-                {
-                  "start": 364,
-                  "end": 364
-                },
-                {
-                  "start": 430,
-                  "end": 430
+                  "start": 170,
+                  "end": 225
                 }
               ]
             },
@@ -4447,68 +1272,81 @@
             "files": [
               "internal/ghinstance/host.go"
             ],
-            "spans": {},
+            "spans": {
+              "internal/ghinstance/host.go": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "internal/ghinstance/host.go",
-              "internal/ghinstance/host_test.go",
-              "internal/ghrepo/repo.go",
-              "pkg/cmd/api/api.go",
-              "pkg/cmd/gist/create/create.go",
-              "pkg/cmd/repo/clone/clone.go",
+              "pkg/cmd/repo/view/view_test.go"
+            ],
+            "spans": {
+              "pkg/cmd/repo/view/view_test.go": [
+                {
+                  "start": 140,
+                  "end": 280
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
               "pkg/cmd/repo/view/view.go"
             ],
             "spans": {
-              "internal/ghinstance/host.go": [
-                {
-                  "start": 18,
-                  "end": 18
-                }
-              ],
-              "internal/ghinstance/host_test.go": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 20,
-                  "end": 20
-                }
-              ],
-              "internal/ghrepo/repo.go": [
-                {
-                  "start": 21,
-                  "end": 21
-                }
-              ],
-              "pkg/cmd/api/api.go": [
-                {
-                  "start": 199,
-                  "end": 199
-                }
-              ],
               "pkg/cmd/repo/view/view.go": [
                 {
-                  "start": 81,
-                  "end": 81
+                  "start": 1,
+                  "end": 130
                 }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "internal/ghrepo/repo.go"
+            ],
+            "spans": {
+              "internal/ghrepo/repo.go": [
+                {
+                  "start": 30,
+                  "end": 60
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pkg/cmd/repo/clone/clone.go"
+            ],
+            "spans": {
               "pkg/cmd/repo/clone/clone.go": [
                 {
-                  "start": 88,
-                  "end": 88
+                  "start": 30,
+                  "end": 110
                 }
-              ],
-              "pkg/cmd/gist/create/create.go": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "api/queries_user.go"
+            ],
+            "spans": {
+              "api/queries_user.go": [
                 {
-                  "start": 122,
-                  "end": 122
+                  "start": 1,
+                  "end": 40
                 }
               ]
             },
@@ -4516,379 +1354,41 @@
           }
         ],
         "predFiles": [
-          "api/client_test.go",
-          "api/queries_issue.go",
-          "api/queries_pr.go",
-          "api/queries_repo.go",
-          "api/queries_repo_test.go",
           "api/queries_user.go",
-          "internal/config/config_setup.go",
-          "internal/ghinstance/host.go",
-          "internal/ghinstance/host_test.go",
           "internal/ghrepo/repo.go",
-          "internal/ghrepo/repo_test.go",
-          "pkg/cmd/api/api.go",
-          "pkg/cmd/auth/login/login.go",
-          "pkg/cmd/auth/logout/logout.go",
-          "pkg/cmd/auth/status/status.go",
-          "pkg/cmd/gist/create/create.go",
-          "pkg/cmd/issue/create/create.go",
-          "pkg/cmd/issue/status/status.go",
-          "pkg/cmd/issue/view/view.go",
-          "pkg/cmd/pr/create/create.go",
-          "pkg/cmd/pr/status/status.go",
-          "pkg/cmd/pr/view/view.go",
           "pkg/cmd/repo/clone/clone.go",
-          "pkg/cmd/repo/clone/clone_test.go",
-          "pkg/cmd/repo/create/create.go",
-          "pkg/cmd/repo/create/create_test.go",
-          "pkg/cmd/repo/create/http.go",
-          "pkg/cmd/repo/create/http_test.go",
-          "pkg/cmd/repo/credits/credits.go",
-          "pkg/cmd/repo/fork/fork.go",
-          "pkg/cmd/repo/fork/forkResult.json",
-          "pkg/cmd/repo/fork/fork_test.go",
-          "pkg/cmd/repo/repo.go",
-          "pkg/cmd/repo/view/http.go",
           "pkg/cmd/repo/view/view.go",
-          "pkg/cmd/repo/view/view_test.go",
-          "pkg/cmd/root/root.go",
-          "pkg/cmdutil/factory.go",
-          "pkg/cmdutil/repo_override.go"
+          "pkg/cmd/repo/view/view_test.go"
         ],
         "predSpans": {
-          "pkg/cmd/repo/repo.go": [
+          "pkg/cmd/repo/view/view.go": [
             {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 34,
-              "end": 34
+              "start": 28,
+              "end": 125
             }
           ],
           "pkg/cmd/repo/view/view_test.go": [
             {
-              "start": 88,
-              "end": 88
-            },
-            {
-              "start": 146,
-              "end": 146
-            },
-            {
               "start": 146,
               "end": 283
-            },
-            {
-              "start": 294,
-              "end": 294
-            },
-            {
-              "start": 364,
-              "end": 364
-            },
-            {
-              "start": 430,
-              "end": 430
-            }
-          ],
-          "api/client_test.go": [
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 38,
-              "end": 38
-            }
-          ],
-          "api/queries_user.go": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 7,
-              "end": 15
-            },
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 15,
-              "end": 15
-            }
-          ],
-          "api/queries_issue.go": [
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 173,
-              "end": 173
-            }
-          ],
-          "api/queries_repo.go": [
-            {
-              "start": 29,
-              "end": 29
-            },
-            {
-              "start": 68,
-              "end": 68
-            },
-            {
-              "start": 69,
-              "end": 69
-            },
-            {
-              "start": 70,
-              "end": 70
-            },
-            {
-              "start": 78,
-              "end": 78
-            },
-            {
-              "start": 79,
-              "end": 79
-            },
-            {
-              "start": 80,
-              "end": 80
-            },
-            {
-              "start": 163,
-              "end": 163
-            },
-            {
-              "start": 245,
-              "end": 245
-            },
-            {
-              "start": 301,
-              "end": 301
-            },
-            {
-              "start": 340,
-              "end": 340
-            },
-            {
-              "start": 343,
-              "end": 343
-            }
-          ],
-          "api/queries_pr.go": [
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 236,
-              "end": 236
-            },
-            {
-              "start": 252,
-              "end": 252
-            },
-            {
-              "start": 340,
-              "end": 340
-            },
-            {
-              "start": 341,
-              "end": 341
-            },
-            {
-              "start": 364,
-              "end": 364
-            },
-            {
-              "start": 384,
-              "end": 384
-            },
-            {
-              "start": 386,
-              "end": 386
-            }
-          ],
-          "pkg/cmd/pr/create/create.go": [
-            {
-              "start": 260,
-              "end": 260
-            }
-          ],
-          "pkg/cmd/pr/view/view.go": [
-            {
-              "start": 111,
-              "end": 111
-            },
-            {
-              "start": 130,
-              "end": 130
-            },
-            {
-              "start": 244,
-              "end": 244
-            },
-            {
-              "start": 245,
-              "end": 245
-            }
-          ],
-          "pkg/cmd/auth/login/login.go": [
-            {
-              "start": 178,
-              "end": 178
-            },
-            {
-              "start": 272,
-              "end": 272
-            }
-          ],
-          "pkg/cmd/pr/status/status.go": [
-            {
-              "start": 121,
-              "end": 121
-            },
-            {
-              "start": 122,
-              "end": 122
-            }
-          ],
-          "pkg/cmd/auth/status/status.go": [
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 166,
-              "end": 166
-            }
-          ],
-          "pkg/cmd/auth/logout/logout.go": [
-            {
-              "start": 123,
-              "end": 123
-            }
-          ],
-          "pkg/cmd/issue/status/status.go": [
-            {
-              "start": 61,
-              "end": 61
-            }
-          ],
-          "pkg/cmd/issue/view/view.go": [
-            {
-              "start": 105,
-              "end": 105
-            },
-            {
-              "start": 126,
-              "end": 126
-            }
-          ],
-          "pkg/cmd/issue/create/create.go": [
-            {
-              "start": 171,
-              "end": 171
             }
           ],
           "pkg/cmd/repo/clone/clone.go": [
             {
               "start": 37,
               "end": 104
-            },
-            {
-              "start": 88,
-              "end": 88
             }
           ],
-          "pkg/cmd/repo/clone/clone_test.go": [
-            {
-              "start": 150,
-              "end": 150
-            }
-          ],
-          "internal/config/config_setup.go": [
-            {
-              "start": 81,
-              "end": 81
-            },
-            {
-              "start": 95,
-              "end": 95
-            },
-            {
-              "start": 97,
-              "end": 97
-            }
-          ],
-          "pkg/cmd/repo/view/view.go": [
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 28,
-              "end": 125
-            },
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 81,
-              "end": 81
-            }
-          ],
-          "internal/ghinstance/host.go": [
-            {
-              "start": 18,
-              "end": 18
-            }
-          ],
-          "internal/ghinstance/host_test.go": [
+          "api/queries_user.go": [
             {
               "start": 7,
-              "end": 7
-            },
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 20,
-              "end": 20
+              "end": 15
             }
           ],
           "internal/ghrepo/repo.go": [
             {
-              "start": 21,
-              "end": 21
-            },
-            {
               "start": 38,
               "end": 60
-            }
-          ],
-          "pkg/cmd/api/api.go": [
-            {
-              "start": 199,
-              "end": 199
-            }
-          ],
-          "pkg/cmd/gist/create/create.go": [
-            {
-              "start": 122,
-              "end": 122
             }
           ]
         },
@@ -4916,195 +1416,204 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.25,
+              "symbol": 0.125,
+              "span": 0.27793778801843316,
+              "line": 0.2986111111111111
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.25,
+              "symbol": 0.125,
+              "span": 0.27793778801843316,
+              "line": 0.2986111111111111
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.25,
+              "symbol": 0.125,
+              "span": 0.27793778801843316,
+              "line": 0.2986111111111111
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.75,
+              "span": 0.6944124423963134,
+              "line": 0.6597222222222222
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.75,
+              "span": 0.6944124423963134,
+              "line": 0.6597222222222222
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.75,
+              "span": 0.6944124423963134,
+              "line": 0.6597222222222222
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.75,
+              "span": 0.6944124423963134,
+              "line": 0.6597222222222222
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 0.75,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.875,
+              "span": 0.907258064516129,
+              "line": 0.8888888888888888
             }
           },
           {
             "step": 9,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 10,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 11,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 12,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.25,
-              "span": 0.06077188940092166,
-              "line": 0.027777777777777776
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 14,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.25,
-              "span": 0.06077188940092166,
-              "line": 0.027777777777777776
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 15,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.25,
-              "span": 0.06077188940092166,
-              "line": 0.027777777777777776
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 16,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.25,
-              "span": 0.06077188940092166,
-              "line": 0.027777777777777776
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 17,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.25,
-              "span": 0.06077188940092166,
-              "line": 0.027777777777777776
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 18,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.375,
-              "span": 0.061635944700460826,
-              "line": 0.034722222222222224
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 19,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.375,
-              "span": 0.061635944700460826,
-              "line": 0.034722222222222224
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 20,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.08093317972350231,
-              "line": 0.04861111111111111
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 21,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.7,
-          "symbol": 0.125,
-          "span": 0.02540322580645162,
-          "line": 0.012847222222222222
+          "file": 0.7857142857142857,
+          "symbol": 0.8214285714285714,
+          "span": 0.834224818959842,
+          "line": 0.8296957671957672
         },
         "redundancy": {
-          "file": 0.3275862068965517,
-          "symbol": 0.045454545454545414,
-          "span": 0.024936242561632183,
-          "line": 0.014925373134328401
+          "file": 0.4285714285714286,
+          "symbol": 0.29850746268656714,
+          "span": 0.2995703390004728,
+          "line": 0.19774011299435024
         }
       },
       "fixOverlap": {
@@ -5123,28 +1632,28 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/4453ef05b6311c35d61d/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/4453ef05b6311c35d61d/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/4453ef05b6311c35d61d/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/4453ef05b6311c35d61d/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
@@ -5263,7 +1772,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/pkg/cmd/repo/view/view_test.go",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/pkg/cmd/repo/view/view_test.go",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -5303,7 +1821,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/pkg/cmd/repo/view/view.go",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/pkg/cmd/repo/view/view.go",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -5315,7 +1842,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/pkg/cmd/repo/view/view.go",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/pkg/cmd/repo/view/view.go",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -5341,7 +1877,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/pkg/cmd/repo/view/view_test.go",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/pkg/cmd/repo/view/view_test.go",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -5353,7 +1898,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/pkg/cmd/repo/view/view_test.go",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/pkg/cmd/repo/view/view_test.go",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

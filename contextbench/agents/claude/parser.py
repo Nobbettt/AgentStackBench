@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-09 from upstream ContextBench.
+# Summary of changes: keep Claude trace inference conservative for grep-derived context.
 
 """Claude-specific parsing for wrapper-produced records and raw responses."""
 
@@ -7,11 +10,10 @@ from ..base import BaseCodingAgentParser
 from ...coding_agents.inference_limits import MAX_COMMAND_OUTPUT_CHARS
 from ...coding_agents.response_parsing import extract_structured_output_from_value
 from ...coding_agents.trace_inference import (
-    infer_file_list_from_text,
-    infer_grep_spans_from_text,
     infer_read_step,
     infer_retrieval_step_from_command,
     infer_retrieval_step_from_tool_result,
+    infer_search_file_step_from_path,
     normalize_workspace_path,
     tool_result_text_from_value,
     trajectory_from_steps,
@@ -286,18 +288,12 @@ class ClaudeAgentParser(BaseCodingAgentParser):
                     continue
                 if tool_name == "Grep":
                     output_text = _bounded_tool_output_text(output_text, meta=meta)
-                    spans = infer_grep_spans_from_text(output_text, workspace_path, meta=meta)
-                    files = sorted(spans)
-                    if not files:
-                        path_value = str(tool_input.get("path") or "").strip()
-                        if path_value and "." in Path(path_value).name:
-                            files = [normalize_workspace_path(path_value, workspace_path)]
-                            if files[0] not in spans:
-                                spans = infer_grep_spans_from_text(output_text, workspace_path, meta=meta)
-                        else:
-                            files = infer_file_list_from_text(output_text, workspace_path, meta=meta)
-                    if files or spans:
-                        steps.append({"files": files, "spans": spans, "symbols": {}})
+                    step = infer_search_file_step_from_path(
+                        str(tool_input.get("path") or "").strip(),
+                        workspace_path=workspace_path,
+                    )
+                    if step:
+                        steps.append(step)
                     continue
                 if tool_name == "Bash":
                     output_text = _bounded_tool_output_text(output_text, meta=meta)

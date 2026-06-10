@@ -26,6 +26,7 @@ from ..artifact_sanitization import (
     assert_paths_have_no_private_artifacts,
     sanitize_artifact_tree,
     sanitize_json_value,
+    sanitize_text,
 )
 from ..coding_agents.constants import DEFAULT_SUBSET_CSV
 from ..coding_agents.files import append_jsonl, ensure_dir, read_json, safe_path_component, write_json
@@ -64,7 +65,7 @@ from .postprocess import (
 )
 from .types import EffectiveVariantConfig, RunSuiteConfig
 
-_POSTPROCESS_FINGERPRINT_VERSION = 4
+_POSTPROCESS_FINGERPRINT_VERSION = 7
 
 
 def _claude_host_auth_status_summary() -> dict[str, object]:
@@ -106,6 +107,14 @@ def _claude_host_auth_status_summary() -> dict[str, object]:
     return summary
 
 
+def _artifact_suffix_from_path(path: Path, *, stem: str, extension: str) -> str | None:
+    parts = path.name.split(".")
+    if len(parts) == 3 and parts[0] == stem and parts[2] == extension:
+        suffix = parts[1].strip()
+        return suffix or None
+    return None
+
+
 @dataclass
 class _PreparedVariant:
     variant: EffectiveVariantConfig
@@ -131,6 +140,8 @@ class RunSuiteRunner:
         skip_evaluate: bool = False,
         skip_resolve: bool = False,
         resume_resolution: bool = False,
+        refresh_rollups: bool = False,
+        refresh_artifact_suffix: str | None = None,
     ) -> None:
         self.config = config
         self.resume = resume
@@ -138,6 +149,8 @@ class RunSuiteRunner:
         self.skip_evaluate = skip_evaluate
         self.skip_resolve = skip_resolve
         self.resume_resolution = resume_resolution
+        self.refresh_rollups = refresh_rollups
+        self.refresh_artifact_suffix = str(refresh_artifact_suffix or "").strip().strip(".") or None
         worker_cap = max_workers if max_workers is not None else config.parallelism.max_workers
         self.max_workers = max(1, int(worker_cap))
         self.experiment_dir = config.base_run.output_root / safe_path_component(config.experiment_name)
@@ -150,7 +163,8 @@ class RunSuiteRunner:
         self.postprocess_runtime_metadata: dict[str, object] = {
             "backend": self.config.postprocess.runtime_backend,
         }
-        self._validate_postprocess_environment()
+        if not self.refresh_rollups:
+            self._validate_postprocess_environment()
 
     def _validate_postprocess_environment(self) -> None:
         postprocess_runtime_needed = (
@@ -604,7 +618,82 @@ class RunSuiteRunner:
             for row in rows:
                 writer.writerow(row)
 
-    def _write_public_artifacts(self) -> None:
+    def _canonicalize_public_suffix_artifacts(self, artifact_suffix: str | None) -> None:
+        suffix = str(artifact_suffix or "").strip().strip(".")
+        if not suffix:
+            return
+        variants_dir = self.public_artifacts_dir / "variants"
+        if not variants_dir.exists():
+            return
+        for variant_dir in sorted(path for path in variants_dir.iterdir() if path.is_dir()):
+            for stem, extension in (
+                ("pred", "jsonl"),
+                ("eval", "jsonl"),
+                ("conversion-summary", "json"),
+                ("eval-summary", "json"),
+            ):
+                source_path = variant_dir / f"{stem}.{suffix}.{extension}"
+                if not source_path.exists():
+                    continue
+                target_path = variant_dir / f"{stem}.{extension}"
+                shutil.copy2(source_path, target_path)
+
+    def _write_public_artifact_file(self, source_path: Path, target_path: Path) -> None:
+        context = SanitizationContext(
+            repo_root=Path.cwd().resolve(),
+            suite_dir=self.experiment_dir.resolve(),
+            task_dir=source_path.parent.resolve(),
+        )
+        ensure_dir(target_path.parent)
+        suffix = source_path.suffix.lower()
+        if suffix == ".json":
+            payload = read_json(source_path)
+            sanitized = sanitize_json_value(payload, context=context)
+            assert_no_private_paths(sanitized, label=str(source_path))
+            write_json(target_path, sanitized)
+            return
+        if suffix == ".jsonl":
+            lines: list[str] = []
+            for raw_line in source_path.read_text(encoding="utf-8").splitlines():
+                if not raw_line.strip():
+                    continue
+                try:
+                    payload = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    sanitized_line = sanitize_text(raw_line, context=context)
+                    assert_no_private_paths(sanitized_line, label=str(source_path))
+                    lines.append(sanitized_line)
+                    continue
+                sanitized = sanitize_json_value(payload, context=context)
+                assert_no_private_paths(sanitized, label=str(source_path))
+                lines.append(json.dumps(sanitized, ensure_ascii=False))
+            target_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+            return
+        sanitized_text = sanitize_text(source_path.read_text(encoding="utf-8"), context=context)
+        assert_no_private_paths(sanitized_text, label=str(source_path))
+        target_path.write_text(sanitized_text, encoding="utf-8")
+
+    def _write_public_suffix_artifacts(self, artifact_suffix: str | None) -> None:
+        suffix = str(artifact_suffix or "").strip().strip(".")
+        if not suffix:
+            return
+        for variant_dir in sorted((self.experiment_dir / "variants").glob("*")):
+            if not variant_dir.is_dir():
+                continue
+            public_variant_dir = self.public_artifacts_dir / variant_dir.relative_to(self.experiment_dir)
+            for stem, extension in (
+                ("pred", "jsonl"),
+                ("eval", "jsonl"),
+                ("conversion-summary", "json"),
+                ("eval-summary", "json"),
+            ):
+                source_path = variant_dir / f"{stem}.{suffix}.{extension}"
+                if not source_path.exists():
+                    continue
+                self._write_public_artifact_file(source_path, public_variant_dir / source_path.name)
+                self._write_public_artifact_file(source_path, public_variant_dir / f"{stem}.{extension}")
+
+    def _write_public_artifacts(self, *, artifact_suffix: str | None = None) -> None:
         repo_root = Path.cwd().resolve()
         sanitize_artifact_tree(
             source_dir=self.experiment_dir,
@@ -612,7 +701,46 @@ class RunSuiteRunner:
             repo_root=repo_root,
             overwrite=True,
         )
+        self._canonicalize_public_suffix_artifacts(artifact_suffix)
         assert_paths_have_no_private_artifacts([self.public_artifacts_dir])
+
+    def _write_public_rollup_artifacts(self, *, artifact_suffix: str | None = None) -> None:
+        context = SanitizationContext(
+            repo_root=Path.cwd().resolve(),
+            suite_dir=self.experiment_dir.resolve(),
+        )
+        ensure_dir(self.public_artifacts_dir)
+
+        for source_path in (self.manifest_path, self.summary_json_path):
+            payload = read_json(source_path)
+            sanitized = sanitize_json_value(payload, context=context)
+            assert_no_private_paths(sanitized, label=str(source_path))
+            write_json(self.public_artifacts_dir / source_path.name, sanitized)
+
+        summary_csv = sanitize_text(self.summary_csv_path.read_text(encoding="utf-8"), context=context)
+        assert_no_private_paths(summary_csv, label=str(self.summary_csv_path))
+        (self.public_artifacts_dir / self.summary_csv_path.name).write_text(summary_csv, encoding="utf-8")
+        refreshed_paths = [
+            self.public_artifacts_dir / "manifest.json",
+            self.public_artifacts_dir / "summary.json",
+            self.public_artifacts_dir / "summary.csv",
+        ]
+
+        for source_path in sorted((self.experiment_dir / "variants").glob("*/integrity.json")):
+            payload = read_json(source_path)
+            variant_context = SanitizationContext(
+                repo_root=Path.cwd().resolve(),
+                suite_dir=self.experiment_dir.resolve(),
+                task_dir=source_path.parent.resolve(),
+            )
+            sanitized = sanitize_json_value(payload, context=variant_context)
+            assert_no_private_paths(sanitized, label=str(source_path))
+            target_path = self.public_artifacts_dir / source_path.relative_to(self.experiment_dir)
+            ensure_dir(target_path.parent)
+            write_json(target_path, sanitized)
+            refreshed_paths.append(target_path)
+
+        assert_paths_have_no_private_artifacts(refreshed_paths)
 
     def _sanitize_experiment_artifact(self, value: dict[str, object], *, label: str) -> dict[str, object]:
         context = SanitizationContext(
@@ -881,6 +1009,10 @@ class RunSuiteRunner:
             self._postprocess_container_path(variant_root, state.eval_summary_path),
             "--selected-task-count",
             str(selected_task_count),
+            "--workspace-key",
+            safe_path_component(f"{self.config.experiment_name}-{state.variant.slug}-evaluation"),
+            "--tmp-root",
+            "/cache/eval/worktrees",
         ]
         returncode, tail = self._run_postprocess_docker_command(
             variant_root=variant_root,
@@ -925,7 +1057,6 @@ class RunSuiteRunner:
         if worktree_root.exists():
             if worktree_root.is_symlink() or not worktree_root.is_dir():
                 raise RuntimeError(f"Evaluation worktree root is not a directory: {worktree_root}")
-            shutil.rmtree(worktree_root)
         ensure_dir(worktree_root)
         return eval_cache
 
@@ -945,6 +1076,8 @@ class RunSuiteRunner:
                 cache_dir=eval_cache,
                 out_path=state.eval_results_path,
                 selected_task_count=selected_task_count,
+                workspace_key=safe_path_component(f"{self.config.experiment_name}-{state.variant.slug}-evaluation"),
+                tmp_root=eval_cache / "worktrees",
             )
         finally:
             if previous_tmp_root is None:
@@ -1237,7 +1370,33 @@ class RunSuiteRunner:
         return metrics
 
     def _conversion_summary_path(self, state: _PreparedVariant) -> Path:
+        suffix = _artifact_suffix_from_path(state.pred_path, stem="pred", extension="jsonl")
+        if suffix:
+            suffixed_path = state.pred_path.parent / f"conversion-summary.{suffix}.json"
+            if suffixed_path.exists():
+                return suffixed_path
         return state.pred_path.parent / "conversion-summary.json"
+
+    @staticmethod
+    def _suffixed_artifact_path(variant_dir: Path, stem: str, suffix: str | None, extension: str) -> Path:
+        clean_suffix = str(suffix or "").strip().strip(".")
+        filename = f"{stem}.{clean_suffix}.{extension}" if clean_suffix else f"{stem}.{extension}"
+        return variant_dir / filename
+
+    def _reload_stage_summaries(self, state: _PreparedVariant) -> None:
+        metrics = self._state_metrics(state)
+        summary_paths = [
+            ("conversion", self._conversion_summary_path(state)),
+            ("evaluation", state.eval_summary_path),
+            ("resolution", state.resolution_summary_path),
+        ]
+        for key, path in summary_paths:
+            if not path.exists():
+                continue
+            summary = read_json(path)
+            if not isinstance(summary, dict):
+                raise RuntimeError(f"{key} summary is not a JSON object: {path}")
+            metrics[key] = summary
 
     @staticmethod
     def _file_sha256(path: Path) -> str | None:
@@ -1478,6 +1637,7 @@ class RunSuiteRunner:
         conversion_summary: dict[str, object],
         evaluation_summary: dict[str, object],
         resolution_summary: dict[str, object],
+        created_at: str | None = None,
     ) -> dict[str, object]:
         checks: list[dict[str, object]] = []
 
@@ -1535,7 +1695,7 @@ class RunSuiteRunner:
         failed_checks = [check for check in checks if not check.get("ok")]
         report = {
             "variant": state.variant.name,
-            "created_at": utc_now(),
+            "created_at": created_at or utc_now(),
             "ok": not failed_checks,
             "checks": checks,
             "failed_checks": failed_checks,
@@ -1543,10 +1703,23 @@ class RunSuiteRunner:
         write_json(state.pred_path.parent / "integrity.json", report)
         return report
 
-    def _finalize_variant(self, state: _PreparedVariant, tasks: list[dict[str, object]]) -> None:
+    def _finalize_variant(
+        self,
+        state: _PreparedVariant,
+        tasks: list[dict[str, object]],
+        *,
+        preserve_timing: bool = False,
+    ) -> None:
+        self._reload_stage_summaries(state)
         metrics = self._state_metrics(state)
         variant_status = "postprocess_failed" if state.postprocess_failed else "completed"
         warnings: list[str] = []
+        if preserve_timing:
+            state.entry["errors"] = [
+                error
+                for error in (state.entry.get("errors") or [])
+                if not str(error).startswith("integrity checks failed:")
+            ]
         counts = self._recalculate_task_counts(state, tasks)
         conversion_summary = metrics.get("conversion") if isinstance(metrics.get("conversion"), dict) else {}
         evaluation_summary = metrics.get("evaluation") if isinstance(metrics.get("evaluation"), dict) else {}
@@ -1593,6 +1766,13 @@ class RunSuiteRunner:
         metrics["conversion_partial"] = conversion_partial
         metrics["evaluation_partial"] = evaluation_partial
         metrics["resolution_partial"] = resolution_partial
+        integrity_created_at = None
+        if preserve_timing:
+            integrity_path = state.pred_path.parent / "integrity.json"
+            if integrity_path.exists():
+                existing_integrity = read_json(integrity_path)
+                if isinstance(existing_integrity, dict) and isinstance(existing_integrity.get("created_at"), str):
+                    integrity_created_at = existing_integrity["created_at"]
         integrity = self._integrity_report(
             state=state,
             tasks=tasks,
@@ -1600,6 +1780,7 @@ class RunSuiteRunner:
             conversion_summary=conversion_summary,
             evaluation_summary=evaluation_summary,
             resolution_summary=resolution_summary,
+            created_at=integrity_created_at,
         )
         metrics["integrity"] = integrity
 
@@ -1615,8 +1796,10 @@ class RunSuiteRunner:
         state.entry.update(
             {
                 "status": variant_status,
-                "completed_at": utc_now(),
-                "duration_ms": int((time.time() - state.started_monotonic) * 1000),
+                "completed_at": state.entry.get("completed_at") if preserve_timing else utc_now(),
+                "duration_ms": state.entry.get("duration_ms")
+                if preserve_timing
+                else int((time.time() - state.started_monotonic) * 1000),
                 "task_counts": counts,
                 "metrics": metrics,
                 "warnings": warnings,
@@ -1626,6 +1809,92 @@ class RunSuiteRunner:
                 "resolution_summary_path": str(state.resolution_summary_path) if state.resolution_summary_path.exists() else None,
             }
         )
+
+    def refresh_rollup_artifacts(self) -> int:
+        tasks, task_set = self._load_tasks()
+        effective_variants = [
+            build_run_suite_variant(self.config, variant)
+            for variant in self.config.variants
+            if variant.enabled
+        ]
+        if not effective_variants:
+            raise RuntimeError("No enabled variants remain after config filtering")
+        if not self.manifest_path.exists():
+            raise RuntimeError(f"Cannot refresh rollups because manifest is missing: {self.manifest_path}")
+
+        manifest = read_json(self.manifest_path)
+        if not isinstance(manifest, dict):
+            raise RuntimeError(f"Manifest is not a JSON object: {self.manifest_path}")
+        existing_entries = {
+            str(entry.get("name")): entry
+            for entry in (manifest.get("variants") or [])
+            if isinstance(entry, dict)
+        }
+
+        variant_entries: list[dict[str, object]] = []
+        artifact_suffix = self.refresh_artifact_suffix
+        for variant in effective_variants:
+            entry = dict(existing_entries.get(variant.name) or self._initial_variant_entry(variant))
+            variant_dir = self.experiment_dir / "variants" / variant.slug
+            pred_path = self._suffixed_artifact_path(variant_dir, "pred", artifact_suffix, "jsonl")
+            eval_results_path = self._suffixed_artifact_path(variant_dir, "eval", artifact_suffix, "jsonl")
+            eval_summary_path = self._suffixed_artifact_path(variant_dir, "eval-summary", artifact_suffix, "json")
+            if artifact_suffix:
+                missing_paths = [
+                    path
+                    for path in (pred_path, eval_results_path, eval_summary_path)
+                    if not path.exists()
+                ]
+                if missing_paths:
+                    rendered = ", ".join(str(path) for path in missing_paths)
+                    raise RuntimeError(
+                        f"Cannot refresh rollups from artifact suffix '{artifact_suffix}' because required artifacts are missing: {rendered}"
+                    )
+            entry.setdefault("name", variant.name)
+            entry.setdefault("slug", variant.slug)
+            entry.setdefault("description", variant.description)
+            entry.setdefault("labels", list(variant.labels))
+            entry.setdefault("notes", variant.notes)
+            entry.setdefault("output_dir", str(variant_dir))
+            entry.setdefault("raw_runs_dir", str(variant_dir / "agent_runs"))
+            entry.setdefault("task_results_path", str(variant_dir / "task-results.jsonl"))
+            entry.setdefault("effective_config_path", str(variant_dir / "effective-config.json"))
+            entry.setdefault("metrics", {})
+            entry.setdefault("errors", [])
+            entry.setdefault("warnings", [])
+            state = _PreparedVariant(
+                variant=variant,
+                entry=entry,
+                raw_root=variant_dir / "agent_runs",
+                task_results_path=variant_dir / "task-results.jsonl",
+                pred_path=pred_path,
+                eval_results_path=eval_results_path,
+                eval_summary_path=eval_summary_path,
+                resolution_summary_path=variant_dir / "resolution-summary.json",
+                started_monotonic=time.time(),
+            )
+            self._finalize_variant(state, tasks, preserve_timing=True)
+            variant_entries.append(entry)
+
+        started_at = str(manifest.get("started_at") or utc_now())
+        completed_at = manifest.get("completed_at")
+        self._write_manifest(
+            started_at=started_at,
+            completed_at=str(completed_at) if completed_at is not None else utc_now(),
+            task_set=task_set,
+            variant_entries=variant_entries,
+        )
+        if artifact_suffix:
+            manifest = read_json(self.manifest_path)
+            if isinstance(manifest, dict):
+                manifest["postprocess_artifact_suffix"] = artifact_suffix
+                write_json(self.manifest_path, manifest)
+        self._write_summary(variant_entries)
+        self._write_public_rollup_artifacts(artifact_suffix=artifact_suffix)
+        self._write_public_suffix_artifacts(artifact_suffix)
+
+        bad_statuses = {"failed", "completed_with_failures", "postprocess_failed"}
+        return 0 if all(entry["status"] not in bad_statuses for entry in variant_entries) else 1
 
     def run(self) -> int:
         tasks, task_set = self._load_tasks()

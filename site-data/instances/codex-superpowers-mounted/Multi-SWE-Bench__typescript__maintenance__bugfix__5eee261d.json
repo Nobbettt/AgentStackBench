@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-10T23:18:51Z",
       "completedAt": "2026-05-10T23:28:37Z",
       "durationMs": 586652,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 3743492,
@@ -25,6 +40,28 @@
         "total_tokens": 3759270,
         "cache_read_input_tokens": 3580800
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 41,
+        "readToolCalls": 0,
+        "editToolCalls": 3
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/packages/dts-test/watch.test-d.ts b/packages/dts-test/watch.test-d.ts\nindex 6c8576f0..65687d15 100644\n--- a/packages/dts-test/watch.test-d.ts\n+++ b/packages/dts-test/watch.test-d.ts\n@@ -62,6 +62,7 @@ watch(readonlyArr, (values, oldValues) => {\n declare const aAny: any\n watch(aAny, (v, ov) => {})\n watch(aAny, (v, ov) => {}, { immediate: true })\n+watch(aAny, (v, ov) => {}, { deep: 1 })\n \n // immediate watcher's oldValue will be undefined on first run.\n watch(\n@@ -159,6 +160,7 @@ defineComponent({\n         expectType<number>(ov)\n         expectType<OnCleanup>(onCleanup)\n       },\n+      { deep: 1 },\n     )\n   },\n })\ndiff --git a/packages/runtime-core/__tests__/apiWatch.spec.ts b/packages/runtime-core/__tests__/apiWatch.spec.ts\nindex f370a98b..b29c2e82 100644\n--- a/packages/runtime-core/__tests__/apiWatch.spec.ts\n+++ b/packages/runtime-core/__tests__/apiWatch.spec.ts\n@@ -271,6 +271,75 @@ describe('api: watch', () => {\n     expect(dummy).toBe(2)\n   })\n \n+  it('should support numeric deep for reactive object sources', async () => {\n+    const src = reactive({\n+      state: {\n+        nested: {\n+          count: 0,\n+        },\n+      },\n+    })\n+    const spy = vi.fn()\n+\n+    watch(src, spy, { deep: 2 })\n+\n+    src.state.nested.count++\n+    await nextTick()\n+    expect(spy).toBeCalledTimes(0)\n+\n+    src.state.nested = { count: 1 }\n+    await nextTick()\n+    expect(spy).toBeCalledTimes(1)\n+\n+    src.state = { nested: { count: 2 } }\n+    await nextTick()\n+    expect(spy).toBeCalledTimes(2)\n+  })\n+\n+  it('should support numeric deep for refs', async () => {\n+    const state = ref({\n+      nested: {\n+        count: 0,\n+      },\n+    })\n+    const spy = vi.fn()\n+\n+    watch(state, spy, { deep: 1 })\n+\n+    state.value.nested.count++\n+    await nextTick()\n+    expect(spy).toBeCalledTimes(0)\n+\n+    state.value.nested = { count: 1 }\n+    await nextTick()\n+    expect(spy).toBeCalledTimes(1)\n+  })\n+\n+  it('should support numeric deep for arrays', async () => {\n+    const array = ref([\n+      {\n+        nested: {\n+          count: 0,\n+        },\n+      },\n+    ])\n+    const spy = vi.fn()\n+\n+    watch(array, spy, { deep: 1 })\n+\n+    array.value[0].nested.count++\n+    await nextTick()\n+    expect(spy).toBeCalledTimes(0)\n+\n+    array.value[0] = { nested: { count: 1 } }\n+    await nextTick()\n+    expect(spy).toBeCalledTimes(1)\n+\n+    array.value.push({ nested: { count: 2 } })\n+    await nextTick()\n+    expect(spy).toBeCalledTimes(2)\n+  })\n+\n   it('watching multiple sources', async () => {\n     const state = reactive({ count: 1 })\n     const count = ref(1)\ndiff --git a/packages/runtime-core/src/apiWatch.ts b/packages/runtime-core/src/apiWatch.ts\nindex dddc64e2..50d12c3e 100644\n--- a/packages/runtime-core/src/apiWatch.ts\n+++ b/packages/runtime-core/src/apiWatch.ts\n@@ -73,7 +73,7 @@ export interface WatchOptionsBase extends DebuggerOptions {\n \n export interface WatchOptions<Immediate = boolean> extends WatchOptionsBase {\n   immediate?: Immediate\n-  deep?: boolean\n+  deep?: boolean | number\n   once?: boolean\n }\n \n@@ -189,14 +189,6 @@ function doWatch(\n     }\n   }\n \n-  // TODO remove in 3.5\n-  if (__DEV__ && deep !== void 0 && typeof deep === 'number') {\n-    warn(\n-      `watch() \"deep\" option with number value will be used as watch depth in future versions. ` +\n-        `Please use a boolean instead to avoid potential breakage.`,\n-    )\n-  }\n-\n   if (__DEV__ && !cb) {\n     if (immediate !== undefined) {\n       warn(\n@@ -228,11 +220,15 @@ function doWatch(\n   }\n \n   const instance = currentInstance\n-  const reactiveGetter = (source: object) =>\n-    deep === true\n-      ? source // traverse will happen in wrapped getter below\n-      : // for deep: false, only traverse root-level properties\n-        traverse(source, deep === false ? 1 : undefined)\n+  const reactiveGetter = (source: object) => {\n+    if (deep) {\n+      return source\n+    }\n+    if (isShallow(source) || deep === false || deep === 0) {\n+      return traverse(source, 1)\n+    }\n+    return traverse(source)\n+  }\n \n   let getter: () => any\n   let forceTrigger = false\n@@ -300,7 +296,8 @@ function doWatch(\n \n   if (cb && deep) {\n     const baseGetter = getter\n-    getter = () => traverse(baseGetter())\n+    const depth = deep === true ? Infinity : deep\n+    getter = () => traverse(baseGetter(), depth)\n   }\n \n   let cleanup: (() => void) | undefined\n",
       "finalOutput": {
         "status": "completed",
@@ -81,107 +118,27 @@
         "predSteps": [
           {
             "files": [
-              "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts",
-              "packages/compiler-sfc/src/style/pluginScoped.ts",
-              "packages/reactivity/__tests__/effectScope.spec.ts",
-              "packages/reactivity/src/reactive.ts",
-              "packages/runtime-core/src/components/KeepAlive.ts",
-              "packages/runtime-dom/__tests__/directives/vShow.spec.ts",
-              "packages/runtime-dom/src/directives/vModel.ts",
-              "packages/server-renderer/__tests__/ssrWatch.spec.ts",
-              "packages/server-renderer/src/renderToStream.ts",
-              "packages/server-renderer/src/renderToString.ts",
-              "packages/vue/examples/classic/todomvc.html"
+              "packages/runtime-core/src/apiWatch.ts"
             ],
             "spans": {
-              "packages/compiler-sfc/src/style/pluginScoped.ts": [
+              "packages/runtime-core/src/apiWatch.ts": [
                 {
-                  "start": 107,
-                  "end": 107
+                  "start": 260,
+                  "end": 560
                 }
-              ],
-              "packages/runtime-core/src/components/KeepAlive.ts": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-core/__tests__/apiWatch.spec.ts"
+            ],
+            "spans": {
+              "packages/runtime-core/__tests__/apiWatch.spec.ts": [
                 {
-                  "start": 220,
-                  "end": 220
-                },
-                {
-                  "start": 227,
-                  "end": 227
-                }
-              ],
-              "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts": [
-                {
-                  "start": 430,
-                  "end": 430
-                },
-                {
-                  "start": 434,
-                  "end": 434
-                },
-                {
-                  "start": 446,
-                  "end": 446
-                },
-                {
-                  "start": 493,
-                  "end": 493
-                },
-                {
-                  "start": 494,
-                  "end": 494
-                }
-              ],
-              "packages/server-renderer/src/renderToStream.ts": [
-                {
-                  "start": 82,
-                  "end": 82
-                }
-              ],
-              "packages/server-renderer/src/renderToString.ts": [
-                {
-                  "start": 92,
-                  "end": 92
-                }
-              ],
-              "packages/server-renderer/__tests__/ssrWatch.spec.ts": [
-                {
-                  "start": 10,
-                  "end": 10
-                }
-              ],
-              "packages/reactivity/src/reactive.ts": [
-                {
-                  "start": 174,
-                  "end": 174
-                }
-              ],
-              "packages/reactivity/__tests__/effectScope.spec.ts": [
-                {
-                  "start": 247,
-                  "end": 247
-                }
-              ],
-              "packages/vue/examples/classic/todomvc.html": [
-                {
-                  "start": 100,
-                  "end": 100
-                }
-              ],
-              "packages/runtime-dom/src/directives/vModel.ts": [
-                {
-                  "start": 122,
-                  "end": 122
-                },
-                {
-                  "start": 196,
-                  "end": 196
-                }
-              ],
-              "packages/runtime-dom/__tests__/directives/vShow.spec.ts": [
-                {
-                  "start": 187,
-                  "end": 187
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -191,21 +148,56 @@
             "files": [
               "packages/runtime-core/src/apiWatch.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "packages/runtime-core/__tests__/apiWatch.spec.ts"
-            ],
-            "spans": {},
+            "spans": {
+              "packages/runtime-core/src/apiWatch.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "packages/dts-test/watch.test-d.ts"
             ],
-            "spans": {},
+            "spans": {
+              "packages/dts-test/watch.test-d.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-core/__tests__/apiWatch.spec.ts"
+            ],
+            "spans": {
+              "packages/runtime-core/__tests__/apiWatch.spec.ts": [
+                {
+                  "start": 260,
+                  "end": 420
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-core/__tests__/apiWatch.spec.ts"
+            ],
+            "spans": {
+              "packages/runtime-core/__tests__/apiWatch.spec.ts": [
+                {
+                  "start": 1580,
+                  "end": 1665
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -217,20 +209,20 @@
           },
           {
             "files": [
-              "packages/runtime-core/src/apiWatch.ts",
-              "packages/runtime-core/src/directives.ts"
+              "packages/global.d.ts"
+            ],
+            "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-core/__tests__/apiWatch.spec.ts"
             ],
             "spans": {
-              "packages/runtime-core/src/directives.ts": [
+              "packages/runtime-core/__tests__/apiWatch.spec.ts": [
                 {
-                  "start": 96,
-                  "end": 96
-                }
-              ],
-              "packages/runtime-core/src/apiWatch.ts": [
-                {
-                  "start": 76,
-                  "end": 76
+                  "start": 1440,
+                  "end": 1665
                 }
               ]
             },
@@ -238,16 +230,16 @@
           },
           {
             "files": [
-              "https:/patch-diff.githubusercontent.com/raw/vuejs/core/commit/22f7d96.patch"
+              "packages/runtime-core/src/apiWatch.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "https:/patch-diff.githubusercontent.com/raw/vuejs/core/pull/9572.patch"
-            ],
-            "spans": {},
+            "spans": {
+              "packages/runtime-core/src/apiWatch.ts": [
+                {
+                  "start": 60,
+                  "end": 340
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -270,136 +262,60 @@
             ],
             "spans": {},
             "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-core/src/apiWatch.ts"
+            ],
+            "spans": {
+              "packages/runtime-core/src/apiWatch.ts": [
+                {
+                  "start": 70,
+                  "end": 320
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/dts-test/watch.test-d.ts"
+            ],
+            "spans": {
+              "packages/dts-test/watch.test-d.ts": [
+                {
+                  "start": 55,
+                  "end": 170
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-core/__tests__/apiWatch.spec.ts"
+            ],
+            "spans": {
+              "packages/runtime-core/__tests__/apiWatch.spec.ts": [
+                {
+                  "start": 240,
+                  "end": 360
+                }
+              ]
+            },
+            "symbols": {}
           }
         ],
         "predFiles": [
-          "https:/patch-diff.githubusercontent.com/raw/vuejs/core/commit/22f7d96.patch",
-          "https:/patch-diff.githubusercontent.com/raw/vuejs/core/pull/9572.patch",
-          "package.json",
-          "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts",
-          "packages/compiler-sfc/src/style/pluginScoped.ts",
-          "packages/dts-built-test/tsconfig.json",
-          "packages/dts-test/tsconfig.test.json",
           "packages/dts-test/watch.test-d.ts",
-          "packages/reactivity/__tests__/effectScope.spec.ts",
-          "packages/reactivity/src/reactive.ts",
           "packages/runtime-core/__tests__/apiWatch.spec.ts",
-          "packages/runtime-core/src/apiWatch.ts",
-          "packages/runtime-core/src/components/KeepAlive.ts",
-          "packages/runtime-core/src/directives.ts",
-          "packages/runtime-dom/__tests__/directives/vShow.spec.ts",
-          "packages/runtime-dom/src/directives/vModel.ts",
-          "packages/server-renderer/__tests__/ssrWatch.spec.ts",
-          "packages/server-renderer/src/renderToStream.ts",
-          "packages/server-renderer/src/renderToString.ts",
-          "packages/vue/examples/classic/todomvc.html",
-          "packages/vue/package.json"
+          "packages/runtime-core/src/apiWatch.ts"
         ],
         "predSpans": {
-          "packages/compiler-sfc/src/style/pluginScoped.ts": [
-            {
-              "start": 107,
-              "end": 107
-            }
-          ],
-          "packages/runtime-core/src/components/KeepAlive.ts": [
-            {
-              "start": 220,
-              "end": 220
-            },
-            {
-              "start": 227,
-              "end": 227
-            }
-          ],
-          "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts": [
-            {
-              "start": 430,
-              "end": 430
-            },
-            {
-              "start": 434,
-              "end": 434
-            },
-            {
-              "start": 446,
-              "end": 446
-            },
-            {
-              "start": 493,
-              "end": 493
-            },
-            {
-              "start": 494,
-              "end": 494
-            }
-          ],
-          "packages/server-renderer/src/renderToStream.ts": [
-            {
-              "start": 82,
-              "end": 82
-            }
-          ],
-          "packages/server-renderer/src/renderToString.ts": [
-            {
-              "start": 92,
-              "end": 92
-            }
-          ],
-          "packages/server-renderer/__tests__/ssrWatch.spec.ts": [
-            {
-              "start": 10,
-              "end": 10
-            }
-          ],
-          "packages/reactivity/src/reactive.ts": [
-            {
-              "start": 174,
-              "end": 174
-            }
-          ],
-          "packages/reactivity/__tests__/effectScope.spec.ts": [
-            {
-              "start": 247,
-              "end": 247
-            }
-          ],
-          "packages/vue/examples/classic/todomvc.html": [
-            {
-              "start": 100,
-              "end": 100
-            }
-          ],
-          "packages/runtime-dom/src/directives/vModel.ts": [
-            {
-              "start": 122,
-              "end": 122
-            },
-            {
-              "start": 196,
-              "end": 196
-            }
-          ],
-          "packages/runtime-dom/__tests__/directives/vShow.spec.ts": [
-            {
-              "start": 187,
-              "end": 187
-            }
-          ],
-          "packages/runtime-core/src/directives.ts": [
-            {
-              "start": 96,
-              "end": 96
-            }
-          ],
           "packages/runtime-core/src/apiWatch.ts": [
             {
               "start": 74,
               "end": 77
-            },
-            {
-              "start": 76,
-              "end": 76
             },
             {
               "start": 172,
@@ -531,6 +447,51 @@
               "span": 0.0,
               "line": 0.0
             }
+          },
+          {
+            "step": 12,
+            "coverage": {
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 13,
+            "coverage": {
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 14,
+            "coverage": {
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 15,
+            "coverage": {
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
+            }
+          },
+          {
+            "step": 16,
+            "coverage": {
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
+            }
           }
         ],
         "aucCoverage": {
@@ -540,10 +501,10 @@
           "line": 0.0
         },
         "redundancy": {
-          "file": 0.050000000000000044,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.5,
+          "symbol": 0.5277777777777778,
+          "span": 0.39923245614035086,
+          "line": 0.36891950064571677
         }
       },
       "fixOverlap": {
@@ -705,17 +666,44 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/runtime-core/src/apiWatch.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/runtime-core/src/apiWatch.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/runtime-core/__tests__/apiWatch.spec.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/runtime-core/__tests__/apiWatch.spec.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/dts-test/watch.test-d.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/dts-test/watch.test-d.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",
@@ -971,9 +959,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-10T23:18:53Z",
       "completedAt": "2026-05-10T23:29:18Z",
       "durationMs": 624774,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 3483846,
@@ -982,6 +985,28 @@
         "total_tokens": 3503357,
         "cache_read_input_tokens": 3334656
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 54,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/packages/dts-test/watch.test-d.ts b/packages/dts-test/watch.test-d.ts\nindex 6c8576f0..9f64ae74 100644\n--- a/packages/dts-test/watch.test-d.ts\n+++ b/packages/dts-test/watch.test-d.ts\n@@ -134,6 +134,9 @@ watch(nestedRefSource, (v, ov) => {\n   expectType<{ foo: number }>(ov)\n })\n \n+watch(nestedRefSource, () => {}, { deep: 1 })\n+watch(reactive({ nested: { count: 0 } }), () => {}, { deep: 2 })\n+\n const someRef = ref({ test: 'test' })\n const otherRef = ref({ a: 'b' })\n watch([someRef, otherRef], values => {\ndiff --git a/packages/runtime-core/__tests__/apiWatch.spec.ts b/packages/runtime-core/__tests__/apiWatch.spec.ts\nindex f370a98b..0d019642 100644\n--- a/packages/runtime-core/__tests__/apiWatch.spec.ts\n+++ b/packages/runtime-core/__tests__/apiWatch.spec.ts\n@@ -932,6 +932,147 @@ describe('api: watch', () => {\n     expect(dummy).toEqual([1, 2])\n   })\n \n+  it('watching reactive depth', async () => {\n+    const state = reactive({\n+      a: {\n+        b: {\n+          c: {\n+            d: {\n+              e: 1,\n+            },\n+          },\n+        },\n+      },\n+    })\n+\n+    const cb = vi.fn()\n+\n+    watch(state, cb, { deep: 2 })\n+\n+    state.a.b = { c: { d: { e: 2 } } }\n+    await nextTick()\n+    expect(cb).toHaveBeenCalledTimes(1)\n+\n+    state.a.b.c = { d: { e: 3 } }\n+    await nextTick()\n+    expect(cb).toHaveBeenCalledTimes(1)\n+\n+    state.a.b = { c: { d: { e: 4 } } }\n+    await nextTick()\n+    expect(cb).toHaveBeenCalledTimes(2)\n+  })\n+\n+  it('watching ref depth', async () => {\n+    const state = ref({\n+      a: {\n+        b: 2,\n+      },\n+    })\n+\n+    const cb = vi.fn()\n+\n+    watch(state, cb, { deep: 1 })\n+\n+    state.value.a.b = 3\n+    await nextTick()\n+    expect(cb).toHaveBeenCalledTimes(0)\n+\n+    state.value.a = { b: 3 }\n+    await nextTick()\n+    expect(cb).toHaveBeenCalledTimes(1)\n+  })\n+\n+  it('watching array depth', async () => {\n+    const arr = ref([\n+      {\n+        a: {\n+          b: 2,\n+        },\n+      },\n+      {\n+        a: {\n+          b: 3,\n+        },\n+      },\n+    ])\n+\n+    const cb = vi.fn()\n+\n+    watch(arr, cb, { deep: 2 })\n+\n+    arr.value[0].a.b = 3\n+    await nextTick()\n+    expect(cb).toHaveBeenCalledTimes(0)\n+\n+    arr.value[0].a = { b: 3 }\n+    await nextTick()\n+    expect(cb).toHaveBeenCalledTimes(1)\n+\n+    arr.value[1].a = { b: 4 }\n+    await nextTick()\n+    expect(cb).toHaveBeenCalledTimes(2)\n+\n+    arr.value.push({ a: { b: 5 } })\n+    await nextTick()\n+    expect(cb).toHaveBeenCalledTimes(3)\n+\n+    arr.value.pop()\n+    await nextTick()\n+    expect(cb).toHaveBeenCalledTimes(4)\n+  })\n+\n+  test('watching the same object at different depths', async () => {\n+    const arr1: any[] = reactive([[[{ foo: {} }]]])\n+    const arr2 = arr1[0]\n+    const arr3 = arr2[0]\n+    const obj = arr3[0]\n+    arr1.push(arr3)\n+\n+    const cb1 = vi.fn()\n+    const cb2 = vi.fn()\n+    const cb3 = vi.fn()\n+    const cb4 = vi.fn()\n+\n+    watch(arr1, cb1, { deep: 1 })\n+    watch(arr1, cb2, { deep: 2 })\n+    watch(arr1, cb3, { deep: 3 })\n+    watch(arr1, cb4, { deep: 4 })\n+\n+    await nextTick()\n+    expect(cb1).toHaveBeenCalledTimes(0)\n+    expect(cb2).toHaveBeenCalledTimes(0)\n+    expect(cb3).toHaveBeenCalledTimes(0)\n+    expect(cb4).toHaveBeenCalledTimes(0)\n+\n+    obj.foo = {}\n+    await nextTick()\n+    expect(cb1).toHaveBeenCalledTimes(0)\n+    expect(cb2).toHaveBeenCalledTimes(0)\n+    expect(cb3).toHaveBeenCalledTimes(1)\n+    expect(cb4).toHaveBeenCalledTimes(1)\n+\n+    ;(obj.foo as any).bar = 1\n+    await nextTick()\n+    expect(cb1).toHaveBeenCalledTimes(0)\n+    expect(cb2).toHaveBeenCalledTimes(0)\n+    expect(cb3).toHaveBeenCalledTimes(1)\n+    expect(cb4).toHaveBeenCalledTimes(2)\n+\n+    arr3.push(obj.foo)\n+    await nextTick()\n+    expect(cb1).toHaveBeenCalledTimes(0)\n+    expect(cb2).toHaveBeenCalledTimes(1)\n+    expect(cb3).toHaveBeenCalledTimes(2)\n+    expect(cb4).toHaveBeenCalledTimes(3)\n+\n+    ;(obj.foo as any).bar = 2\n+    await nextTick()\n+    expect(cb1).toHaveBeenCalledTimes(0)\n+    expect(cb2).toHaveBeenCalledTimes(1)\n+    expect(cb3).toHaveBeenCalledTimes(3)\n+    expect(cb4).toHaveBeenCalledTimes(4)\n+  })\n+\n   it('deep with symbols', async () => {\n     const symbol1 = Symbol()\n     const symbol2 = Symbol()\ndiff --git a/packages/runtime-core/src/apiWatch.ts b/packages/runtime-core/src/apiWatch.ts\nindex dddc64e2..3d3d9cd6 100644\n--- a/packages/runtime-core/src/apiWatch.ts\n+++ b/packages/runtime-core/src/apiWatch.ts\n@@ -73,7 +73,7 @@ export interface WatchOptionsBase extends DebuggerOptions {\n \n export interface WatchOptions<Immediate = boolean> extends WatchOptionsBase {\n   immediate?: Immediate\n-  deep?: boolean\n+  deep?: boolean | number\n   once?: boolean\n }\n \n@@ -189,14 +189,6 @@ function doWatch(\n     }\n   }\n \n-  // TODO remove in 3.5\n-  if (__DEV__ && deep !== void 0 && typeof deep === 'number') {\n-    warn(\n-      `watch() \"deep\" option with number value will be used as watch depth in future versions. ` +\n-        `Please use a boolean instead to avoid potential breakage.`,\n-    )\n-  }\n-\n   if (__DEV__ && !cb) {\n     if (immediate !== undefined) {\n       warn(\n@@ -228,11 +220,15 @@ function doWatch(\n   }\n \n   const instance = currentInstance\n-  const reactiveGetter = (source: object) =>\n-    deep === true\n-      ? source // traverse will happen in wrapped getter below\n-      : // for deep: false, only traverse root-level properties\n-        traverse(source, deep === false ? 1 : undefined)\n+  const reactiveGetter = (source: object) => {\n+    if (deep) {\n+      return source\n+    }\n+    if (isShallow(source) || deep === false || deep === 0) {\n+      return traverse(source, 1)\n+    }\n+    return traverse(source)\n+  }\n \n   let getter: () => any\n   let forceTrigger = false\n@@ -300,7 +296,8 @@ function doWatch(\n \n   if (cb && deep) {\n     const baseGetter = getter\n-    getter = () => traverse(baseGetter())\n+    const depth = deep === true ? Infinity : deep\n+    getter = () => traverse(baseGetter(), depth)\n   }\n \n   let cleanup: (() => void) | undefined\n@@ -472,17 +469,17 @@ export function createPathGetter(ctx: any, path: string) {\n export function traverse(\n   value: unknown,\n   depth = Infinity,\n-  seen?: Set<unknown>,\n+  seen?: Map<unknown, number>,\n ) {\n   if (depth <= 0 || !isObject(value) || (value as any)[ReactiveFlags.SKIP]) {\n     return value\n   }\n \n-  seen = seen || new Set()\n-  if (seen.has(value)) {\n+  seen = seen || new Map()\n+  if ((seen.get(value) || 0) >= depth) {\n     return value\n   }\n-  seen.add(value)\n+  seen.set(value, depth)\n   depth--\n   if (isRef(value)) {\n     traverse(value.value, depth, seen)\n",
       "finalOutput": {
         "status": "completed",
@@ -1038,709 +1063,13 @@
         "predSteps": [
           {
             "files": [
-              "packages/compiler-core/__tests__/__snapshots__/codegen.spec.ts.snap",
-              "packages/compiler-core/__tests__/__snapshots__/compile.spec.ts.snap",
-              "packages/compiler-core/__tests__/__snapshots__/parse.spec.ts.snap",
-              "packages/compiler-core/__tests__/__snapshots__/scopeId.spec.ts.snap",
-              "packages/compiler-core/__tests__/codegen.spec.ts",
-              "packages/compiler-core/__tests__/compile.spec.ts",
-              "packages/compiler-core/__tests__/parse.spec.ts",
-              "packages/compiler-core/__tests__/scopeId.spec.ts",
-              "packages/compiler-core/__tests__/testUtils.ts",
-              "packages/compiler-core/__tests__/transform.spec.ts",
-              "packages/compiler-core/__tests__/transforms/__snapshots__/cacheStatic.spec.ts.snap",
-              "packages/compiler-core/__tests__/transforms/__snapshots__/transformElement.spec.ts.snap",
-              "packages/compiler-core/__tests__/transforms/__snapshots__/transformExpressions.spec.ts.snap",
-              "packages/compiler-core/__tests__/transforms/__snapshots__/transformText.spec.ts.snap",
-              "packages/compiler-core/__tests__/transforms/__snapshots__/vFor.spec.ts.snap",
-              "packages/compiler-core/__tests__/transforms/__snapshots__/vIf.spec.ts.snap",
-              "packages/compiler-core/__tests__/transforms/__snapshots__/vMemo.spec.ts.snap",
-              "packages/compiler-core/__tests__/transforms/__snapshots__/vModel.spec.ts.snap",
-              "packages/compiler-core/__tests__/transforms/__snapshots__/vOnce.spec.ts.snap",
-              "packages/compiler-core/__tests__/transforms/__snapshots__/vSlot.spec.ts.snap",
-              "packages/compiler-core/__tests__/transforms/cacheStatic.spec.ts",
-              "packages/compiler-core/__tests__/transforms/noopDirectiveTransform.spec.ts",
-              "packages/compiler-core/__tests__/transforms/transformElement.spec.ts",
-              "packages/compiler-core/__tests__/transforms/transformExpressions.spec.ts",
-              "packages/compiler-core/__tests__/transforms/transformSlotOutlet.spec.ts",
-              "packages/compiler-core/__tests__/transforms/transformText.spec.ts",
-              "packages/compiler-core/__tests__/transforms/vBind.spec.ts",
-              "packages/compiler-core/__tests__/transforms/vFor.spec.ts",
-              "packages/compiler-core/__tests__/transforms/vIf.spec.ts",
-              "packages/compiler-core/__tests__/transforms/vMemo.spec.ts",
-              "packages/compiler-core/__tests__/transforms/vModel.spec.ts",
-              "packages/compiler-core/__tests__/transforms/vOn.spec.ts",
-              "packages/compiler-core/__tests__/transforms/vOnce.spec.ts",
-              "packages/compiler-core/__tests__/transforms/vSlot.spec.ts",
-              "packages/compiler-core/__tests__/utils.spec.ts",
-              "packages/compiler-dom/__tests__/__snapshots__/index.spec.ts.snap",
-              "packages/compiler-dom/__tests__/decoderHtmlBrowser.spec.ts",
-              "packages/compiler-dom/__tests__/index.spec.ts",
-              "packages/compiler-dom/__tests__/parse.spec.ts",
-              "packages/compiler-dom/__tests__/transforms/Transition.spec.ts",
-              "packages/compiler-dom/__tests__/transforms/__snapshots__/Transition.spec.ts.snap",
-              "packages/compiler-dom/__tests__/transforms/__snapshots__/stringifyStatic.spec.ts.snap",
-              "packages/compiler-dom/__tests__/transforms/__snapshots__/vModel.spec.ts.snap",
-              "packages/compiler-dom/__tests__/transforms/__snapshots__/vShow.spec.ts.snap",
-              "packages/compiler-dom/__tests__/transforms/ignoreSideEffectTags.spec.ts",
-              "packages/compiler-dom/__tests__/transforms/stringifyStatic.spec.ts",
-              "packages/compiler-dom/__tests__/transforms/transformStyle.spec.ts",
-              "packages/compiler-dom/__tests__/transforms/vHtml.spec.ts",
-              "packages/compiler-dom/__tests__/transforms/vModel.spec.ts",
-              "packages/compiler-dom/__tests__/transforms/vOn.spec.ts",
-              "packages/compiler-dom/__tests__/transforms/vShow.spec.ts",
-              "packages/compiler-dom/__tests__/transforms/vText.spec.ts",
-              "packages/compiler-dom/__tests__/transforms/validateHtmlNesting.spec.ts",
-              "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/__snapshots__/compileTemplate.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/__snapshots__/cssVars.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/__snapshots__/templateTransformAssetUrl.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/__snapshots__/templateTransformSrcset.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/compileScript.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/__snapshots__/defineEmits.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/compileScript/__snapshots__/defineExpose.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/compileScript/__snapshots__/defineModel.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/compileScript/__snapshots__/defineOptions.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/compileScript/__snapshots__/defineProps.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/compileScript/__snapshots__/definePropsDestructure.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/compileScript/__snapshots__/defineSlots.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/compileScript/__snapshots__/hoistStatic.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/compileScript/__snapshots__/importUsageCheck.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/compileScript/defineEmits.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/defineProps.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/hoistStatic.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/importUsageCheck.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts",
-              "packages/compiler-sfc/__tests__/compileStyle.spec.ts",
-              "packages/compiler-sfc/__tests__/compileTemplate.spec.ts",
-              "packages/compiler-sfc/__tests__/cssVars.spec.ts",
-              "packages/compiler-sfc/__tests__/fixture/import.scss",
-              "packages/compiler-sfc/__tests__/parse.spec.ts",
-              "packages/compiler-sfc/__tests__/rewriteDefault.spec.ts",
-              "packages/compiler-sfc/__tests__/templateTransformAssetUrl.spec.ts",
-              "packages/compiler-sfc/__tests__/templateTransformSrcset.spec.ts",
-              "packages/compiler-sfc/__tests__/templateUtils.spec.ts",
-              "packages/compiler-sfc/__tests__/utils.ts",
-              "packages/compiler-ssr/__tests__/ssrComponent.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrElement.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrFallthroughAttrs.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrInjectCssVars.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrPortal.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrScopeId.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrSlotOutlet.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrSuspense.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrText.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrTransition.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrTransitionGroup.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrVFor.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrVIf.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrVModel.spec.ts",
-              "packages/compiler-ssr/__tests__/ssrVShow.spec.ts",
-              "packages/compiler-ssr/__tests__/utils.ts",
-              "packages/dts-test/watch.test-d.ts",
-              "packages/reactivity/__tests__/collections/Map.spec.ts",
-              "packages/reactivity/__tests__/collections/Set.spec.ts",
-              "packages/reactivity/__tests__/collections/WeakMap.spec.ts",
-              "packages/reactivity/__tests__/collections/WeakSet.spec.ts",
-              "packages/reactivity/__tests__/collections/shallowReadonly.spec.ts",
-              "packages/reactivity/__tests__/computed.spec.ts",
-              "packages/reactivity/__tests__/effect.spec.ts",
-              "packages/reactivity/__tests__/effectScope.spec.ts",
-              "packages/reactivity/__tests__/gc.spec.ts",
-              "packages/reactivity/__tests__/reactive.spec.ts",
-              "packages/reactivity/__tests__/reactiveArray.spec.ts",
-              "packages/reactivity/__tests__/readonly.spec.ts",
-              "packages/reactivity/__tests__/ref.spec.ts",
-              "packages/reactivity/__tests__/shallowReactive.spec.ts",
-              "packages/reactivity/__tests__/shallowReadonly.spec.ts",
-              "packages/runtime-core/__tests__/apiAsyncComponent.spec.ts",
-              "packages/runtime-core/__tests__/apiCreateApp.spec.ts",
-              "packages/runtime-core/__tests__/apiExpose.spec.ts",
-              "packages/runtime-core/__tests__/apiInject.spec.ts",
-              "packages/runtime-core/__tests__/apiLifecycle.spec.ts",
-              "packages/runtime-core/__tests__/apiOptions.spec.ts",
-              "packages/runtime-core/__tests__/apiSetupContext.spec.ts",
-              "packages/runtime-core/__tests__/apiSetupHelpers.spec.ts",
-              "packages/runtime-core/__tests__/apiWatch.bench.ts",
-              "packages/runtime-core/__tests__/apiWatch.spec.ts",
-              "packages/runtime-core/__tests__/componentEmits.spec.ts",
-              "packages/runtime-core/__tests__/componentProps.spec.ts",
-              "packages/runtime-core/__tests__/componentPublicInstance.spec.ts",
-              "packages/runtime-core/__tests__/componentSlots.spec.ts",
-              "packages/runtime-core/__tests__/components/BaseTransition.spec.ts",
-              "packages/runtime-core/__tests__/components/KeepAlive.spec.ts",
-              "packages/runtime-core/__tests__/components/Suspense.spec.ts",
-              "packages/runtime-core/__tests__/components/Teleport.spec.ts",
-              "packages/runtime-core/__tests__/directives.spec.ts",
-              "packages/runtime-core/__tests__/errorHandling.spec.ts",
-              "packages/runtime-core/__tests__/h.spec.ts",
-              "packages/runtime-core/__tests__/helpers/createSlots.spec.ts",
-              "packages/runtime-core/__tests__/helpers/renderList.spec.ts",
-              "packages/runtime-core/__tests__/helpers/renderSlot.spec.ts",
-              "packages/runtime-core/__tests__/helpers/resolveAssets.spec.ts",
-              "packages/runtime-core/__tests__/helpers/toHandlers.spec.ts",
-              "packages/runtime-core/__tests__/helpers/useId.spec.ts",
-              "packages/runtime-core/__tests__/helpers/useModel.spec.ts",
-              "packages/runtime-core/__tests__/helpers/useTemplateRef.spec.ts",
-              "packages/runtime-core/__tests__/helpers/withMemo.spec.ts",
-              "packages/runtime-core/__tests__/hmr.spec.ts",
-              "packages/runtime-core/__tests__/hydration.spec.ts",
-              "packages/runtime-core/__tests__/misc.spec.ts",
-              "packages/runtime-core/__tests__/rendererAttrsFallthrough.spec.ts",
-              "packages/runtime-core/__tests__/rendererChildren.spec.ts",
-              "packages/runtime-core/__tests__/rendererComponent.spec.ts",
-              "packages/runtime-core/__tests__/rendererElement.spec.ts",
-              "packages/runtime-core/__tests__/rendererFragment.spec.ts",
-              "packages/runtime-core/__tests__/rendererOptimizedMode.spec.ts",
-              "packages/runtime-core/__tests__/rendererTemplateRef.spec.ts",
-              "packages/runtime-core/__tests__/scheduler.spec.ts",
-              "packages/runtime-core/__tests__/scopeId.spec.ts",
-              "packages/runtime-core/__tests__/vnode.spec.ts",
-              "packages/runtime-core/__tests__/vnodeHooks.spec.ts",
-              "packages/runtime-core/src/apiWatch.ts",
-              "packages/runtime-dom/__tests__/createApp.spec.ts",
-              "packages/runtime-dom/__tests__/customElement.spec.ts",
-              "packages/runtime-dom/__tests__/customizedBuiltIn.spec.ts",
-              "packages/runtime-dom/__tests__/directives/vCloak.spec.ts",
-              "packages/runtime-dom/__tests__/directives/vModel.spec.ts",
-              "packages/runtime-dom/__tests__/directives/vOn.spec.ts",
-              "packages/runtime-dom/__tests__/directives/vShow.spec.ts",
-              "packages/runtime-dom/__tests__/helpers/useCssModule.spec.ts",
-              "packages/runtime-dom/__tests__/helpers/useCssVars.spec.ts",
-              "packages/runtime-dom/__tests__/nodeOps.spec.ts",
-              "packages/runtime-dom/__tests__/patchAttrs.spec.ts",
-              "packages/runtime-dom/__tests__/patchClass.spec.ts",
-              "packages/runtime-dom/__tests__/patchEvents.spec.ts",
-              "packages/runtime-dom/__tests__/patchProps.spec.ts",
-              "packages/runtime-dom/__tests__/patchStyle.spec.ts",
-              "packages/runtime-dom/__tests__/rendererStaticNode.spec.ts",
-              "packages/runtime-test/__tests__/testRuntime.spec.ts",
-              "packages/server-renderer/__tests__/createBuffer.bench.ts",
-              "packages/server-renderer/__tests__/render.spec.ts",
-              "packages/server-renderer/__tests__/ssrAttrFallthrough.spec.ts",
-              "packages/server-renderer/__tests__/ssrCompilerOptions.spec.ts",
-              "packages/server-renderer/__tests__/ssrComputed.spec.ts",
-              "packages/server-renderer/__tests__/ssrDirectives.spec.ts",
-              "packages/server-renderer/__tests__/ssrDynamicComponent.spec.ts",
-              "packages/server-renderer/__tests__/ssrInterpolate.spec.ts",
-              "packages/server-renderer/__tests__/ssrRenderAttrs.spec.ts",
-              "packages/server-renderer/__tests__/ssrRenderList.spec.ts",
-              "packages/server-renderer/__tests__/ssrScopeId.spec.ts",
-              "packages/server-renderer/__tests__/ssrSlot.spec.ts",
-              "packages/server-renderer/__tests__/ssrSuspense.spec.ts",
-              "packages/server-renderer/__tests__/ssrTeleport.spec.ts",
-              "packages/server-renderer/__tests__/ssrVModelHelpers.spec.ts",
-              "packages/server-renderer/__tests__/ssrWatch.spec.ts",
-              "packages/server-renderer/__tests__/unrollBuffer.bench.ts",
-              "packages/server-renderer/__tests__/webStream.spec.ts",
-              "packages/shared/__tests__/__snapshots__/codeframe.spec.ts.snap",
-              "packages/shared/__tests__/codeframe.spec.ts",
-              "packages/shared/__tests__/escapeHtml.spec.ts",
-              "packages/shared/__tests__/looseEqual.spec.ts",
-              "packages/shared/__tests__/normalizeProp.spec.ts",
-              "packages/shared/__tests__/toDisplayString.spec.ts",
-              "packages/vue-compat/__tests__/compiler.spec.ts",
-              "packages/vue-compat/__tests__/componentAsync.spec.ts",
-              "packages/vue-compat/__tests__/componentFunctional.spec.ts",
-              "packages/vue-compat/__tests__/componentVModel.spec.ts",
-              "packages/vue-compat/__tests__/filters.spec.ts",
-              "packages/vue-compat/__tests__/global.spec.ts",
-              "packages/vue-compat/__tests__/globalConfig.spec.ts",
-              "packages/vue-compat/__tests__/instance.spec.ts",
-              "packages/vue-compat/__tests__/misc.spec.ts",
-              "packages/vue-compat/__tests__/options.spec.ts",
-              "packages/vue-compat/__tests__/renderFn.spec.ts",
-              "packages/vue-compat/__tests__/utils.ts",
-              "packages/vue/__tests__/customElementCasing.spec.ts",
-              "packages/vue/__tests__/e2e/Transition.spec.ts",
-              "packages/vue/__tests__/e2e/TransitionGroup.spec.ts",
-              "packages/vue/__tests__/e2e/commits.mock.ts",
-              "packages/vue/__tests__/e2e/commits.spec.ts",
-              "packages/vue/__tests__/e2e/e2eUtils.ts",
-              "packages/vue/__tests__/e2e/grid.spec.ts",
-              "packages/vue/__tests__/e2e/hydration-strat-custom.html",
-              "packages/vue/__tests__/e2e/hydration-strat-idle.html",
-              "packages/vue/__tests__/e2e/hydration-strat-interaction.html",
-              "packages/vue/__tests__/e2e/hydration-strat-media.html",
-              "packages/vue/__tests__/e2e/hydration-strat-visible.html",
-              "packages/vue/__tests__/e2e/hydrationStrategies.spec.ts",
-              "packages/vue/__tests__/e2e/markdown.spec.ts",
-              "packages/vue/__tests__/e2e/svg.spec.ts",
-              "packages/vue/__tests__/e2e/todomvc.spec.ts",
-              "packages/vue/__tests__/e2e/transition.html",
-              "packages/vue/__tests__/e2e/tree.spec.ts",
-              "packages/vue/__tests__/index.spec.ts",
-              "packages/vue/__tests__/mathmlNamespace.spec.ts",
-              "packages/vue/__tests__/runtimeCompilerOptions.spec.ts",
-              "packages/vue/__tests__/svgNamespace.spec.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts",
-              "packages/compiler-sfc/__tests__/compileStyle.spec.ts",
-              "packages/reactivity/__tests__/effect.spec.ts",
-              "packages/reactivity/__tests__/reactiveArray.spec.ts",
-              "packages/reactivity/__tests__/shallowReactive.spec.ts",
-              "packages/runtime-core/__tests__/apiOptions.spec.ts",
-              "packages/runtime-core/__tests__/apiWatch.spec.ts",
-              "packages/runtime-core/__tests__/helpers/useId.spec.ts",
-              "packages/runtime-core/__tests__/hydration.spec.ts",
-              "packages/runtime-core/src/apiWatch.ts",
-              "packages/vue-compat/__tests__/options.spec.ts"
+              "packages/runtime-core/src/apiWatch.ts"
             ],
             "spans": {
               "packages/runtime-core/src/apiWatch.ts": [
                 {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 177,
-                  "end": 177
-                },
-                {
-                  "start": 193,
-                  "end": 193
-                },
-                {
-                  "start": 195,
-                  "end": 195
-                },
-                {
-                  "start": 207,
-                  "end": 207
-                },
-                {
-                  "start": 209,
-                  "end": 209
-                },
-                {
-                  "start": 232,
-                  "end": 232
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 235,
-                  "end": 235
-                },
-                {
-                  "start": 287,
-                  "end": 287
-                },
-                {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 351,
-                  "end": 351
-                }
-              ],
-              "packages/compiler-sfc/__tests__/compileStyle.spec.ts": [
-                {
-                  "start": 68,
-                  "end": 68
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                },
-                {
-                  "start": 73,
-                  "end": 73
-                },
-                {
-                  "start": 78,
-                  "end": 78
-                },
-                {
-                  "start": 83,
-                  "end": 83
-                },
-                {
-                  "start": 88,
-                  "end": 88
-                },
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 295,
-                  "end": 295
-                },
-                {
-                  "start": 296,
-                  "end": 296
-                },
-                {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 307,
-                  "end": 307
-                },
-                {
-                  "start": 318,
-                  "end": 318
-                },
-                {
-                  "start": 322,
-                  "end": 322
-                },
-                {
-                  "start": 323,
-                  "end": 323
-                },
-                {
-                  "start": 329,
-                  "end": 329
-                }
-              ],
-              "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts": [
-                {
-                  "start": 359,
-                  "end": 359
-                }
-              ],
-              "packages/runtime-core/__tests__/apiOptions.spec.ts": [
-                {
-                  "start": 175,
-                  "end": 175
-                },
-                {
-                  "start": 252,
-                  "end": 252
-                }
-              ],
-              "packages/runtime-core/__tests__/hydration.spec.ts": [
-                {
-                  "start": 1192,
-                  "end": 1192
-                }
-              ],
-              "packages/runtime-core/__tests__/apiWatch.spec.ts": [
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 155,
-                  "end": 155
-                },
-                {
-                  "start": 164,
-                  "end": 164
-                },
-                {
-                  "start": 172,
-                  "end": 172
-                },
-                {
-                  "start": 185,
-                  "end": 185
-                },
-                {
-                  "start": 198,
-                  "end": 198
-                },
-                {
-                  "start": 213,
-                  "end": 213
-                },
-                {
-                  "start": 217,
-                  "end": 217
-                },
-                {
-                  "start": 232,
-                  "end": 232
-                },
-                {
-                  "start": 243,
-                  "end": 243
-                },
-                {
-                  "start": 256,
-                  "end": 256
-                },
-                {
-                  "start": 266,
-                  "end": 266
-                },
-                {
-                  "start": 336,
-                  "end": 336
-                },
-                {
-                  "start": 869,
-                  "end": 869
-                },
-                {
-                  "start": 893,
-                  "end": 893
-                },
-                {
-                  "start": 916,
-                  "end": 916
-                },
-                {
-                  "start": 927,
-                  "end": 927
-                },
-                {
-                  "start": 935,
-                  "end": 935
-                },
-                {
-                  "start": 956,
-                  "end": 956
-                },
-                {
-                  "start": 965,
-                  "end": 965
-                },
-                {
-                  "start": 1034,
-                  "end": 1034
-                },
-                {
-                  "start": 1043,
-                  "end": 1043
-                },
-                {
-                  "start": 1049,
-                  "end": 1049
-                },
-                {
-                  "start": 1465,
-                  "end": 1465
-                },
-                {
-                  "start": 1466,
-                  "end": 1466
-                },
-                {
-                  "start": 1615,
-                  "end": 1615
-                }
-              ],
-              "packages/runtime-core/__tests__/helpers/useId.spec.ts": [
-                {
-                  "start": 200,
-                  "end": 200
-                }
-              ],
-              "packages/reactivity/__tests__/reactiveArray.spec.ts": [
-                {
-                  "start": 287,
-                  "end": 287
-                },
-                {
-                  "start": 290,
-                  "end": 290
-                },
-                {
-                  "start": 297,
-                  "end": 297
-                },
-                {
-                  "start": 335,
-                  "end": 335
-                },
-                {
-                  "start": 336,
-                  "end": 336
-                },
-                {
-                  "start": 343,
-                  "end": 343
-                },
-                {
-                  "start": 355,
-                  "end": 355
-                },
-                {
-                  "start": 356,
-                  "end": 356
-                },
-                {
-                  "start": 359,
-                  "end": 359
-                },
-                {
-                  "start": 371,
-                  "end": 371
-                },
-                {
-                  "start": 372,
-                  "end": 372
-                },
-                {
-                  "start": 376,
-                  "end": 376
-                },
-                {
-                  "start": 412,
-                  "end": 412
-                },
-                {
-                  "start": 413,
-                  "end": 413
-                },
-                {
-                  "start": 415,
-                  "end": 415
-                },
-                {
-                  "start": 416,
-                  "end": 416
-                },
-                {
-                  "start": 418,
-                  "end": 418
-                },
-                {
-                  "start": 420,
-                  "end": 420
-                },
-                {
-                  "start": 422,
-                  "end": 422
-                },
-                {
-                  "start": 427,
-                  "end": 427
-                },
-                {
-                  "start": 447,
-                  "end": 447
-                },
-                {
-                  "start": 450,
-                  "end": 450
-                },
-                {
-                  "start": 455,
-                  "end": 455
-                },
-                {
-                  "start": 476,
-                  "end": 476
-                },
-                {
-                  "start": 480,
-                  "end": 480
-                },
-                {
-                  "start": 483,
-                  "end": 483
-                },
-                {
-                  "start": 495,
-                  "end": 495
-                },
-                {
-                  "start": 496,
-                  "end": 496
-                },
-                {
-                  "start": 499,
-                  "end": 499
-                },
-                {
-                  "start": 531,
-                  "end": 531
-                },
-                {
-                  "start": 532,
-                  "end": 532
-                },
-                {
-                  "start": 533,
-                  "end": 533
-                },
-                {
-                  "start": 537,
-                  "end": 537
-                },
-                {
-                  "start": 550,
-                  "end": 550
-                },
-                {
-                  "start": 551,
-                  "end": 551
-                },
-                {
-                  "start": 554,
-                  "end": 554
-                },
-                {
-                  "start": 590,
-                  "end": 590
-                },
-                {
-                  "start": 592,
-                  "end": 592
-                },
-                {
-                  "start": 596,
-                  "end": 596
-                },
-                {
-                  "start": 621,
-                  "end": 621
-                },
-                {
-                  "start": 622,
-                  "end": 622
-                }
-              ],
-              "packages/reactivity/__tests__/shallowReactive.spec.ts": [
-                {
-                  "start": 71,
-                  "end": 71
-                },
-                {
-                  "start": 74,
-                  "end": 74
-                },
-                {
-                  "start": 75,
-                  "end": 75
-                },
-                {
-                  "start": 77,
-                  "end": 77
-                }
-              ],
-              "packages/reactivity/__tests__/effect.spec.ts": [
-                {
-                  "start": 538,
-                  "end": 538
-                }
-              ],
-              "packages/vue-compat/__tests__/options.spec.ts": [
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 67,
-                  "end": 67
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -1750,7 +1079,112 @@
             "files": [
               "packages/runtime-core/src/apiWatch.ts"
             ],
-            "spans": {},
+            "spans": {
+              "packages/runtime-core/src/apiWatch.ts": [
+                {
+                  "start": 260,
+                  "end": 420
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-core/__tests__/apiWatch.spec.ts"
+            ],
+            "spans": {
+              "packages/runtime-core/__tests__/apiWatch.spec.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-core/__tests__/apiWatch.spec.ts"
+            ],
+            "spans": {
+              "packages/runtime-core/__tests__/apiWatch.spec.ts": [
+                {
+                  "start": 840,
+                  "end": 1045
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-core/src/apiWatch.ts"
+            ],
+            "spans": {
+              "packages/runtime-core/src/apiWatch.ts": [
+                {
+                  "start": 420,
+                  "end": 560
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/dts-test/watch.test-d.ts"
+            ],
+            "spans": {
+              "packages/dts-test/watch.test-d.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-core/src/directives.ts"
+            ],
+            "spans": {
+              "packages/runtime-core/src/directives.ts": [
+                {
+                  "start": 70,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-dom/src/directives/vModel.ts"
+            ],
+            "spans": {
+              "packages/runtime-dom/src/directives/vModel.ts": [
+                {
+                  "start": 100,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "package.json"
+            ],
+            "spans": {
+              "package.json": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -1769,20 +1203,13 @@
           },
           {
             "files": [
-              "packages/runtime-core/src/apiWatch.ts",
-              "packages/runtime-core/src/renderer.ts"
+              "packages/dts-test/tsconfig.test.json"
             ],
             "spans": {
-              "packages/runtime-core/src/renderer.ts": [
+              "packages/dts-test/tsconfig.test.json": [
                 {
-                  "start": 2440,
-                  "end": 2440
-                }
-              ],
-              "packages/runtime-core/src/apiWatch.ts": [
-                {
-                  "start": 472,
-                  "end": 472
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -1790,303 +1217,93 @@
           },
           {
             "files": [
-              "packages/runtime-core/src/directives.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "packages/runtime-dom/src/directives/vModel.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "package.json"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "https:/raw.githubusercontent.com/vuejs/core/main/packages/runtime-core/__tests__/apiWatch.spec.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "packages/dts-test/tsconfig.test.json"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "tsconfig.json"
             ],
-            "spans": {},
+            "spans": {
+              "tsconfig.json": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tsconfig.build-node.json"
             ],
-            "spans": {},
+            "spans": {
+              "tsconfig.build-node.json": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-core/src/apiWatch.ts"
+            ],
+            "spans": {
+              "packages/runtime-core/src/apiWatch.ts": [
+                {
+                  "start": 68,
+                  "end": 250
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-core/src/apiWatch.ts"
+            ],
+            "spans": {
+              "packages/runtime-core/src/apiWatch.ts": [
+                {
+                  "start": 470,
+                  "end": 530
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/runtime-core/__tests__/apiWatch.spec.ts"
+            ],
+            "spans": {
+              "packages/runtime-core/__tests__/apiWatch.spec.ts": [
+                {
+                  "start": 920,
+                  "end": 1085
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/dts-test/watch.test-d.ts"
+            ],
+            "spans": {
+              "packages/dts-test/watch.test-d.ts": [
+                {
+                  "start": 124,
+                  "end": 142
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "https:/raw.githubusercontent.com/vuejs/core/main/packages/runtime-core/__tests__/apiWatch.spec.ts",
-          "package.json",
-          "packages/compiler-core/__tests__/__snapshots__/codegen.spec.ts.snap",
-          "packages/compiler-core/__tests__/__snapshots__/compile.spec.ts.snap",
-          "packages/compiler-core/__tests__/__snapshots__/parse.spec.ts.snap",
-          "packages/compiler-core/__tests__/__snapshots__/scopeId.spec.ts.snap",
-          "packages/compiler-core/__tests__/codegen.spec.ts",
-          "packages/compiler-core/__tests__/compile.spec.ts",
-          "packages/compiler-core/__tests__/parse.spec.ts",
-          "packages/compiler-core/__tests__/scopeId.spec.ts",
-          "packages/compiler-core/__tests__/testUtils.ts",
-          "packages/compiler-core/__tests__/transform.spec.ts",
-          "packages/compiler-core/__tests__/transforms/__snapshots__/cacheStatic.spec.ts.snap",
-          "packages/compiler-core/__tests__/transforms/__snapshots__/transformElement.spec.ts.snap",
-          "packages/compiler-core/__tests__/transforms/__snapshots__/transformExpressions.spec.ts.snap",
-          "packages/compiler-core/__tests__/transforms/__snapshots__/transformText.spec.ts.snap",
-          "packages/compiler-core/__tests__/transforms/__snapshots__/vFor.spec.ts.snap",
-          "packages/compiler-core/__tests__/transforms/__snapshots__/vIf.spec.ts.snap",
-          "packages/compiler-core/__tests__/transforms/__snapshots__/vMemo.spec.ts.snap",
-          "packages/compiler-core/__tests__/transforms/__snapshots__/vModel.spec.ts.snap",
-          "packages/compiler-core/__tests__/transforms/__snapshots__/vOnce.spec.ts.snap",
-          "packages/compiler-core/__tests__/transforms/__snapshots__/vSlot.spec.ts.snap",
-          "packages/compiler-core/__tests__/transforms/cacheStatic.spec.ts",
-          "packages/compiler-core/__tests__/transforms/noopDirectiveTransform.spec.ts",
-          "packages/compiler-core/__tests__/transforms/transformElement.spec.ts",
-          "packages/compiler-core/__tests__/transforms/transformExpressions.spec.ts",
-          "packages/compiler-core/__tests__/transforms/transformSlotOutlet.spec.ts",
-          "packages/compiler-core/__tests__/transforms/transformText.spec.ts",
-          "packages/compiler-core/__tests__/transforms/vBind.spec.ts",
-          "packages/compiler-core/__tests__/transforms/vFor.spec.ts",
-          "packages/compiler-core/__tests__/transforms/vIf.spec.ts",
-          "packages/compiler-core/__tests__/transforms/vMemo.spec.ts",
-          "packages/compiler-core/__tests__/transforms/vModel.spec.ts",
-          "packages/compiler-core/__tests__/transforms/vOn.spec.ts",
-          "packages/compiler-core/__tests__/transforms/vOnce.spec.ts",
-          "packages/compiler-core/__tests__/transforms/vSlot.spec.ts",
-          "packages/compiler-core/__tests__/utils.spec.ts",
-          "packages/compiler-dom/__tests__/__snapshots__/index.spec.ts.snap",
-          "packages/compiler-dom/__tests__/decoderHtmlBrowser.spec.ts",
-          "packages/compiler-dom/__tests__/index.spec.ts",
-          "packages/compiler-dom/__tests__/parse.spec.ts",
-          "packages/compiler-dom/__tests__/transforms/Transition.spec.ts",
-          "packages/compiler-dom/__tests__/transforms/__snapshots__/Transition.spec.ts.snap",
-          "packages/compiler-dom/__tests__/transforms/__snapshots__/stringifyStatic.spec.ts.snap",
-          "packages/compiler-dom/__tests__/transforms/__snapshots__/vModel.spec.ts.snap",
-          "packages/compiler-dom/__tests__/transforms/__snapshots__/vShow.spec.ts.snap",
-          "packages/compiler-dom/__tests__/transforms/ignoreSideEffectTags.spec.ts",
-          "packages/compiler-dom/__tests__/transforms/stringifyStatic.spec.ts",
-          "packages/compiler-dom/__tests__/transforms/transformStyle.spec.ts",
-          "packages/compiler-dom/__tests__/transforms/vHtml.spec.ts",
-          "packages/compiler-dom/__tests__/transforms/vModel.spec.ts",
-          "packages/compiler-dom/__tests__/transforms/vOn.spec.ts",
-          "packages/compiler-dom/__tests__/transforms/vShow.spec.ts",
-          "packages/compiler-dom/__tests__/transforms/vText.spec.ts",
-          "packages/compiler-dom/__tests__/transforms/validateHtmlNesting.spec.ts",
-          "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/__snapshots__/compileTemplate.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/__snapshots__/cssVars.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/__snapshots__/templateTransformAssetUrl.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/__snapshots__/templateTransformSrcset.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/compileScript.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/__snapshots__/defineEmits.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/compileScript/__snapshots__/defineExpose.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/compileScript/__snapshots__/defineModel.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/compileScript/__snapshots__/defineOptions.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/compileScript/__snapshots__/defineProps.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/compileScript/__snapshots__/definePropsDestructure.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/compileScript/__snapshots__/defineSlots.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/compileScript/__snapshots__/hoistStatic.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/compileScript/__snapshots__/importUsageCheck.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/compileScript/defineEmits.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/defineProps.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/hoistStatic.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/importUsageCheck.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts",
-          "packages/compiler-sfc/__tests__/compileStyle.spec.ts",
-          "packages/compiler-sfc/__tests__/compileTemplate.spec.ts",
-          "packages/compiler-sfc/__tests__/cssVars.spec.ts",
-          "packages/compiler-sfc/__tests__/fixture/import.scss",
-          "packages/compiler-sfc/__tests__/parse.spec.ts",
-          "packages/compiler-sfc/__tests__/rewriteDefault.spec.ts",
-          "packages/compiler-sfc/__tests__/templateTransformAssetUrl.spec.ts",
-          "packages/compiler-sfc/__tests__/templateTransformSrcset.spec.ts",
-          "packages/compiler-sfc/__tests__/templateUtils.spec.ts",
-          "packages/compiler-sfc/__tests__/utils.ts",
-          "packages/compiler-ssr/__tests__/ssrComponent.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrElement.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrFallthroughAttrs.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrInjectCssVars.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrPortal.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrScopeId.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrSlotOutlet.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrSuspense.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrText.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrTransition.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrTransitionGroup.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrVFor.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrVIf.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrVModel.spec.ts",
-          "packages/compiler-ssr/__tests__/ssrVShow.spec.ts",
-          "packages/compiler-ssr/__tests__/utils.ts",
-          "packages/dts-test/tsconfig.test.json",
           "packages/dts-test/watch.test-d.ts",
-          "packages/reactivity/__tests__/collections/Map.spec.ts",
-          "packages/reactivity/__tests__/collections/Set.spec.ts",
-          "packages/reactivity/__tests__/collections/WeakMap.spec.ts",
-          "packages/reactivity/__tests__/collections/WeakSet.spec.ts",
-          "packages/reactivity/__tests__/collections/shallowReadonly.spec.ts",
-          "packages/reactivity/__tests__/computed.spec.ts",
-          "packages/reactivity/__tests__/effect.spec.ts",
-          "packages/reactivity/__tests__/effectScope.spec.ts",
-          "packages/reactivity/__tests__/gc.spec.ts",
-          "packages/reactivity/__tests__/reactive.spec.ts",
-          "packages/reactivity/__tests__/reactiveArray.spec.ts",
-          "packages/reactivity/__tests__/readonly.spec.ts",
-          "packages/reactivity/__tests__/ref.spec.ts",
-          "packages/reactivity/__tests__/shallowReactive.spec.ts",
-          "packages/reactivity/__tests__/shallowReadonly.spec.ts",
-          "packages/runtime-core/__tests__/apiAsyncComponent.spec.ts",
-          "packages/runtime-core/__tests__/apiCreateApp.spec.ts",
-          "packages/runtime-core/__tests__/apiExpose.spec.ts",
-          "packages/runtime-core/__tests__/apiInject.spec.ts",
-          "packages/runtime-core/__tests__/apiLifecycle.spec.ts",
-          "packages/runtime-core/__tests__/apiOptions.spec.ts",
-          "packages/runtime-core/__tests__/apiSetupContext.spec.ts",
-          "packages/runtime-core/__tests__/apiSetupHelpers.spec.ts",
-          "packages/runtime-core/__tests__/apiWatch.bench.ts",
           "packages/runtime-core/__tests__/apiWatch.spec.ts",
-          "packages/runtime-core/__tests__/componentEmits.spec.ts",
-          "packages/runtime-core/__tests__/componentProps.spec.ts",
-          "packages/runtime-core/__tests__/componentPublicInstance.spec.ts",
-          "packages/runtime-core/__tests__/componentSlots.spec.ts",
-          "packages/runtime-core/__tests__/components/BaseTransition.spec.ts",
-          "packages/runtime-core/__tests__/components/KeepAlive.spec.ts",
-          "packages/runtime-core/__tests__/components/Suspense.spec.ts",
-          "packages/runtime-core/__tests__/components/Teleport.spec.ts",
-          "packages/runtime-core/__tests__/directives.spec.ts",
-          "packages/runtime-core/__tests__/errorHandling.spec.ts",
-          "packages/runtime-core/__tests__/h.spec.ts",
-          "packages/runtime-core/__tests__/helpers/createSlots.spec.ts",
-          "packages/runtime-core/__tests__/helpers/renderList.spec.ts",
-          "packages/runtime-core/__tests__/helpers/renderSlot.spec.ts",
-          "packages/runtime-core/__tests__/helpers/resolveAssets.spec.ts",
-          "packages/runtime-core/__tests__/helpers/toHandlers.spec.ts",
-          "packages/runtime-core/__tests__/helpers/useId.spec.ts",
-          "packages/runtime-core/__tests__/helpers/useModel.spec.ts",
-          "packages/runtime-core/__tests__/helpers/useTemplateRef.spec.ts",
-          "packages/runtime-core/__tests__/helpers/withMemo.spec.ts",
-          "packages/runtime-core/__tests__/hmr.spec.ts",
-          "packages/runtime-core/__tests__/hydration.spec.ts",
-          "packages/runtime-core/__tests__/misc.spec.ts",
-          "packages/runtime-core/__tests__/rendererAttrsFallthrough.spec.ts",
-          "packages/runtime-core/__tests__/rendererChildren.spec.ts",
-          "packages/runtime-core/__tests__/rendererComponent.spec.ts",
-          "packages/runtime-core/__tests__/rendererElement.spec.ts",
-          "packages/runtime-core/__tests__/rendererFragment.spec.ts",
-          "packages/runtime-core/__tests__/rendererOptimizedMode.spec.ts",
-          "packages/runtime-core/__tests__/rendererTemplateRef.spec.ts",
-          "packages/runtime-core/__tests__/scheduler.spec.ts",
-          "packages/runtime-core/__tests__/scopeId.spec.ts",
-          "packages/runtime-core/__tests__/vnode.spec.ts",
-          "packages/runtime-core/__tests__/vnodeHooks.spec.ts",
-          "packages/runtime-core/src/apiWatch.ts",
-          "packages/runtime-core/src/directives.ts",
-          "packages/runtime-core/src/renderer.ts",
-          "packages/runtime-dom/__tests__/createApp.spec.ts",
-          "packages/runtime-dom/__tests__/customElement.spec.ts",
-          "packages/runtime-dom/__tests__/customizedBuiltIn.spec.ts",
-          "packages/runtime-dom/__tests__/directives/vCloak.spec.ts",
-          "packages/runtime-dom/__tests__/directives/vModel.spec.ts",
-          "packages/runtime-dom/__tests__/directives/vOn.spec.ts",
-          "packages/runtime-dom/__tests__/directives/vShow.spec.ts",
-          "packages/runtime-dom/__tests__/helpers/useCssModule.spec.ts",
-          "packages/runtime-dom/__tests__/helpers/useCssVars.spec.ts",
-          "packages/runtime-dom/__tests__/nodeOps.spec.ts",
-          "packages/runtime-dom/__tests__/patchAttrs.spec.ts",
-          "packages/runtime-dom/__tests__/patchClass.spec.ts",
-          "packages/runtime-dom/__tests__/patchEvents.spec.ts",
-          "packages/runtime-dom/__tests__/patchProps.spec.ts",
-          "packages/runtime-dom/__tests__/patchStyle.spec.ts",
-          "packages/runtime-dom/__tests__/rendererStaticNode.spec.ts",
-          "packages/runtime-dom/src/directives/vModel.ts",
-          "packages/runtime-test/__tests__/testRuntime.spec.ts",
-          "packages/server-renderer/__tests__/createBuffer.bench.ts",
-          "packages/server-renderer/__tests__/render.spec.ts",
-          "packages/server-renderer/__tests__/ssrAttrFallthrough.spec.ts",
-          "packages/server-renderer/__tests__/ssrCompilerOptions.spec.ts",
-          "packages/server-renderer/__tests__/ssrComputed.spec.ts",
-          "packages/server-renderer/__tests__/ssrDirectives.spec.ts",
-          "packages/server-renderer/__tests__/ssrDynamicComponent.spec.ts",
-          "packages/server-renderer/__tests__/ssrInterpolate.spec.ts",
-          "packages/server-renderer/__tests__/ssrRenderAttrs.spec.ts",
-          "packages/server-renderer/__tests__/ssrRenderList.spec.ts",
-          "packages/server-renderer/__tests__/ssrScopeId.spec.ts",
-          "packages/server-renderer/__tests__/ssrSlot.spec.ts",
-          "packages/server-renderer/__tests__/ssrSuspense.spec.ts",
-          "packages/server-renderer/__tests__/ssrTeleport.spec.ts",
-          "packages/server-renderer/__tests__/ssrVModelHelpers.spec.ts",
-          "packages/server-renderer/__tests__/ssrWatch.spec.ts",
-          "packages/server-renderer/__tests__/unrollBuffer.bench.ts",
-          "packages/server-renderer/__tests__/webStream.spec.ts",
-          "packages/shared/__tests__/__snapshots__/codeframe.spec.ts.snap",
-          "packages/shared/__tests__/codeframe.spec.ts",
-          "packages/shared/__tests__/escapeHtml.spec.ts",
-          "packages/shared/__tests__/looseEqual.spec.ts",
-          "packages/shared/__tests__/normalizeProp.spec.ts",
-          "packages/shared/__tests__/toDisplayString.spec.ts",
-          "packages/vue-compat/__tests__/compiler.spec.ts",
-          "packages/vue-compat/__tests__/componentAsync.spec.ts",
-          "packages/vue-compat/__tests__/componentFunctional.spec.ts",
-          "packages/vue-compat/__tests__/componentVModel.spec.ts",
-          "packages/vue-compat/__tests__/filters.spec.ts",
-          "packages/vue-compat/__tests__/global.spec.ts",
-          "packages/vue-compat/__tests__/globalConfig.spec.ts",
-          "packages/vue-compat/__tests__/instance.spec.ts",
-          "packages/vue-compat/__tests__/misc.spec.ts",
-          "packages/vue-compat/__tests__/options.spec.ts",
-          "packages/vue-compat/__tests__/renderFn.spec.ts",
-          "packages/vue-compat/__tests__/utils.ts",
-          "packages/vue/__tests__/customElementCasing.spec.ts",
-          "packages/vue/__tests__/e2e/Transition.spec.ts",
-          "packages/vue/__tests__/e2e/TransitionGroup.spec.ts",
-          "packages/vue/__tests__/e2e/commits.mock.ts",
-          "packages/vue/__tests__/e2e/commits.spec.ts",
-          "packages/vue/__tests__/e2e/e2eUtils.ts",
-          "packages/vue/__tests__/e2e/grid.spec.ts",
-          "packages/vue/__tests__/e2e/hydration-strat-custom.html",
-          "packages/vue/__tests__/e2e/hydration-strat-idle.html",
-          "packages/vue/__tests__/e2e/hydration-strat-interaction.html",
-          "packages/vue/__tests__/e2e/hydration-strat-media.html",
-          "packages/vue/__tests__/e2e/hydration-strat-visible.html",
-          "packages/vue/__tests__/e2e/hydrationStrategies.spec.ts",
-          "packages/vue/__tests__/e2e/markdown.spec.ts",
-          "packages/vue/__tests__/e2e/svg.spec.ts",
-          "packages/vue/__tests__/e2e/todomvc.spec.ts",
-          "packages/vue/__tests__/e2e/transition.html",
-          "packages/vue/__tests__/e2e/tree.spec.ts",
-          "packages/vue/__tests__/index.spec.ts",
-          "packages/vue/__tests__/mathmlNamespace.spec.ts",
-          "packages/vue/__tests__/runtimeCompilerOptions.spec.ts",
-          "packages/vue/__tests__/svgNamespace.spec.ts",
-          "tsconfig.build-node.json",
-          "tsconfig.json"
+          "packages/runtime-core/src/apiWatch.ts"
         ],
         "predSpans": {
           "packages/runtime-core/src/apiWatch.ts": [
@@ -2095,470 +1312,18 @@
               "end": 77
             },
             {
-              "start": 76,
-              "end": 76
-            },
-            {
               "start": 172,
               "end": 301
-            },
-            {
-              "start": 177,
-              "end": 177
-            },
-            {
-              "start": 193,
-              "end": 193
-            },
-            {
-              "start": 195,
-              "end": 195
-            },
-            {
-              "start": 207,
-              "end": 207
-            },
-            {
-              "start": 209,
-              "end": 209
-            },
-            {
-              "start": 232,
-              "end": 232
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 235,
-              "end": 235
-            },
-            {
-              "start": 287,
-              "end": 287
-            },
-            {
-              "start": 301,
-              "end": 301
-            },
-            {
-              "start": 351,
-              "end": 351
             },
             {
               "start": 470,
               "end": 504
-            },
-            {
-              "start": 472,
-              "end": 472
-            }
-          ],
-          "packages/compiler-sfc/__tests__/compileStyle.spec.ts": [
-            {
-              "start": 68,
-              "end": 68
-            },
-            {
-              "start": 69,
-              "end": 69
-            },
-            {
-              "start": 73,
-              "end": 73
-            },
-            {
-              "start": 78,
-              "end": 78
-            },
-            {
-              "start": 83,
-              "end": 83
-            },
-            {
-              "start": 88,
-              "end": 88
-            },
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 295,
-              "end": 295
-            },
-            {
-              "start": 296,
-              "end": 296
-            },
-            {
-              "start": 301,
-              "end": 301
-            },
-            {
-              "start": 307,
-              "end": 307
-            },
-            {
-              "start": 318,
-              "end": 318
-            },
-            {
-              "start": 322,
-              "end": 322
-            },
-            {
-              "start": 323,
-              "end": 323
-            },
-            {
-              "start": 329,
-              "end": 329
-            }
-          ],
-          "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts": [
-            {
-              "start": 359,
-              "end": 359
-            }
-          ],
-          "packages/runtime-core/__tests__/apiOptions.spec.ts": [
-            {
-              "start": 175,
-              "end": 175
-            },
-            {
-              "start": 252,
-              "end": 252
-            }
-          ],
-          "packages/runtime-core/__tests__/hydration.spec.ts": [
-            {
-              "start": 1192,
-              "end": 1192
             }
           ],
           "packages/runtime-core/__tests__/apiWatch.spec.ts": [
             {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 155,
-              "end": 155
-            },
-            {
-              "start": 164,
-              "end": 164
-            },
-            {
-              "start": 172,
-              "end": 172
-            },
-            {
-              "start": 185,
-              "end": 185
-            },
-            {
-              "start": 198,
-              "end": 198
-            },
-            {
-              "start": 213,
-              "end": 213
-            },
-            {
-              "start": 217,
-              "end": 217
-            },
-            {
-              "start": 232,
-              "end": 232
-            },
-            {
-              "start": 243,
-              "end": 243
-            },
-            {
-              "start": 256,
-              "end": 256
-            },
-            {
-              "start": 266,
-              "end": 266
-            },
-            {
-              "start": 336,
-              "end": 336
-            },
-            {
-              "start": 869,
-              "end": 869
-            },
-            {
-              "start": 893,
-              "end": 893
-            },
-            {
-              "start": 916,
-              "end": 916
-            },
-            {
-              "start": 927,
-              "end": 927
-            },
-            {
-              "start": 935,
-              "end": 935
-            },
-            {
               "start": 935,
               "end": 1074
-            },
-            {
-              "start": 956,
-              "end": 956
-            },
-            {
-              "start": 965,
-              "end": 965
-            },
-            {
-              "start": 1034,
-              "end": 1034
-            },
-            {
-              "start": 1043,
-              "end": 1043
-            },
-            {
-              "start": 1049,
-              "end": 1049
-            },
-            {
-              "start": 1465,
-              "end": 1465
-            },
-            {
-              "start": 1466,
-              "end": 1466
-            },
-            {
-              "start": 1615,
-              "end": 1615
-            }
-          ],
-          "packages/runtime-core/__tests__/helpers/useId.spec.ts": [
-            {
-              "start": 200,
-              "end": 200
-            }
-          ],
-          "packages/reactivity/__tests__/reactiveArray.spec.ts": [
-            {
-              "start": 287,
-              "end": 287
-            },
-            {
-              "start": 290,
-              "end": 290
-            },
-            {
-              "start": 297,
-              "end": 297
-            },
-            {
-              "start": 335,
-              "end": 335
-            },
-            {
-              "start": 336,
-              "end": 336
-            },
-            {
-              "start": 343,
-              "end": 343
-            },
-            {
-              "start": 355,
-              "end": 355
-            },
-            {
-              "start": 356,
-              "end": 356
-            },
-            {
-              "start": 359,
-              "end": 359
-            },
-            {
-              "start": 371,
-              "end": 371
-            },
-            {
-              "start": 372,
-              "end": 372
-            },
-            {
-              "start": 376,
-              "end": 376
-            },
-            {
-              "start": 412,
-              "end": 412
-            },
-            {
-              "start": 413,
-              "end": 413
-            },
-            {
-              "start": 415,
-              "end": 415
-            },
-            {
-              "start": 416,
-              "end": 416
-            },
-            {
-              "start": 418,
-              "end": 418
-            },
-            {
-              "start": 420,
-              "end": 420
-            },
-            {
-              "start": 422,
-              "end": 422
-            },
-            {
-              "start": 427,
-              "end": 427
-            },
-            {
-              "start": 447,
-              "end": 447
-            },
-            {
-              "start": 450,
-              "end": 450
-            },
-            {
-              "start": 455,
-              "end": 455
-            },
-            {
-              "start": 476,
-              "end": 476
-            },
-            {
-              "start": 480,
-              "end": 480
-            },
-            {
-              "start": 483,
-              "end": 483
-            },
-            {
-              "start": 495,
-              "end": 495
-            },
-            {
-              "start": 496,
-              "end": 496
-            },
-            {
-              "start": 499,
-              "end": 499
-            },
-            {
-              "start": 531,
-              "end": 531
-            },
-            {
-              "start": 532,
-              "end": 532
-            },
-            {
-              "start": 533,
-              "end": 533
-            },
-            {
-              "start": 537,
-              "end": 537
-            },
-            {
-              "start": 550,
-              "end": 550
-            },
-            {
-              "start": 551,
-              "end": 551
-            },
-            {
-              "start": 554,
-              "end": 554
-            },
-            {
-              "start": 590,
-              "end": 590
-            },
-            {
-              "start": 592,
-              "end": 592
-            },
-            {
-              "start": 596,
-              "end": 596
-            },
-            {
-              "start": 621,
-              "end": 621
-            },
-            {
-              "start": 622,
-              "end": 622
-            }
-          ],
-          "packages/reactivity/__tests__/shallowReactive.spec.ts": [
-            {
-              "start": 71,
-              "end": 71
-            },
-            {
-              "start": 74,
-              "end": 74
-            },
-            {
-              "start": 75,
-              "end": 75
-            },
-            {
-              "start": 77,
-              "end": 77
-            }
-          ],
-          "packages/reactivity/__tests__/effect.spec.ts": [
-            {
-              "start": 538,
-              "end": 538
-            }
-          ],
-          "packages/vue-compat/__tests__/options.spec.ts": [
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 67,
-              "end": 67
-            }
-          ],
-          "packages/runtime-core/src/renderer.ts": [
-            {
-              "start": 2440,
-              "end": 2440
             }
           ],
           "packages/dts-test/watch.test-d.ts": [
@@ -2730,6 +1495,15 @@
               "span": 0.0,
               "line": 0.0
             }
+          },
+          {
+            "step": 18,
+            "coverage": {
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
+            }
           }
         ],
         "aucCoverage": {
@@ -2739,10 +1513,10 @@
           "line": 0.0
         },
         "redundancy": {
-          "file": 0.057251908396946605,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.5,
+          "symbol": 0.32352941176470584,
+          "span": 0.18459084823186578,
+          "line": 0.14327592524734334
         }
       },
       "fixOverlap": {
@@ -2761,28 +1535,28 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/bf6c701386e4c23627a8/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/bf6c701386e4c23627a8/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/bf6c701386e4c23627a8/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/bf6c701386e4c23627a8/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
@@ -3044,7 +1818,18 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/dts-test/watch.test-d.ts",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/packages/runtime-core/__tests__/apiWatch.spec.ts",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "command_execution",
@@ -3087,7 +1872,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/runtime-core/src/apiWatch.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/runtime-core/src/apiWatch.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

@@ -84,12 +84,64 @@ function formatContextLevelMetrics(metrics: { coverage: number; precision: numbe
   };
 }
 
+type ContextLevel = "file" | "symbol" | "span" | "line";
+
+const CONTEXT_LEVELS: ContextLevel[] = ["file", "span", "line", "symbol"];
+
 function mean(values: number[]): number | null {
   return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
 }
 
+function contextLevelMetricsForInstance(instance: ComparisonInstance, level: ContextLevel) {
+  const metric = instance.quality[level];
+  const values = coveragePrecision(metric.predSize, metric.goldSize, metric.intersection);
+  return {
+    recall: values.coverage,
+    precision: values.precision,
+    f1: f1(values.coverage, values.precision),
+  };
+}
+
+function macroContextLevelMetrics(instances: ComparisonInstance[], level: ContextLevel) {
+  const values = instances.map((instance) => contextLevelMetricsForInstance(instance, level));
+  return {
+    coverage: mean(values.map((value) => value.recall)) ?? 0,
+    precision: mean(values.map((value) => value.precision)) ?? 0,
+    f1: mean(values.map((value) => value.f1)) ?? 0,
+  };
+}
+
+function terminalTrajectoryCoverage(instance: ComparisonInstance, level: ContextLevel): number | null {
+  if (instance.artifacts?.evaluationStatus && instance.artifacts.evaluationStatus !== "valid") return null;
+  if (!instance.evaluatedTrajectory) return null;
+  const steps = (instance.evaluatedTrajectory?.steps ?? []).filter((step) => !step.isSkillRead);
+  const values = steps
+    .map((step) => step.coverage[level])
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (values.length === 0) return 0;
+  return Math.min(Math.max(values[values.length - 1], 0), 1);
+}
+
+function macroTrajectoryContextLevel(instances: ComparisonInstance[], level: ContextLevel): number | null {
+  return mean(
+    instances
+      .map((instance) => terminalTrajectoryCoverage(instance, level))
+      .filter((value): value is number => value !== null),
+  );
+}
+
+function formatTrajectoryContextLevel(value: number | null) {
+  return {
+    goldFound: value !== null ? formatMetric(value) : undefined,
+  };
+}
+
 function variantInstances(variant: ComparisonCard["variants"][number]): ComparisonInstance[] {
   return variant.instances ?? [];
+}
+
+function hasValidEvaluation(instance: ComparisonInstance): boolean {
+  return !instance.artifacts?.evaluationStatus || instance.artifacts.evaluationStatus === "valid";
 }
 
 function countCompletedRuns(instances: ComparisonInstance[]): number {
@@ -118,11 +170,9 @@ function instanceMatches(instance: ComparisonInstance, filters: ComparisonFilter
 }
 
 function intersectInstanceIds(comparison: ComparisonCard, filters: ComparisonFilters): Set<string> | null {
-  const idSets = comparison.variants
-    .map((variant) =>
-      new Set(variantInstances(variant).filter((instance) => instanceMatches(instance, filters)).map((instance) => instance.instanceId)),
-    )
-    .filter((idSet) => idSet.size > 0);
+  const idSets = comparison.variants.map((variant) =>
+    new Set(variantInstances(variant).filter((instance) => instanceMatches(instance, filters)).map((instance) => instance.instanceId)),
+  );
 
   if (idSets.length === 0) {
     return new Set<string>();
@@ -144,8 +194,11 @@ function intersectInstanceIds(comparison: ComparisonCard, filters: ComparisonFil
 function aggregateVariant(
   variant: ComparisonCard["variants"][number],
   filteredInstances: ComparisonInstance[],
+  options: { preserveExistingTrajectoryMetrics?: boolean } = {},
 ): ComparisonCard["variants"][number] {
   const taskCount = filteredInstances.length;
+  const qualityInstances = filteredInstances.filter(hasValidEvaluation);
+  const qualityCount = qualityInstances.length;
   const hasArtifactData = filteredInstances.some((instance) => instance.artifacts);
   const completedRuns = countCompletedRuns(filteredInstances);
   const partialRuns = countPartialRuns(filteredInstances);
@@ -166,7 +219,7 @@ function aggregateVariant(
     line: { intersection: 0, goldSize: 0, predSize: 0 },
   };
 
-  for (const instance of filteredInstances) {
+  for (const instance of qualityInstances) {
     for (const granularity of ["file", "symbol", "span", "line"] as const) {
       qualityTotals[granularity].intersection += instance.quality[granularity].intersection;
       qualityTotals[granularity].goldSize += instance.quality[granularity].goldSize;
@@ -195,13 +248,46 @@ function aggregateVariant(
     qualityTotals.line.intersection,
   );
 
-  const fileF1 = f1(fileMetrics.coverage, fileMetrics.precision);
-  const symbolF1 = f1(symbolMetrics.coverage, symbolMetrics.precision);
-  const spanF1 = f1(spanMetrics.coverage, spanMetrics.precision);
-  const lineF1 = f1(lineMetrics.coverage, lineMetrics.precision);
-  const contextRecall = (fileMetrics.coverage + symbolMetrics.coverage + spanMetrics.coverage) / 3;
-  const contextPrecision = (fileMetrics.precision + symbolMetrics.precision + spanMetrics.precision) / 3;
-  const contextF1 = (fileF1 + symbolF1 + spanF1) / 3;
+  const macroLevels = {
+    file: macroContextLevelMetrics(qualityInstances, "file"),
+    symbol: macroContextLevelMetrics(qualityInstances, "symbol"),
+    span: macroContextLevelMetrics(qualityInstances, "span"),
+    line: macroContextLevelMetrics(qualityInstances, "line"),
+  };
+  const fileF1 = macroLevels.file.f1;
+  const symbolF1 = macroLevels.symbol.f1;
+  const spanF1 = macroLevels.span.f1;
+  const lineF1 = macroLevels.line.f1;
+  const contextRecall = mean(CONTEXT_LEVELS.map((level) => macroLevels[level].coverage)) ?? 0;
+  const contextPrecision = mean(CONTEXT_LEVELS.map((level) => macroLevels[level].precision)) ?? 0;
+  const contextF1 = mean(CONTEXT_LEVELS.map((level) => macroLevels[level].f1)) ?? 0;
+  const trajectoryLevels = {
+    file: macroTrajectoryContextLevel(qualityInstances, "file"),
+    symbol: macroTrajectoryContextLevel(qualityInstances, "symbol"),
+    span: macroTrajectoryContextLevel(qualityInstances, "span"),
+    line: macroTrajectoryContextLevel(qualityInstances, "line"),
+  };
+  const trajectoryGoldFound = mean(
+    CONTEXT_LEVELS
+      .map((level) => trajectoryLevels[level])
+      .filter((value): value is number => value !== null),
+  );
+  const hasTrajectoryCoverage = CONTEXT_LEVELS.some((level) => trajectoryLevels[level] !== null);
+  const trajectoryGoldFoundValue = trajectoryGoldFound !== null
+    ? formatMetric(trajectoryGoldFound)
+    : options.preserveExistingTrajectoryMetrics
+      ? variant.results.quality.trajectoryGoldFound
+      : undefined;
+  const trajectoryContextLevelsValue = hasTrajectoryCoverage
+    ? {
+        file: formatTrajectoryContextLevel(trajectoryLevels.file),
+        symbol: formatTrajectoryContextLevel(trajectoryLevels.symbol),
+        block: formatTrajectoryContextLevel(trajectoryLevels.span),
+        line: formatTrajectoryContextLevel(trajectoryLevels.line),
+      }
+    : options.preserveExistingTrajectoryMetrics
+      ? variant.results.quality.trajectoryContextLevels
+      : undefined;
 
   const efficiency = mean(
     filteredInstances
@@ -237,13 +323,20 @@ function aggregateVariant(
   const durationValues = filteredInstances
     .map((instance) => instance.resources.durationMs)
     .filter((value): value is number => typeof value === "number" && value > 0);
+  const excludedDurationValues = filteredInstances.filter((instance) => instance.resources.durationStatus === "unavailable").length;
   const totalTokens = filteredInstances.reduce((sum, instance) => sum + (instance.resources.totalTokens ?? 0), 0);
+  const inputTokens = filteredInstances.reduce((sum, instance) => sum + (instance.resources.inputTokens ?? 0), 0);
+  const outputTokens = filteredInstances.reduce((sum, instance) => sum + (instance.resources.outputTokens ?? 0), 0);
+  const cachedInputTokens = filteredInstances.reduce((sum, instance) => sum + (instance.resources.cachedInputTokens ?? 0), 0);
+  const nonCachedInputTokens = filteredInstances.reduce((sum, instance) => sum + (instance.resources.nonCachedInputTokens ?? 0), 0);
   const toolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.toolCalls ?? 0), 0);
   const mcpToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.mcpToolCalls ?? 0), 0);
   const successfulMcpToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.successfulMcpToolCalls ?? 0), 0);
   const commandExecutions = filteredInstances.reduce((sum, instance) => sum + (instance.resources.commandExecutions ?? 0), 0);
   const readToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.readToolCalls ?? 0), 0);
   const editToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.editToolCalls ?? 0), 0);
+  const rawTraceEvents = filteredInstances.reduce((sum, instance) => sum + (instance.resources.rawTraceEvents ?? 0), 0);
+  const rawAgentActions = filteredInstances.reduce((sum, instance) => sum + (instance.resources.rawAgentActions ?? 0), 0);
   const costValues = filteredInstances
     .map((instance) => instance.resources.costUsd)
     .filter((value): value is number => typeof value === "number");
@@ -271,8 +364,8 @@ function aggregateVariant(
 
   return {
     ...variant,
-    contextF1: taskCount > 0 ? formatMetric(contextF1) : undefined,
-    score: taskCount > 0 ? formatMetric(contextF1) : undefined,
+    contextF1: qualityCount > 0 ? formatMetric(contextF1) : undefined,
+    score: qualityCount > 0 ? formatMetric(contextF1) : undefined,
     results: {
       outcome: {
         completedRuns,
@@ -296,21 +389,43 @@ function aggregateVariant(
         validEvaluationRate: hasArtifactData && taskCount > 0 ? formatPercent(validEvaluations / taskCount) : "—",
       },
       quality: {
-        contextF1: taskCount > 0 ? formatMetric(contextF1) : undefined,
-        contextRecall: taskCount > 0 ? formatMetric(contextRecall) : undefined,
-        contextPrecision: taskCount > 0 ? formatMetric(contextPrecision) : undefined,
-        fileF1: taskCount > 0 ? formatMetric(fileF1) : undefined,
-        symbolF1: taskCount > 0 ? formatMetric(symbolF1) : undefined,
-        spanF1: taskCount > 0 ? formatMetric(spanF1) : undefined,
-        avgLineF1: taskCount > 0 ? formatMetric(lineF1) : undefined,
-        contextLevels: taskCount > 0
+        contextF1: qualityCount > 0 ? formatMetric(contextF1) : undefined,
+        contextRecall: qualityCount > 0 ? formatMetric(contextRecall) : undefined,
+        contextPrecision: qualityCount > 0 ? formatMetric(contextPrecision) : undefined,
+        trajectoryGoldFound: qualityCount > 0 ? trajectoryGoldFoundValue : undefined,
+        fileF1: qualityCount > 0 ? formatMetric(fileF1) : undefined,
+        symbolF1: qualityCount > 0 ? formatMetric(symbolF1) : undefined,
+        spanF1: qualityCount > 0 ? formatMetric(spanF1) : undefined,
+        avgLineF1: qualityCount > 0 ? formatMetric(lineF1) : undefined,
+        contextLevels: qualityCount > 0
           ? {
-              file: formatContextLevelMetrics(fileMetrics),
-              symbol: formatContextLevelMetrics(symbolMetrics),
-              block: formatContextLevelMetrics(spanMetrics),
-              line: formatContextLevelMetrics(lineMetrics),
+              file: formatContextLevelMetrics(macroLevels.file),
+              symbol: formatContextLevelMetrics(macroLevels.symbol),
+              block: formatContextLevelMetrics(macroLevels.span),
+              line: formatContextLevelMetrics(macroLevels.line),
             }
           : undefined,
+        pooledContextLevels: qualityCount > 0
+          ? {
+              file: {
+                ...formatContextLevelMetrics(fileMetrics),
+                ...qualityTotals.file,
+              },
+              symbol: {
+                ...formatContextLevelMetrics(symbolMetrics),
+                ...qualityTotals.symbol,
+              },
+              block: {
+                ...formatContextLevelMetrics(spanMetrics),
+                ...qualityTotals.span,
+              },
+              line: {
+                ...formatContextLevelMetrics(lineMetrics),
+                ...qualityTotals.line,
+              },
+            }
+          : undefined,
+        trajectoryContextLevels: qualityCount > 0 ? trajectoryContextLevelsValue : undefined,
         fixOverlapVsGold: aggregateFixOverlapVsGold(filteredInstances),
       },
       efficiency: {
@@ -318,15 +433,23 @@ function aggregateVariant(
         redundancy: redundancy !== null ? formatMetric(redundancy) : undefined,
         usageDrop: usageDrop !== null ? formatMetric(usageDrop) : undefined,
         averageDuration: durationValues.length > 0 ? formatDurationMs(durationValues.reduce((sum, value) => sum + value, 0) / durationValues.length) : undefined,
+        excludedDurationValues,
         averageSteps: averageSteps !== null ? formatPatternMetric(averageSteps) : undefined,
         avgLinesPerStep: avgLinesPerStep !== null ? formatPatternMetric(avgLinesPerStep) : undefined,
         totalTokens: totalTokens > 0 ? formatTokens(totalTokens) : undefined,
+        inputTokens: inputTokens > 0 ? formatTokens(inputTokens) : undefined,
+        outputTokens: outputTokens > 0 ? formatTokens(outputTokens) : undefined,
+        cachedInputTokens: cachedInputTokens > 0 ? formatTokens(cachedInputTokens) : undefined,
+        nonCachedInputTokens: nonCachedInputTokens > 0 ? formatTokens(nonCachedInputTokens) : undefined,
+        cachedInputShare: inputTokens > 0 ? formatPercent(cachedInputTokens / inputTokens) : null,
         toolCalls: String(toolCalls),
         mcpToolCalls: String(mcpToolCalls),
         successfulMcpToolCalls: String(successfulMcpToolCalls),
         commandExecutions: String(commandExecutions),
         readToolCalls: String(readToolCalls),
         editToolCalls: String(editToolCalls),
+        rawTraceEvents: String(rawTraceEvents),
+        rawAgentActions: String(rawAgentActions),
         cost: taskCount > 0 && costValues.length === taskCount ? formatCurrency(costValues.reduce((sum, value) => sum + value, 0) / costValues.length) : undefined,
       },
       skills: {
@@ -420,6 +543,7 @@ export function buildFilteredComparison(comparison: ComparisonCard, filters: Com
     aggregateVariant(
       variant,
       variantInstances(variant).filter((instance) => selectedInstanceIds.has(instance.instanceId)),
+      { preserveExistingTrajectoryMetrics: selectedInstanceIds.size === comparison.tasks },
     ),
   );
 

@@ -118,7 +118,9 @@ def test_run_suite_runner_marks_partial_postprocess_when_conversion_and_evaluati
         evaluation_calls.append(
             {
                 "cache_dir": kwargs["cache_dir"],
-                "tmp_root": os.environ.get("CONTEXTBENCH_TMP_ROOT"),
+                "env_tmp_root": os.environ.get("CONTEXTBENCH_TMP_ROOT"),
+                "tmp_root": kwargs["tmp_root"],
+                "workspace_key": kwargs["workspace_key"],
                 "selected_task_count": kwargs["selected_task_count"],
             }
         )
@@ -176,7 +178,9 @@ def test_run_suite_runner_marks_partial_postprocess_when_conversion_and_evaluati
     assert evaluation_calls == [
         {
             "cache_dir": expected_eval_cache.resolve(),
-            "tmp_root": str(expected_eval_cache.resolve() / "worktrees"),
+            "env_tmp_root": str(expected_eval_cache.resolve() / "worktrees"),
+            "tmp_root": expected_eval_cache.resolve() / "worktrees",
+            "workspace_key": "partial-postprocess-baseline-evaluation",
             "selected_task_count": 2,
         }
     ]

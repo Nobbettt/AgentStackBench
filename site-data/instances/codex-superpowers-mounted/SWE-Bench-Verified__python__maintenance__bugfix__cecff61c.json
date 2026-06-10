@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-04-29T23:43:36Z",
       "completedAt": "2026-04-29T23:51:43Z",
       "durationMs": 487280,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 2339382,
@@ -25,6 +40,28 @@
         "total_tokens": 2360786,
         "cache_read_input_tokens": 2242176
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 56,
+        "readToolCalls": 0,
+        "editToolCalls": 4
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/django/db/migrations/operations/models.py b/django/db/migrations/operations/models.py\nindex 967a91fdc8..54aa30fd57 100644\n--- a/django/db/migrations/operations/models.py\n+++ b/django/db/migrations/operations/models.py\n@@ -303,6 +303,50 @@ class CreateModel(ModelOperation):\n                         managers=self.managers,\n                     ),\n                 ]\n+        elif (\n+            isinstance(operation, AddIndex)\n+            and self.name_lower == operation.model_name_lower\n+        ):\n+            options = {\n+                **self.options,\n+                operation.option_name: [\n+                    *self.options.get(operation.option_name, []),\n+                    operation.index,\n+                ],\n+            }\n+            return [\n+                CreateModel(\n+                    self.name,\n+                    fields=self.fields,\n+                    options=options,\n+                    bases=self.bases,\n+                    managers=self.managers,\n+                ),\n+            ]\n+        elif (\n+            isinstance(operation, RemoveIndex)\n+            and self.name_lower == operation.model_name_lower\n+        ):\n+            options = self.options.copy()\n+            indexes = options.get(operation.option_name)\n+            if indexes:\n+                new_indexes = [\n+                    index for index in indexes if index.name != operation.name\n+                ]\n+                if len(new_indexes) != len(indexes):\n+                    if new_indexes:\n+                        options[operation.option_name] = new_indexes\n+                    else:\n+                        options.pop(operation.option_name)\n+                    return [\n+                        CreateModel(\n+                            self.name,\n+                            fields=self.fields,\n+                            options=options,\n+                            bases=self.bases,\n+                            managers=self.managers,\n+                        ),\n+                    ]\n         return super().reduce(operation, app_label)\n \n \n@@ -807,6 +851,14 @@ class IndexOperation(Operation):\n     def model_name_lower(self):\n         return self.model_name.lower()\n \n+    def references_model(self, name, app_label):\n+        return name.lower() == self.model_name_lower\n+\n+    def reduce(self, operation, app_label):\n+        return super().reduce(operation, app_label) or not operation.references_model(\n+            self.model_name, app_label\n+        )\n+\n \n class AddIndex(IndexOperation):\n     \"\"\"Add an index on a model.\"\"\"\n@@ -861,6 +913,19 @@ class AddIndex(IndexOperation):\n     def migration_name_fragment(self):\n         return \"%s_%s\" % (self.model_name_lower, self.index.name.lower())\n \n+    def reduce(self, operation, app_label):\n+        if isinstance(operation, RemoveIndex) and (\n+            self.model_name_lower == operation.model_name_lower\n+            and self.index.name == operation.name\n+        ):\n+            return []\n+        elif (\n+            isinstance(operation, DeleteModel)\n+            and self.model_name_lower == operation.name_lower\n+        ):\n+            return [operation]\n+        return super().reduce(operation, app_label)\n+\n \n class RemoveIndex(IndexOperation):\n     \"\"\"Remove an index from a model.\"\"\"\n@@ -904,6 +969,14 @@ class RemoveIndex(IndexOperation):\n     def migration_name_fragment(self):\n         return \"remove_%s_%s\" % (self.model_name_lower, self.name.lower())\n \n+    def reduce(self, operation, app_label):\n+        if (\n+            isinstance(operation, DeleteModel)\n+            and self.model_name_lower == operation.name_lower\n+        ):\n+            return [operation]\n+        return super().reduce(operation, app_label)\n+\n \n class RenameIndex(IndexOperation):\n     \"\"\"Rename an index.\"\"\"\ndiff --git a/tests/migrations/test_optimizer.py b/tests/migrations/test_optimizer.py\nindex 8cd4c67fbd..7e371ad441 100644\n--- a/tests/migrations/test_optimizer.py\n+++ b/tests/migrations/test_optimizer.py\n@@ -786,6 +786,44 @@ class OptimizerTests(SimpleTestCase):\n             ],\n         )\n \n+    def test_create_model_add_index(self):\n+        index = models.Index(fields=[\"name\"], name=\"foo_name_idx\")\n+        self.assertOptimizesTo(\n+            [\n+                migrations.CreateModel(\n+                    \"Foo\", [(\"name\", models.CharField(max_length=255))]\n+                ),\n+                migrations.AddIndex(\"Foo\", index),\n+            ],\n+            [\n+                migrations.CreateModel(\n+                    \"Foo\",\n+                    [(\"name\", models.CharField(max_length=255))],\n+                    options={\"indexes\": [index]},\n+                ),\n+            ],\n+        )\n+\n+    def test_create_model_remove_index(self):\n+        index = models.Index(fields=[\"name\"], name=\"foo_name_idx\")\n+        self.assertOptimizesTo(\n+            [\n+                migrations.CreateModel(\n+                    \"Foo\",\n+                    [(\"name\", models.CharField(max_length=255))],\n+                    options={\"verbose_name\": \"Foo\", \"indexes\": [index]},\n+                ),\n+                migrations.RemoveIndex(\"Foo\", \"foo_name_idx\"),\n+            ],\n+            [\n+                migrations.CreateModel(\n+                    \"Foo\",\n+                    [(\"name\", models.CharField(max_length=255))],\n+                    options={\"verbose_name\": \"Foo\"},\n+                ),\n+            ],\n+        )\n+\n     def test_add_field_alter_field(self):\n         \"\"\"\n         AlterField should optimize into AddField.\n@@ -814,6 +852,47 @@ class OptimizerTests(SimpleTestCase):\n             [],\n         )\n \n+    def test_add_index_remove_index(self):\n+        index = models.Index(fields=[\"pink\"], name=\"pony_pink_idx\")\n+        self.assertOptimizesTo(\n+            [\n+                migrations.AddIndex(\"Pony\", index),\n+                migrations.RemoveIndex(\"Pony\", \"pony_pink_idx\"),\n+            ],\n+            [],\n+        )\n+        self.assertOptimizesTo(\n+            [\n+                migrations.AddIndex(\"Pony\", index),\n+                migrations.CreateModel(\n+                    \"Rider\", [(\"name\", models.CharField(max_length=8))]\n+                ),\n+                migrations.RemoveIndex(\"Pony\", \"pony_pink_idx\"),\n+            ],\n+            [\n+                migrations.CreateModel(\n+                    \"Rider\", [(\"name\", models.CharField(max_length=8))]\n+                ),\n+            ],\n+        )\n+\n+    def test_add_remove_index_delete_model(self):\n+        index = models.Index(fields=[\"pink\"], name=\"pony_pink_idx\")\n+        self.assertOptimizesTo(\n+            [\n+                migrations.AddIndex(\"Pony\", index),\n+                migrations.DeleteModel(\"Pony\"),\n+            ],\n+            [migrations.DeleteModel(\"Pony\")],\n+        )\n+        self.assertOptimizesTo(\n+            [\n+                migrations.RemoveIndex(\"Pony\", \"pony_pink_idx\"),\n+                migrations.DeleteModel(\"Pony\"),\n+            ],\n+            [migrations.DeleteModel(\"Pony\")],\n+        )\n+\n     def test_alter_field_delete_field(self):\n         \"\"\"\n         RemoveField should absorb AlterField\n",
       "finalOutput": {
         "status": "completed",
@@ -96,940 +133,13 @@
         "predSteps": [
           {
             "files": [
-              "django/apps/registry.py",
-              "django/conf/global_settings.py",
-              "django/contrib/admin/options.py",
-              "django/contrib/admin/static/admin/js/vendor/jquery/jquery.js",
-              "django/contrib/admin/static/admin/js/vendor/select2/select2.full.js",
-              "django/contrib/admin/static/admin/js/vendor/xregexp/xregexp.js",
-              "django/contrib/gis/geos/geometry.py",
-              "django/contrib/postgres/operations.py",
-              "django/core/management/commands/makemigrations.py",
-              "django/core/management/commands/optimizemigration.py",
-              "django/core/management/commands/squashmigrations.py",
-              "django/db/backends/oracle/base.py",
-              "django/db/migrations/autodetector.py",
-              "django/db/migrations/operations/__init__.py",
-              "django/db/migrations/operations/base.py",
-              "django/db/migrations/operations/models.py",
-              "django/db/migrations/optimizer.py",
-              "django/db/migrations/state.py",
-              "django/db/migrations/utils.py",
-              "django/db/models/sql/compiler.py",
-              "django/db/models/sql/query.py",
-              "django/http/response.py",
-              "django/urls/resolvers.py",
-              "tests/admin_changelist/tests.py",
-              "tests/aggregation/tests.py",
-              "tests/auth_tests/test_forms.py",
-              "tests/custom_lookups/tests.py",
-              "tests/db_functions/datetime/test_extract_trunc.py",
-              "tests/expressions/tests.py",
-              "tests/extra_regress/tests.py",
-              "tests/migrations/test_autodetector.py",
-              "tests/migrations/test_base.py",
-              "tests/migrations/test_commands.py",
-              "tests/migrations/test_operations.py",
-              "tests/migrations/test_optimizer.py",
-              "tests/postgres_tests/test_aggregates.py",
-              "tests/postgres_tests/test_operations.py",
-              "tests/queries/tests.py"
+              "django/db/migrations/optimizer.py"
             ],
             "spans": {
-              "tests/postgres_tests/test_aggregates.py": [
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 142,
-                  "end": 142
-                },
-                {
-                  "start": 850,
-                  "end": 850
-                },
-                {
-                  "start": 881,
-                  "end": 881
-                }
-              ],
-              "tests/postgres_tests/test_operations.py": [
-                {
-                  "start": 18,
-                  "end": 18
-                },
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 32,
-                  "end": 32
-                },
-                {
-                  "start": 38,
-                  "end": 38
-                },
-                {
-                  "start": 43,
-                  "end": 43
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                },
-                {
-                  "start": 89,
-                  "end": 89
-                },
-                {
-                  "start": 112,
-                  "end": 112
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 138,
-                  "end": 138
-                },
-                {
-                  "start": 152,
-                  "end": 152
-                },
-                {
-                  "start": 176,
-                  "end": 176
-                }
-              ],
-              "tests/extra_regress/tests.py": [
-                {
-                  "start": 139,
-                  "end": 139
-                }
-              ],
-              "tests/expressions/tests.py": [
-                {
-                  "start": 2231,
-                  "end": 2231
-                }
-              ],
-              "django/apps/registry.py": [
-                {
-                  "start": 314,
-                  "end": 314
-                }
-              ],
-              "django/conf/global_settings.py": [
-                {
-                  "start": 155,
-                  "end": 155
-                }
-              ],
-              "tests/queries/tests.py": [
-                {
-                  "start": 437,
-                  "end": 437
-                },
-                {
-                  "start": 2123,
-                  "end": 2123
-                }
-              ],
-              "tests/admin_changelist/tests.py": [
-                {
-                  "start": 1321,
-                  "end": 1321
-                },
-                {
-                  "start": 1397,
-                  "end": 1397
-                }
-              ],
-              "tests/db_functions/datetime/test_extract_trunc.py": [
-                {
-                  "start": 155,
-                  "end": 155
-                }
-              ],
-              "tests/custom_lookups/tests.py": [
-                {
-                  "start": 484,
-                  "end": 484
-                }
-              ],
-              "django/http/response.py": [
-                {
-                  "start": 533,
-                  "end": 533
-                }
-              ],
-              "django/urls/resolvers.py": [
-                {
-                  "start": 137,
-                  "end": 137
-                }
-              ],
-              "django/contrib/postgres/operations.py": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 119,
-                  "end": 119
-                },
-                {
-                  "start": 144,
-                  "end": 144
-                }
-              ],
-              "django/contrib/gis/geos/geometry.py": [
-                {
-                  "start": 443,
-                  "end": 443
-                }
-              ],
-              "django/db/migrations/state.py": [
-                {
-                  "start": 926,
-                  "end": 926
-                }
-              ],
-              "django/db/backends/oracle/base.py": [
-                {
-                  "start": 389,
-                  "end": 389
-                }
-              ],
               "django/db/migrations/optimizer.py": [
                 {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 17,
-                  "end": 17
-                },
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 40,
-                  "end": 40
-                },
-                {
-                  "start": 41,
-                  "end": 41
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                }
-              ],
-              "django/db/migrations/utils.py": [
-                {
-                  "start": 67,
-                  "end": 67
-                }
-              ],
-              "django/db/migrations/autodetector.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 207,
-                  "end": 207
-                },
-                {
-                  "start": 399,
-                  "end": 399
-                },
-                {
-                  "start": 413,
-                  "end": 413
-                },
-                {
-                  "start": 583,
-                  "end": 583
-                },
-                {
-                  "start": 721,
-                  "end": 721
-                },
-                {
-                  "start": 811,
-                  "end": 811
-                },
-                {
-                  "start": 1217,
-                  "end": 1217
-                },
-                {
-                  "start": 1311,
-                  "end": 1311
-                },
-                {
-                  "start": 1323,
-                  "end": 1323
-                }
-              ],
-              "django/db/migrations/operations/__init__.py": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                }
-              ],
-              "django/db/migrations/operations/base.py": [
-                {
-                  "start": 31,
-                  "end": 31
-                },
-                {
-                  "start": 101,
-                  "end": 101
-                },
-                {
-                  "start": 102,
-                  "end": 102
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 113,
-                  "end": 113
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                }
-              ],
-              "django/db/migrations/operations/models.py": [
-                {
-                  "start": 811,
-                  "end": 811
-                },
-                {
-                  "start": 818,
-                  "end": 818
-                },
-                {
-                  "start": 865,
-                  "end": 865
-                }
-              ],
-              "django/db/models/sql/query.py": [
-                {
-                  "start": 124,
-                  "end": 124
-                },
-                {
-                  "start": 2199,
-                  "end": 2199
-                }
-              ],
-              "django/db/models/sql/compiler.py": [
-                {
-                  "start": 207,
-                  "end": 207
-                },
-                {
-                  "start": 967,
-                  "end": 967
-                },
-                {
-                  "start": 1525,
-                  "end": 1525
-                }
-              ],
-              "django/contrib/admin/options.py": [
-                {
-                  "start": 1931,
-                  "end": 1931
-                }
-              ],
-              "django/contrib/admin/static/admin/js/vendor/xregexp/xregexp.js": [
-                {
-                  "start": 3021,
-                  "end": 3021
-                },
-                {
-                  "start": 4921,
-                  "end": 4921
-                }
-              ],
-              "django/contrib/admin/static/admin/js/vendor/select2/select2.full.js": [
-                {
-                  "start": 252,
-                  "end": 252
-                }
-              ],
-              "django/contrib/admin/static/admin/js/vendor/jquery/jquery.js": [
-                {
-                  "start": 5338,
-                  "end": 5338
-                }
-              ],
-              "django/core/management/commands/optimizemigration.py": [
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 24,
-                  "end": 24
-                },
-                {
-                  "start": 29,
-                  "end": 29
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 64,
-                  "end": 64
-                },
-                {
-                  "start": 67,
-                  "end": 67
-                },
-                {
-                  "start": 78,
-                  "end": 78
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                },
-                {
-                  "start": 102,
-                  "end": 102
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 112,
-                  "end": 112
-                }
-              ],
-              "django/core/management/commands/squashmigrations.py": [
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 40,
-                  "end": 40
-                },
-                {
-                  "start": 42,
-                  "end": 42
-                },
-                {
-                  "start": 68,
-                  "end": 68
-                },
-                {
-                  "start": 161,
-                  "end": 161
-                },
-                {
-                  "start": 164,
-                  "end": 164
-                },
-                {
-                  "start": 171,
-                  "end": 171
-                },
-                {
-                  "start": 172,
-                  "end": 172
-                },
-                {
-                  "start": 176,
-                  "end": 176
-                }
-              ],
-              "django/core/management/commands/makemigrations.py": [
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 92,
-                  "end": 92
-                },
-                {
-                  "start": 313,
-                  "end": 313
-                },
-                {
-                  "start": 314,
-                  "end": 314
-                },
-                {
-                  "start": 451,
-                  "end": 451
-                }
-              ],
-              "tests/auth_tests/test_forms.py": [
-                {
-                  "start": 896,
-                  "end": 896
-                }
-              ],
-              "tests/migrations/test_base.py": [
-                {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 308,
-                  "end": 308
-                },
-                {
-                  "start": 315,
-                  "end": 315
-                }
-              ],
-              "tests/migrations/test_autodetector.py": [
-                {
-                  "start": 2269,
-                  "end": 2269
-                },
-                {
-                  "start": 2591,
-                  "end": 2591
-                },
-                {
-                  "start": 2603,
-                  "end": 2603
-                },
-                {
-                  "start": 2618,
-                  "end": 2618
-                },
-                {
-                  "start": 2663,
-                  "end": 2663
-                },
-                {
-                  "start": 2779,
-                  "end": 2779
-                },
-                {
-                  "start": 4049,
-                  "end": 4049
-                },
-                {
-                  "start": 4106,
-                  "end": 4106
-                },
-                {
-                  "start": 4919,
-                  "end": 4919
-                },
-                {
-                  "start": 4933,
-                  "end": 4933
-                }
-              ],
-              "tests/migrations/test_commands.py": [
-                {
-                  "start": 2773,
-                  "end": 2773
-                },
-                {
-                  "start": 2775,
-                  "end": 2775
-                },
-                {
-                  "start": 2789,
-                  "end": 2789
-                },
-                {
-                  "start": 2791,
-                  "end": 2791
-                },
-                {
-                  "start": 2801,
-                  "end": 2801
-                },
-                {
-                  "start": 2804,
-                  "end": 2804
-                },
-                {
-                  "start": 2944,
-                  "end": 2944
-                },
-                {
-                  "start": 3021,
-                  "end": 3021
-                },
-                {
-                  "start": 3023,
-                  "end": 3023
-                },
-                {
-                  "start": 3025,
-                  "end": 3025
-                },
-                {
-                  "start": 3027,
-                  "end": 3027
-                },
-                {
-                  "start": 3031,
-                  "end": 3031
-                },
-                {
-                  "start": 3037,
-                  "end": 3037
-                },
-                {
-                  "start": 3042,
-                  "end": 3042
-                },
-                {
-                  "start": 3049,
-                  "end": 3049
-                },
-                {
-                  "start": 3051,
-                  "end": 3051
-                },
-                {
-                  "start": 3057,
-                  "end": 3057
-                },
-                {
-                  "start": 3075,
-                  "end": 3075
-                },
-                {
-                  "start": 3081,
-                  "end": 3081
-                },
-                {
-                  "start": 3106,
-                  "end": 3106
-                },
-                {
-                  "start": 3108,
-                  "end": 3108
-                },
-                {
-                  "start": 3109,
-                  "end": 3109
-                },
-                {
-                  "start": 3111,
-                  "end": 3111
-                },
-                {
-                  "start": 3112,
-                  "end": 3112
-                },
-                {
-                  "start": 3127,
-                  "end": 3127
-                },
-                {
-                  "start": 3129,
-                  "end": 3129
-                },
-                {
-                  "start": 3145,
-                  "end": 3145
-                },
-                {
-                  "start": 3146,
-                  "end": 3146
-                },
-                {
-                  "start": 3147,
-                  "end": 3147
-                },
-                {
-                  "start": 3149,
-                  "end": 3149
-                },
-                {
-                  "start": 3155,
-                  "end": 3155
-                },
-                {
-                  "start": 3158,
-                  "end": 3158
-                },
-                {
-                  "start": 3161,
-                  "end": 3161
-                },
-                {
-                  "start": 3169,
-                  "end": 3169
-                },
-                {
-                  "start": 3180,
-                  "end": 3180
-                },
-                {
-                  "start": 3186,
-                  "end": 3186
-                }
-              ],
-              "tests/migrations/test_operations.py": [
-                {
-                  "start": 3094,
-                  "end": 3094
-                },
-                {
-                  "start": 3098,
-                  "end": 3098
-                },
-                {
-                  "start": 3102,
-                  "end": 3102
-                },
-                {
-                  "start": 3104,
-                  "end": 3104
-                },
-                {
-                  "start": 3129,
-                  "end": 3129
-                },
-                {
-                  "start": 3135,
-                  "end": 3135
-                },
-                {
-                  "start": 3140,
-                  "end": 3140
-                },
-                {
-                  "start": 3163,
-                  "end": 3163
-                },
-                {
-                  "start": 3169,
-                  "end": 3169
-                },
-                {
-                  "start": 3309,
-                  "end": 3309
-                },
-                {
-                  "start": 3317,
-                  "end": 3317
-                },
-                {
-                  "start": 3321,
-                  "end": 3321
-                },
-                {
-                  "start": 3363,
-                  "end": 3363
-                },
-                {
-                  "start": 3386,
-                  "end": 3386
-                },
-                {
-                  "start": 3403,
-                  "end": 3403
-                },
-                {
-                  "start": 3425,
-                  "end": 3425
-                },
-                {
-                  "start": 5519,
-                  "end": 5519
-                },
-                {
-                  "start": 5521,
-                  "end": 5521
-                },
-                {
-                  "start": 5534,
-                  "end": 5534
-                }
-              ],
-              "tests/migrations/test_optimizer.py": [
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 49,
-                  "end": 49
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 269,
-                  "end": 269
-                },
-                {
-                  "start": 271,
-                  "end": 271
-                },
-                {
-                  "start": 310,
-                  "end": 310
-                },
-                {
-                  "start": 378,
-                  "end": 378
-                },
-                {
-                  "start": 462,
-                  "end": 462
-                },
-                {
-                  "start": 492,
-                  "end": 492
-                },
-                {
-                  "start": 620,
-                  "end": 620
-                },
-                {
-                  "start": 653,
-                  "end": 653
-                },
-                {
-                  "start": 682,
-                  "end": 682
-                },
-                {
-                  "start": 711,
-                  "end": 711
-                },
-                {
-                  "start": 725,
-                  "end": 725
-                },
-                {
-                  "start": 759,
-                  "end": 759
-                },
-                {
-                  "start": 791,
-                  "end": 791
-                },
-                {
-                  "start": 834,
-                  "end": 834
-                },
-                {
-                  "start": 1074,
-                  "end": 1074
-                },
-                {
-                  "start": 1101,
-                  "end": 1101
-                }
-              ],
-              "tests/aggregation/tests.py": [
-                {
-                  "start": 1729,
-                  "end": 1729
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -1037,232 +147,97 @@
           },
           {
             "files": [
-              "django/db/migrations/optimizer.py"
+              "django/db/migrations/operations/models.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/db/migrations/operations/models.py": [
+                {
+                  "start": 1,
+                  "end": 360
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "django/db/migrations/operations/models.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/db/migrations/operations/models.py": [
+                {
+                  "start": 760,
+                  "end": 940
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "django/db/migrations/autodetector.py",
-              "django/db/migrations/operations/__init__.py",
-              "django/db/migrations/operations/models.py",
-              "django/db/migrations/optimizer.py",
-              "django/db/migrations/state.py",
-              "tests/migrations/test_autodetector.py",
-              "tests/migrations/test_base.py",
-              "tests/migrations/test_operations.py"
+              "tests/migrations/test_optimizer.py"
             ],
             "spans": {
-              "tests/migrations/test_base.py": [
-                {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 308,
-                  "end": 308
-                },
-                {
-                  "start": 315,
-                  "end": 315
-                }
-              ],
-              "django/db/migrations/optimizer.py": [
+              "tests/migrations/test_optimizer.py": [
                 {
                   "start": 1,
-                  "end": 1
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 40,
-                  "end": 40
+                  "end": 260
                 }
-              ],
-              "django/db/migrations/state.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/base.py"
+            ],
+            "spans": {
+              "django/db/migrations/operations/base.py": [
                 {
-                  "start": 926,
-                  "end": 926
+                  "start": 1,
+                  "end": 260
                 }
-              ],
-              "django/db/migrations/autodetector.py": [
-                {
-                  "start": 721,
-                  "end": 721
-                },
-                {
-                  "start": 1217,
-                  "end": 1217
-                },
-                {
-                  "start": 1311,
-                  "end": 1311
-                },
-                {
-                  "start": 1323,
-                  "end": 1323
-                }
-              ],
-              "tests/migrations/test_autodetector.py": [
-                {
-                  "start": 2269,
-                  "end": 2269
-                },
-                {
-                  "start": 2591,
-                  "end": 2591
-                },
-                {
-                  "start": 2603,
-                  "end": 2603
-                },
-                {
-                  "start": 2618,
-                  "end": 2618
-                },
-                {
-                  "start": 2663,
-                  "end": 2663
-                },
-                {
-                  "start": 2779,
-                  "end": 2779
-                },
-                {
-                  "start": 4049,
-                  "end": 4049
-                },
-                {
-                  "start": 4106,
-                  "end": 4106
-                },
-                {
-                  "start": 4919,
-                  "end": 4919
-                },
-                {
-                  "start": 4933,
-                  "end": 4933
-                }
-              ],
-              "django/db/migrations/operations/__init__.py": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/models.py"
+            ],
+            "spans": {
               "django/db/migrations/operations/models.py": [
                 {
-                  "start": 811,
-                  "end": 811
-                },
-                {
-                  "start": 818,
-                  "end": 818
-                },
-                {
-                  "start": 865,
-                  "end": 865
+                  "start": 1000,
+                  "end": 1075
                 }
-              ],
-              "tests/migrations/test_operations.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/models.py"
+            ],
+            "spans": {
+              "django/db/migrations/operations/models.py": [
                 {
-                  "start": 3094,
-                  "end": 3094
-                },
+                  "start": 420,
+                  "end": 520
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/migrations/test_optimizer.py"
+            ],
+            "spans": {
+              "tests/migrations/test_optimizer.py": [
                 {
-                  "start": 3098,
-                  "end": 3098
-                },
-                {
-                  "start": 3102,
-                  "end": 3102
-                },
-                {
-                  "start": 3104,
-                  "end": 3104
-                },
-                {
-                  "start": 3129,
-                  "end": 3129
-                },
-                {
-                  "start": 3135,
-                  "end": 3135
-                },
-                {
-                  "start": 3140,
-                  "end": 3140
-                },
-                {
-                  "start": 3163,
-                  "end": 3163
-                },
-                {
-                  "start": 3169,
-                  "end": 3169
-                },
-                {
-                  "start": 3309,
-                  "end": 3309
-                },
-                {
-                  "start": 3317,
-                  "end": 3317
-                },
-                {
-                  "start": 3321,
-                  "end": 3321
-                },
-                {
-                  "start": 3363,
-                  "end": 3363
-                },
-                {
-                  "start": 3386,
-                  "end": 3386
-                },
-                {
-                  "start": 3403,
-                  "end": 3403
-                },
-                {
-                  "start": 3425,
-                  "end": 3425
-                },
-                {
-                  "start": 5519,
-                  "end": 5519
-                },
-                {
-                  "start": 5521,
-                  "end": 5521
-                },
-                {
-                  "start": 5534,
-                  "end": 5534
+                  "start": 260,
+                  "end": 620
                 }
               ]
             },
@@ -1277,59 +252,27 @@
           },
           {
             "files": [
-              "django/db/migrations/operations/base.py"
+              "tests/migrations/test_optimizer.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/migrations/test_optimizer.py": [
+                {
+                  "start": 1080,
+                  "end": 1185
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "django/db/migrations/operations/fields.py",
-              "django/db/migrations/operations/models.py"
+              "tests/migrations/test_optimizer.py"
             ],
             "spans": {
-              "django/db/migrations/operations/models.py": [
+              "tests/migrations/test_optimizer.py": [
                 {
-                  "start": 32,
-                  "end": 32
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 445,
-                  "end": 445
-                },
-                {
-                  "start": 464,
-                  "end": 464
-                },
-                {
-                  "start": 1039,
-                  "end": 1039
-                }
-              ],
-              "django/db/migrations/operations/fields.py": [
-                {
-                  "start": 69,
-                  "end": 69
-                },
-                {
-                  "start": 129,
-                  "end": 129
-                },
-                {
-                  "start": 187,
-                  "end": 187
-                },
-                {
-                  "start": 249,
-                  "end": 249
-                },
-                {
-                  "start": 339,
-                  "end": 339
+                  "start": 1185,
+                  "end": 1320
                 }
               ]
             },
@@ -1342,12 +285,8 @@
             "spans": {
               "django/db/migrations/operations/models.py": [
                 {
-                  "start": 1057,
-                  "end": 1057
-                },
-                {
-                  "start": 1098,
-                  "end": 1098
+                  "start": 1075,
+                  "end": 1185
                 }
               ]
             },
@@ -1362,74 +301,125 @@
           },
           {
             "files": [
-              "django/db/migrations/operations/fields.py"
+              "django/db/migrations/state.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/db/migrations/state.py": [
+                {
+                  "start": 900,
+                  "end": 980
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "django/db/models/constraints.py",
-              "django/db/models/fields/__init__.py",
-              "django/db/models/indexes.py",
-              "django/db/models/query_utils.py",
-              "django/db/models/sql/query.py",
-              "django/db/models/sql/subqueries.py",
-              "django/db/models/sql/where.py"
+              "django/db/migrations/state.py"
             ],
             "spans": {
-              "django/db/models/constraints.py": [
+              "django/db/migrations/state.py": [
                 {
-                  "start": 88,
-                  "end": 88
-                },
-                {
-                  "start": 88,
-                  "end": 88
+                  "start": 200,
+                  "end": 245
                 }
-              ],
-              "django/db/models/indexes.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/fields.py"
+            ],
+            "spans": {
+              "django/db/migrations/operations/fields.py": [
                 {
-                  "start": 153,
-                  "end": 153
-                },
-                {
-                  "start": 153,
-                  "end": 153
+                  "start": 1,
+                  "end": 240
                 }
-              ],
-              "django/db/models/query_utils.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/migrations/test_optimizer.py"
+            ],
+            "spans": {
+              "tests/migrations/test_optimizer.py": [
                 {
-                  "start": 421,
-                  "end": 421
+                  "start": 730,
+                  "end": 845
                 }
-              ],
-              "django/db/models/sql/where.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/migrations/test_optimizer.py"
+            ],
+            "spans": {
+              "tests/migrations/test_optimizer.py": [
                 {
-                  "start": 209,
-                  "end": 209
+                  "start": 760,
+                  "end": 860
                 }
-              ],
-              "django/db/models/sql/query.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/migrations/test_optimizer.py"
+            ],
+            "spans": {
+              "tests/migrations/test_optimizer.py": [
                 {
-                  "start": 113,
-                  "end": 113
-                },
-                {
-                  "start": 327,
-                  "end": 327
+                  "start": 780,
+                  "end": 880
                 }
-              ],
-              "django/db/models/sql/subqueries.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/models.py"
+            ],
+            "spans": {
+              "django/db/migrations/operations/models.py": [
                 {
-                  "start": 66,
-                  "end": 66
+                  "start": 800,
+                  "end": 930
                 }
-              ],
-              "django/db/models/fields/__init__.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/models.py"
+            ],
+            "spans": {
+              "django/db/migrations/operations/models.py": [
                 {
-                  "start": 610,
-                  "end": 610
+                  "start": 120,
+                  "end": 250
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/migrations/test_optimizer.py"
+            ],
+            "spans": {
+              "tests/migrations/test_optimizer.py": [
+                {
+                  "start": 880,
+                  "end": 930
                 }
               ]
             },
@@ -1439,137 +429,53 @@
             "files": [
               "tests/README.rst"
             ],
-            "spans": {},
+            "spans": {
+              "tests/README.rst": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "django/contrib/auth/middleware.py",
-              "django/contrib/contenttypes/fields.py",
-              "django/contrib/staticfiles/handlers.py",
-              "django/core/cache/backends/base.py",
-              "django/core/handlers/asgi.py",
-              "django/core/handlers/base.py",
-              "django/core/handlers/exception.py",
-              "django/db/models/base.py",
-              "django/db/models/fields/related_descriptors.py",
-              "django/db/models/query.py",
-              "django/dispatch/dispatcher.py",
-              "django/http/response.py",
-              "django/test/client.py",
-              "django/test/testcases.py",
-              "django/test/utils.py",
-              "django/utils/deprecation.py",
-              "django/views/decorators/cache.py",
-              "django/views/generic/base.py"
+              "django/db/migrations/operations/models.py"
             ],
             "spans": {
-              "django/contrib/contenttypes/fields.py": [
+              "django/db/migrations/operations/models.py": [
                 {
-                  "start": 5,
-                  "end": 5
+                  "start": 120,
+                  "end": 340
                 }
-              ],
-              "django/dispatch/dispatcher.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/models.py"
+            ],
+            "spans": {
+              "django/db/migrations/operations/models.py": [
                 {
-                  "start": 6,
-                  "end": 6
+                  "start": 340,
+                  "end": 380
                 }
-              ],
-              "django/utils/deprecation.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/models.py"
+            ],
+            "spans": {
+              "django/db/migrations/operations/models.py": [
                 {
-                  "start": 4,
-                  "end": 4
-                }
-              ],
-              "django/contrib/auth/middleware.py": [
-                {
-                  "start": 3,
-                  "end": 3
-                }
-              ],
-              "django/contrib/staticfiles/handlers.py": [
-                {
-                  "start": 4,
-                  "end": 4
-                }
-              ],
-              "django/views/generic/base.py": [
-                {
-                  "start": 3,
-                  "end": 3
-                }
-              ],
-              "django/db/models/base.py": [
-                {
-                  "start": 7,
-                  "end": 7
-                }
-              ],
-              "django/db/models/query.py": [
-                {
-                  "start": 10,
-                  "end": 10
-                }
-              ],
-              "django/db/models/fields/related_descriptors.py": [
-                {
-                  "start": 66,
-                  "end": 66
-                }
-              ],
-              "django/views/decorators/cache.py": [
-                {
-                  "start": 3,
-                  "end": 3
-                }
-              ],
-              "django/http/response.py": [
-                {
-                  "start": 14,
-                  "end": 14
-                }
-              ],
-              "django/test/testcases.py": [
-                {
-                  "start": 27,
-                  "end": 27
-                }
-              ],
-              "django/core/cache/backends/base.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/core/handlers/base.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/core/handlers/asgi.py": [
-                {
-                  "start": 8,
-                  "end": 8
-                }
-              ],
-              "django/core/handlers/exception.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/test/utils.py": [
-                {
-                  "start": 16,
-                  "end": 16
-                }
-              ],
-              "django/test/client.py": [
-                {
-                  "start": 12,
-                  "end": 12
+                  "start": 292,
+                  "end": 315
                 }
               ]
             },
@@ -1579,1191 +485,71 @@
             "files": [
               "django/db/backends/sqlite3/introspection.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/db/backends/sqlite3/introspection.py": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/migrations/test_optimizer.py"
+            ],
+            "spans": {
+              "tests/migrations/test_optimizer.py": [
+                {
+                  "start": 780,
+                  "end": 915
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/models.py"
+            ],
+            "spans": {
+              "django/db/migrations/operations/models.py": [
+                {
+                  "start": 300,
+                  "end": 980
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "django/apps/registry.py",
-          "django/conf/global_settings.py",
-          "django/contrib/admin/options.py",
-          "django/contrib/admin/static/admin/js/vendor/jquery/jquery.js",
-          "django/contrib/admin/static/admin/js/vendor/select2/select2.full.js",
-          "django/contrib/admin/static/admin/js/vendor/xregexp/xregexp.js",
-          "django/contrib/auth/middleware.py",
-          "django/contrib/contenttypes/fields.py",
-          "django/contrib/gis/geos/geometry.py",
-          "django/contrib/postgres/operations.py",
-          "django/contrib/staticfiles/handlers.py",
-          "django/core/cache/backends/base.py",
-          "django/core/handlers/asgi.py",
-          "django/core/handlers/base.py",
-          "django/core/handlers/exception.py",
-          "django/core/management/commands/makemigrations.py",
-          "django/core/management/commands/optimizemigration.py",
-          "django/core/management/commands/squashmigrations.py",
-          "django/db/backends/oracle/base.py",
-          "django/db/backends/sqlite3/introspection.py",
-          "django/db/migrations/autodetector.py",
-          "django/db/migrations/operations/__init__.py",
-          "django/db/migrations/operations/base.py",
-          "django/db/migrations/operations/fields.py",
           "django/db/migrations/operations/models.py",
           "django/db/migrations/optimizer.py",
-          "django/db/migrations/state.py",
-          "django/db/migrations/utils.py",
-          "django/db/models/base.py",
-          "django/db/models/constraints.py",
-          "django/db/models/fields/__init__.py",
-          "django/db/models/fields/related_descriptors.py",
-          "django/db/models/indexes.py",
-          "django/db/models/query.py",
-          "django/db/models/query_utils.py",
-          "django/db/models/sql/compiler.py",
-          "django/db/models/sql/query.py",
-          "django/db/models/sql/subqueries.py",
-          "django/db/models/sql/where.py",
-          "django/dispatch/dispatcher.py",
-          "django/http/response.py",
-          "django/test/client.py",
-          "django/test/testcases.py",
-          "django/test/utils.py",
-          "django/urls/resolvers.py",
-          "django/utils/deprecation.py",
-          "django/views/decorators/cache.py",
-          "django/views/generic/base.py",
-          "tests/README.rst",
-          "tests/admin_changelist/tests.py",
-          "tests/aggregation/tests.py",
-          "tests/auth_tests/test_forms.py",
-          "tests/custom_lookups/tests.py",
-          "tests/db_functions/datetime/test_extract_trunc.py",
-          "tests/expressions/tests.py",
-          "tests/extra_regress/tests.py",
-          "tests/migrations/test_autodetector.py",
-          "tests/migrations/test_base.py",
-          "tests/migrations/test_commands.py",
-          "tests/migrations/test_operations.py",
-          "tests/migrations/test_optimizer.py",
-          "tests/postgres_tests/test_aggregates.py",
-          "tests/postgres_tests/test_operations.py",
-          "tests/queries/tests.py"
+          "tests/migrations/test_optimizer.py"
         ],
         "predSpans": {
-          "tests/postgres_tests/test_aggregates.py": [
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 142,
-              "end": 142
-            },
-            {
-              "start": 850,
-              "end": 850
-            },
-            {
-              "start": 881,
-              "end": 881
-            }
-          ],
-          "tests/postgres_tests/test_operations.py": [
-            {
-              "start": 18,
-              "end": 18
-            },
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 32,
-              "end": 32
-            },
-            {
-              "start": 38,
-              "end": 38
-            },
-            {
-              "start": 43,
-              "end": 43
-            },
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 81,
-              "end": 81
-            },
-            {
-              "start": 89,
-              "end": 89
-            },
-            {
-              "start": 112,
-              "end": 112
-            },
-            {
-              "start": 130,
-              "end": 130
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 138,
-              "end": 138
-            },
-            {
-              "start": 152,
-              "end": 152
-            },
-            {
-              "start": 176,
-              "end": 176
-            }
-          ],
-          "tests/extra_regress/tests.py": [
-            {
-              "start": 139,
-              "end": 139
-            }
-          ],
-          "tests/expressions/tests.py": [
-            {
-              "start": 2231,
-              "end": 2231
-            }
-          ],
-          "django/apps/registry.py": [
-            {
-              "start": 314,
-              "end": 314
-            }
-          ],
-          "django/conf/global_settings.py": [
-            {
-              "start": 155,
-              "end": 155
-            }
-          ],
-          "tests/queries/tests.py": [
-            {
-              "start": 437,
-              "end": 437
-            },
-            {
-              "start": 2123,
-              "end": 2123
-            }
-          ],
-          "tests/admin_changelist/tests.py": [
-            {
-              "start": 1321,
-              "end": 1321
-            },
-            {
-              "start": 1397,
-              "end": 1397
-            }
-          ],
-          "tests/db_functions/datetime/test_extract_trunc.py": [
-            {
-              "start": 155,
-              "end": 155
-            }
-          ],
-          "tests/custom_lookups/tests.py": [
-            {
-              "start": 484,
-              "end": 484
-            }
-          ],
-          "django/http/response.py": [
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 533,
-              "end": 533
-            }
-          ],
-          "django/urls/resolvers.py": [
-            {
-              "start": 137,
-              "end": 137
-            }
-          ],
-          "django/contrib/postgres/operations.py": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 119,
-              "end": 119
-            },
-            {
-              "start": 144,
-              "end": 144
-            }
-          ],
-          "django/contrib/gis/geos/geometry.py": [
-            {
-              "start": 443,
-              "end": 443
-            }
-          ],
-          "django/db/migrations/state.py": [
-            {
-              "start": 926,
-              "end": 926
-            }
-          ],
-          "django/db/backends/oracle/base.py": [
-            {
-              "start": 389,
-              "end": 389
-            }
-          ],
-          "django/db/migrations/optimizer.py": [
-            {
-              "start": 1,
-              "end": 1
-            },
-            {
-              "start": 1,
-              "end": 66
-            },
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 17,
-              "end": 17
-            },
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 40,
-              "end": 40
-            },
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
-              "start": 55,
-              "end": 55
-            }
-          ],
-          "django/db/migrations/utils.py": [
-            {
-              "start": 67,
-              "end": 67
-            }
-          ],
-          "django/db/migrations/autodetector.py": [
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 207,
-              "end": 207
-            },
-            {
-              "start": 399,
-              "end": 399
-            },
-            {
-              "start": 413,
-              "end": 413
-            },
-            {
-              "start": 583,
-              "end": 583
-            },
-            {
-              "start": 721,
-              "end": 721
-            },
-            {
-              "start": 811,
-              "end": 811
-            },
-            {
-              "start": 1217,
-              "end": 1217
-            },
-            {
-              "start": 1311,
-              "end": 1311
-            },
-            {
-              "start": 1323,
-              "end": 1323
-            }
-          ],
-          "django/db/migrations/operations/__init__.py": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 31,
-              "end": 31
-            }
-          ],
-          "django/db/migrations/operations/base.py": [
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 101,
-              "end": 101
-            },
-            {
-              "start": 102,
-              "end": 102
-            },
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 113,
-              "end": 113
-            },
-            {
-              "start": 133,
-              "end": 133
-            }
-          ],
           "django/db/migrations/operations/models.py": [
-            {
-              "start": 32,
-              "end": 32
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
             {
               "start": 136,
               "end": 350
             },
             {
-              "start": 445,
-              "end": 445
-            },
-            {
-              "start": 464,
-              "end": 464
-            },
-            {
-              "start": 811,
-              "end": 811
-            },
-            {
-              "start": 818,
-              "end": 818
-            },
-            {
               "start": 847,
               "end": 978
-            },
-            {
-              "start": 865,
-              "end": 865
-            },
-            {
-              "start": 1039,
-              "end": 1039
-            },
-            {
-              "start": 1057,
-              "end": 1057
-            },
-            {
-              "start": 1098,
-              "end": 1098
-            }
-          ],
-          "django/db/models/sql/query.py": [
-            {
-              "start": 113,
-              "end": 113
-            },
-            {
-              "start": 124,
-              "end": 124
-            },
-            {
-              "start": 327,
-              "end": 327
-            },
-            {
-              "start": 2199,
-              "end": 2199
-            }
-          ],
-          "django/db/models/sql/compiler.py": [
-            {
-              "start": 207,
-              "end": 207
-            },
-            {
-              "start": 967,
-              "end": 967
-            },
-            {
-              "start": 1525,
-              "end": 1525
-            }
-          ],
-          "django/contrib/admin/options.py": [
-            {
-              "start": 1931,
-              "end": 1931
-            }
-          ],
-          "django/contrib/admin/static/admin/js/vendor/xregexp/xregexp.js": [
-            {
-              "start": 3021,
-              "end": 3021
-            },
-            {
-              "start": 4921,
-              "end": 4921
-            }
-          ],
-          "django/contrib/admin/static/admin/js/vendor/select2/select2.full.js": [
-            {
-              "start": 252,
-              "end": 252
-            }
-          ],
-          "django/contrib/admin/static/admin/js/vendor/jquery/jquery.js": [
-            {
-              "start": 5338,
-              "end": 5338
-            }
-          ],
-          "django/core/management/commands/optimizemigration.py": [
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 29,
-              "end": 29
-            },
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 64,
-              "end": 64
-            },
-            {
-              "start": 67,
-              "end": 67
-            },
-            {
-              "start": 78,
-              "end": 78
-            },
-            {
-              "start": 81,
-              "end": 81
-            },
-            {
-              "start": 102,
-              "end": 102
-            },
-            {
-              "start": 103,
-              "end": 103
-            },
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 112,
-              "end": 112
-            }
-          ],
-          "django/core/management/commands/squashmigrations.py": [
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 40,
-              "end": 40
-            },
-            {
-              "start": 42,
-              "end": 42
-            },
-            {
-              "start": 68,
-              "end": 68
-            },
-            {
-              "start": 161,
-              "end": 161
-            },
-            {
-              "start": 164,
-              "end": 164
-            },
-            {
-              "start": 171,
-              "end": 171
-            },
-            {
-              "start": 172,
-              "end": 172
-            },
-            {
-              "start": 176,
-              "end": 176
-            }
-          ],
-          "django/core/management/commands/makemigrations.py": [
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 92,
-              "end": 92
-            },
-            {
-              "start": 313,
-              "end": 313
-            },
-            {
-              "start": 314,
-              "end": 314
-            },
-            {
-              "start": 451,
-              "end": 451
-            }
-          ],
-          "tests/auth_tests/test_forms.py": [
-            {
-              "start": 896,
-              "end": 896
-            }
-          ],
-          "tests/migrations/test_base.py": [
-            {
-              "start": 301,
-              "end": 301
-            },
-            {
-              "start": 308,
-              "end": 308
-            },
-            {
-              "start": 315,
-              "end": 315
-            }
-          ],
-          "tests/migrations/test_autodetector.py": [
-            {
-              "start": 2269,
-              "end": 2269
-            },
-            {
-              "start": 2591,
-              "end": 2591
-            },
-            {
-              "start": 2603,
-              "end": 2603
-            },
-            {
-              "start": 2618,
-              "end": 2618
-            },
-            {
-              "start": 2663,
-              "end": 2663
-            },
-            {
-              "start": 2779,
-              "end": 2779
-            },
-            {
-              "start": 4049,
-              "end": 4049
-            },
-            {
-              "start": 4106,
-              "end": 4106
-            },
-            {
-              "start": 4919,
-              "end": 4919
-            },
-            {
-              "start": 4933,
-              "end": 4933
-            }
-          ],
-          "tests/migrations/test_commands.py": [
-            {
-              "start": 2773,
-              "end": 2773
-            },
-            {
-              "start": 2775,
-              "end": 2775
-            },
-            {
-              "start": 2789,
-              "end": 2789
-            },
-            {
-              "start": 2791,
-              "end": 2791
-            },
-            {
-              "start": 2801,
-              "end": 2801
-            },
-            {
-              "start": 2804,
-              "end": 2804
-            },
-            {
-              "start": 2944,
-              "end": 2944
-            },
-            {
-              "start": 3021,
-              "end": 3021
-            },
-            {
-              "start": 3023,
-              "end": 3023
-            },
-            {
-              "start": 3025,
-              "end": 3025
-            },
-            {
-              "start": 3027,
-              "end": 3027
-            },
-            {
-              "start": 3031,
-              "end": 3031
-            },
-            {
-              "start": 3037,
-              "end": 3037
-            },
-            {
-              "start": 3042,
-              "end": 3042
-            },
-            {
-              "start": 3049,
-              "end": 3049
-            },
-            {
-              "start": 3051,
-              "end": 3051
-            },
-            {
-              "start": 3057,
-              "end": 3057
-            },
-            {
-              "start": 3075,
-              "end": 3075
-            },
-            {
-              "start": 3081,
-              "end": 3081
-            },
-            {
-              "start": 3106,
-              "end": 3106
-            },
-            {
-              "start": 3108,
-              "end": 3108
-            },
-            {
-              "start": 3109,
-              "end": 3109
-            },
-            {
-              "start": 3111,
-              "end": 3111
-            },
-            {
-              "start": 3112,
-              "end": 3112
-            },
-            {
-              "start": 3127,
-              "end": 3127
-            },
-            {
-              "start": 3129,
-              "end": 3129
-            },
-            {
-              "start": 3145,
-              "end": 3145
-            },
-            {
-              "start": 3146,
-              "end": 3146
-            },
-            {
-              "start": 3147,
-              "end": 3147
-            },
-            {
-              "start": 3149,
-              "end": 3149
-            },
-            {
-              "start": 3155,
-              "end": 3155
-            },
-            {
-              "start": 3158,
-              "end": 3158
-            },
-            {
-              "start": 3161,
-              "end": 3161
-            },
-            {
-              "start": 3169,
-              "end": 3169
-            },
-            {
-              "start": 3180,
-              "end": 3180
-            },
-            {
-              "start": 3186,
-              "end": 3186
-            }
-          ],
-          "tests/migrations/test_operations.py": [
-            {
-              "start": 3094,
-              "end": 3094
-            },
-            {
-              "start": 3098,
-              "end": 3098
-            },
-            {
-              "start": 3102,
-              "end": 3102
-            },
-            {
-              "start": 3104,
-              "end": 3104
-            },
-            {
-              "start": 3129,
-              "end": 3129
-            },
-            {
-              "start": 3135,
-              "end": 3135
-            },
-            {
-              "start": 3140,
-              "end": 3140
-            },
-            {
-              "start": 3163,
-              "end": 3163
-            },
-            {
-              "start": 3169,
-              "end": 3169
-            },
-            {
-              "start": 3309,
-              "end": 3309
-            },
-            {
-              "start": 3317,
-              "end": 3317
-            },
-            {
-              "start": 3321,
-              "end": 3321
-            },
-            {
-              "start": 3363,
-              "end": 3363
-            },
-            {
-              "start": 3386,
-              "end": 3386
-            },
-            {
-              "start": 3403,
-              "end": 3403
-            },
-            {
-              "start": 3425,
-              "end": 3425
-            },
-            {
-              "start": 5519,
-              "end": 5519
-            },
-            {
-              "start": 5521,
-              "end": 5521
-            },
-            {
-              "start": 5534,
-              "end": 5534
             }
           ],
           "tests/migrations/test_optimizer.py": [
             {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 49,
-              "end": 49
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 269,
-              "end": 269
-            },
-            {
-              "start": 271,
-              "end": 271
-            },
-            {
-              "start": 310,
-              "end": 310
-            },
-            {
-              "start": 378,
-              "end": 378
-            },
-            {
-              "start": 462,
-              "end": 462
-            },
-            {
-              "start": 492,
-              "end": 492
-            },
-            {
-              "start": 620,
-              "end": 620
-            },
-            {
-              "start": 653,
-              "end": 653
-            },
-            {
-              "start": 682,
-              "end": 682
-            },
-            {
-              "start": 711,
-              "end": 711
-            },
-            {
-              "start": 725,
-              "end": 725
-            },
-            {
-              "start": 759,
-              "end": 759
-            },
-            {
               "start": 789,
               "end": 894
-            },
-            {
-              "start": 791,
-              "end": 791
-            },
-            {
-              "start": 834,
-              "end": 834
-            },
-            {
-              "start": 1074,
-              "end": 1074
-            },
-            {
-              "start": 1101,
-              "end": 1101
             }
           ],
-          "tests/aggregation/tests.py": [
+          "django/db/migrations/optimizer.py": [
             {
-              "start": 1729,
-              "end": 1729
-            }
-          ],
-          "django/db/migrations/operations/fields.py": [
-            {
-              "start": 69,
-              "end": 69
-            },
-            {
-              "start": 129,
-              "end": 129
-            },
-            {
-              "start": 187,
-              "end": 187
-            },
-            {
-              "start": 249,
-              "end": 249
-            },
-            {
-              "start": 339,
-              "end": 339
-            }
-          ],
-          "django/db/models/constraints.py": [
-            {
-              "start": 88,
-              "end": 88
-            }
-          ],
-          "django/db/models/indexes.py": [
-            {
-              "start": 153,
-              "end": 153
-            }
-          ],
-          "django/db/models/query_utils.py": [
-            {
-              "start": 421,
-              "end": 421
-            }
-          ],
-          "django/db/models/sql/where.py": [
-            {
-              "start": 209,
-              "end": 209
-            }
-          ],
-          "django/db/models/sql/subqueries.py": [
-            {
-              "start": 66,
+              "start": 1,
               "end": 66
-            }
-          ],
-          "django/db/models/fields/__init__.py": [
-            {
-              "start": 610,
-              "end": 610
-            }
-          ],
-          "django/contrib/contenttypes/fields.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/dispatch/dispatcher.py": [
-            {
-              "start": 6,
-              "end": 6
-            }
-          ],
-          "django/utils/deprecation.py": [
-            {
-              "start": 4,
-              "end": 4
-            }
-          ],
-          "django/contrib/auth/middleware.py": [
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "django/contrib/staticfiles/handlers.py": [
-            {
-              "start": 4,
-              "end": 4
-            }
-          ],
-          "django/views/generic/base.py": [
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "django/db/models/base.py": [
-            {
-              "start": 7,
-              "end": 7
-            }
-          ],
-          "django/db/models/query.py": [
-            {
-              "start": 10,
-              "end": 10
-            }
-          ],
-          "django/db/models/fields/related_descriptors.py": [
-            {
-              "start": 66,
-              "end": 66
-            }
-          ],
-          "django/views/decorators/cache.py": [
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "django/test/testcases.py": [
-            {
-              "start": 27,
-              "end": 27
-            }
-          ],
-          "django/core/cache/backends/base.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/core/handlers/base.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/core/handlers/asgi.py": [
-            {
-              "start": 8,
-              "end": 8
-            }
-          ],
-          "django/core/handlers/exception.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/test/utils.py": [
-            {
-              "start": 16,
-              "end": 16
-            }
-          ],
-          "django/test/client.py": [
-            {
-              "start": 12,
-              "end": 12
             }
           ]
         },
@@ -2787,141 +573,276 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.25806451612903225,
-              "span": 0.04977973568281938,
-              "line": 0.03910614525139665
+              "file": 0.2,
+              "symbol": 0.06451612903225806,
+              "span": 0.21997063142437592,
+              "line": 0.16759776536312848
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.25806451612903225,
-              "span": 0.04977973568281938,
-              "line": 0.03910614525139665
+              "file": 0.4,
+              "symbol": 0.06451612903225806,
+              "span": 0.21997063142437592,
+              "line": 0.16759776536312848
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.25806451612903225,
-              "span": 0.04977973568281938,
-              "line": 0.03910614525139665
+              "file": 0.4,
+              "symbol": 0.6774193548387096,
+              "span": 0.7571218795888399,
+              "line": 0.7486033519553073
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.25806451612903225,
-              "span": 0.04977973568281938,
-              "line": 0.03910614525139665
+              "file": 0.4,
+              "symbol": 0.6774193548387096,
+              "span": 0.7571218795888399,
+              "line": 0.7486033519553073
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.25806451612903225,
-              "span": 0.04977973568281938,
-              "line": 0.03910614525139665
+              "file": 0.6,
+              "symbol": 0.7419354838709677,
+              "span": 0.8160058737151248,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.25806451612903225,
-              "span": 0.04977973568281938,
-              "line": 0.03910614525139665
+              "file": 0.6,
+              "symbol": 0.7741935483870968,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.3225806451612903,
-              "span": 0.05624082232011748,
-              "line": 0.0446927374301676
+              "file": 0.6,
+              "symbol": 0.7741935483870968,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 8,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.3225806451612903,
-              "span": 0.05624082232011748,
-              "line": 0.0446927374301676
+              "file": 0.6,
+              "symbol": 0.7741935483870968,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 9,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.3225806451612903,
-              "span": 0.05624082232011748,
-              "line": 0.0446927374301676
+              "file": 0.6,
+              "symbol": 0.7741935483870968,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 10,
             "coverage": {
-              "file": 0.8,
-              "symbol": 0.3225806451612903,
-              "span": 0.05624082232011748,
-              "line": 0.0446927374301676
+              "file": 0.6,
+              "symbol": 0.7741935483870968,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 11,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.3548387096774194,
-              "span": 0.05624082232011748,
-              "line": 0.0446927374301676
+              "file": 0.6,
+              "symbol": 0.7741935483870968,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 12,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.3548387096774194,
-              "span": 0.05624082232011748,
-              "line": 0.0446927374301676
+              "file": 0.6,
+              "symbol": 0.7741935483870968,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 13,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.3548387096774194,
-              "span": 0.05624082232011748,
-              "line": 0.0446927374301676
+              "file": 0.8,
+              "symbol": 0.7741935483870968,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 14,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.3548387096774194,
-              "span": 0.05624082232011748,
-              "line": 0.0446927374301676
+              "file": 0.8,
+              "symbol": 0.8387096774193549,
+              "span": 0.9368575624082232,
+              "line": 0.9385474860335196
+            }
+          },
+          {
+            "step": 15,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 16,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 17,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 18,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 19,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 20,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 21,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 22,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 23,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 24,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 25,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 26,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 27,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 28,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
+            }
+          },
+          {
+            "step": 29,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9354838709677419,
+              "span": 0.9754772393538913,
+              "line": 0.9720670391061452
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.8571428571428571,
-          "symbol": 0.3041474654377881,
-          "span": 0.05347178518984687,
-          "line": 0.042298483639265756
+          "file": 0.6827586206896552,
+          "symbol": 0.8031145717463848,
+          "span": 0.8815940047597347,
+          "line": 0.8759391254093624
         },
         "redundancy": {
-          "file": 0.2195121951219512,
-          "symbol": 0.1751152073732719,
-          "span": 0.14819556205803464,
-          "line": 0.1586206896551724
+          "file": 0.7241379310344828,
+          "symbol": 0.35820895522388063,
+          "span": 0.28677556878139376,
+          "line": 0.25857975393913235
         }
       },
       "fixOverlap": {
@@ -3115,12 +1036,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/django/db/migrations/operations/models.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/django/db/migrations/operations/models.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/django/db/migrations/operations/models.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/django/db/migrations/operations/models.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3132,7 +1071,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/migrations/test_optimizer.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/migrations/test_optimizer.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3332,7 +1280,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/django/db/migrations/operations/models.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/django/db/migrations/operations/models.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3459,9 +1416,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-04-29T23:43:40Z",
       "completedAt": "2026-04-29T23:52:43Z",
       "durationMs": 543065,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 2426323,
@@ -3470,67 +1442,89 @@
         "total_tokens": 2451666,
         "cache_read_input_tokens": 2346240
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 55,
+        "readToolCalls": 0,
+        "editToolCalls": 4
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/django/db/migrations/operations/models.py b/django/db/migrations/operations/models.py\nindex 967a91fdc8..703ad4e3e7 100644\n--- a/django/db/migrations/operations/models.py\n+++ b/django/db/migrations/operations/models.py\n@@ -215,6 +215,45 @@ class CreateModel(ModelOperation):\n                     managers=self.managers,\n                 ),\n             ]\n+        elif (\n+            isinstance(operation, AddIndex)\n+            and self.name_lower == operation.model_name_lower\n+        ):\n+            options = self.options.copy()\n+            indexes = [*options.get(\"indexes\", []), operation.index]\n+            return [\n+                CreateModel(\n+                    self.name,\n+                    fields=self.fields,\n+                    options={**options, \"indexes\": indexes},\n+                    bases=self.bases,\n+                    managers=self.managers,\n+                ),\n+            ]\n+        elif (\n+            isinstance(operation, RemoveIndex)\n+            and self.name_lower == operation.model_name_lower\n+            and \"indexes\" in self.options\n+        ):\n+            options = self.options.copy()\n+            indexes = [\n+                index for index in options[\"indexes\"] if index.name != operation.name\n+            ]\n+            if len(indexes) == len(options[\"indexes\"]):\n+                return super().reduce(operation, app_label)\n+            if indexes:\n+                options[\"indexes\"] = indexes\n+            else:\n+                del options[\"indexes\"]\n+            return [\n+                CreateModel(\n+                    self.name,\n+                    fields=self.fields,\n+                    options=options,\n+                    bases=self.bases,\n+                    managers=self.managers,\n+                ),\n+            ]\n         elif (\n             isinstance(operation, FieldOperation)\n             and self.name_lower == operation.model_name_lower\n@@ -807,6 +846,14 @@ class IndexOperation(Operation):\n     def model_name_lower(self):\n         return self.model_name.lower()\n \n+    def references_model(self, name, app_label):\n+        return name.lower() == self.model_name_lower\n+\n+    def reduce(self, operation, app_label):\n+        return super().reduce(operation, app_label) or not operation.references_model(\n+            self.model_name, app_label\n+        )\n+\n \n class AddIndex(IndexOperation):\n     \"\"\"Add an index on a model.\"\"\"\n@@ -861,6 +908,15 @@ class AddIndex(IndexOperation):\n     def migration_name_fragment(self):\n         return \"%s_%s\" % (self.model_name_lower, self.index.name.lower())\n \n+    def reduce(self, operation, app_label):\n+        if (\n+            isinstance(operation, RemoveIndex)\n+            and self.model_name_lower == operation.model_name_lower\n+            and self.index.name == operation.name\n+        ):\n+            return []\n+        return super().reduce(operation, app_label)\n+\n \n class RemoveIndex(IndexOperation):\n     \"\"\"Remove an index from a model.\"\"\"\n@@ -904,6 +960,14 @@ class RemoveIndex(IndexOperation):\n     def migration_name_fragment(self):\n         return \"remove_%s_%s\" % (self.model_name_lower, self.name.lower())\n \n+    def reduce(self, operation, app_label):\n+        if (\n+            isinstance(operation, DeleteModel)\n+            and operation.name_lower == self.model_name_lower\n+        ):\n+            return [operation]\n+        return super().reduce(operation, app_label)\n+\n \n class RenameIndex(IndexOperation):\n     \"\"\"Rename an index.\"\"\"\ndiff --git a/tests/migrations/test_optimizer.py b/tests/migrations/test_optimizer.py\nindex 8cd4c67fbd..00b6537221 100644\n--- a/tests/migrations/test_optimizer.py\n+++ b/tests/migrations/test_optimizer.py\n@@ -487,6 +487,87 @@ class OptimizerTests(SimpleTestCase):\n             ],\n         )\n \n+    def test_create_model_add_index(self):\n+        index = models.Index(fields=[\"name\"], name=\"book_name_idx\")\n+        self.assertOptimizesTo(\n+            [\n+                migrations.CreateModel(\n+                    \"Book\", [(\"name\", models.CharField(max_length=255))]\n+                ),\n+                migrations.AddIndex(\"Book\", index),\n+            ],\n+            [\n+                migrations.CreateModel(\n+                    \"Book\",\n+                    [(\"name\", models.CharField(max_length=255))],\n+                    options={\"indexes\": [index]},\n+                ),\n+            ],\n+        )\n+\n+    def test_create_model_remove_index(self):\n+        title_index = models.Index(fields=[\"title\"], name=\"book_title_idx\")\n+        author_index = models.Index(fields=[\"author\"], name=\"book_author_idx\")\n+        self.assertOptimizesTo(\n+            [\n+                migrations.CreateModel(\n+                    \"Book\",\n+                    [(\"title\", models.CharField(max_length=255))],\n+                    options={\"indexes\": [title_index, author_index]},\n+                ),\n+                migrations.RemoveIndex(\"Book\", \"book_title_idx\"),\n+            ],\n+            [\n+                migrations.CreateModel(\n+                    \"Book\",\n+                    [(\"title\", models.CharField(max_length=255))],\n+                    options={\"indexes\": [author_index]},\n+                ),\n+            ],\n+        )\n+\n+    def test_add_remove_index(self):\n+        self.assertOptimizesTo(\n+            [\n+                migrations.AddIndex(\n+                    \"Book\",\n+                    models.Index(fields=[\"title\"], name=\"book_title_idx\"),\n+                ),\n+                migrations.RemoveIndex(\"Book\", \"book_title_idx\"),\n+            ],\n+            [],\n+        )\n+\n+    def test_optimize_through_add_remove_index(self):\n+        self.assertOptimizesTo(\n+            [\n+                migrations.AddIndex(\n+                    \"Book\",\n+                    models.Index(fields=[\"title\"], name=\"book_title_idx\"),\n+                ),\n+                migrations.CreateModel(\n+                    \"Author\", [(\"name\", models.CharField(max_length=255))]\n+                ),\n+                migrations.RemoveIndex(\"Book\", \"book_title_idx\"),\n+            ],\n+            [\n+                migrations.CreateModel(\n+                    \"Author\", [(\"name\", models.CharField(max_length=255))]\n+                ),\n+            ],\n+        )\n+\n+    def test_remove_index_delete_model(self):\n+        self.assertOptimizesTo(\n+            [\n+                migrations.RemoveIndex(\"Book\", \"book_title_idx\"),\n+                migrations.DeleteModel(\"Book\"),\n+            ],\n+            [\n+                migrations.DeleteModel(\"Book\"),\n+            ],\n+        )\n+\n     def test_create_model_reordering(self):\n         \"\"\"\n         AddField optimizes into CreateModel if it's a FK to a model that's\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Implemented the migration optimizer changes for index operations.\n\n`CreateModel.reduce()` now absorbs `AddIndex` and eligible `RemoveIndex` operations into the model definition, `AddIndex.reduce()` cancels matching `RemoveIndex`, `RemoveIndex.reduce()` collapses into `DeleteModel`, and `IndexOperation.reduce()` can optimize through operations on unrelated models. I added regression coverage for all of those cases in `tests/migrations/test_optimizer.py`.\n\nVerification:\n- Passed a focused local optimizer harness covering `CreateModel + AddIndex`, `CreateModel + RemoveIndex`, `AddIndex + RemoveIndex`, non-adjacent `AddIndex ... RemoveIndex`, and `RemoveIndex + DeleteModel`.\n- Passed `python3 -m compileall django/db/migrations/operations/models.py tests/migrations/test_optimizer.py`.\n\nVerification limitations:\n- Full Django test execution was not available in this benchmark environment. `python3 tests/runtests.py migrations.test_optimizer --verbosity 2` was blocked by missing installed dependencies (`asgiref`), and `pytest` was not installed.",
         "notes": "Used superpowers guidance in a benchmark-appropriate way: brief planning, test-first regression additions, then verification discipline. Because the environment lacked installed Django test dependencies, I did not install packages from the network; instead I used the strongest offline-safe checks available locally: a focused stubbed-import harness that exercised the optimizer behavior directly, plus bytecode compilation of the edited files.",
         "retrievedContextFiles": [
-          "<worktree>/django/db/migrations/operations/models.py",
-          "<worktree>/tests/migrations/test_optimizer.py"
+          "django/db/migrations/operations/models.py",
+          "tests/migrations/test_optimizer.py"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/django/db/migrations/operations/models.py",
+            "file": "django/db/migrations/operations/models.py",
             "start": 202,
             "end": 256
           },
           {
-            "file": "<worktree>/django/db/migrations/operations/models.py",
+            "file": "django/db/migrations/operations/models.py",
             "start": 842,
             "end": 969
           },
           {
-            "file": "<worktree>/tests/migrations/test_optimizer.py",
+            "file": "tests/migrations/test_optimizer.py",
             "start": 490,
             "end": 569
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/django/db/migrations/operations/models.py",
+            "file": "django/db/migrations/operations/models.py",
             "name": "AddIndex.reduce"
           },
           {
-            "file": "<worktree>/django/db/migrations/operations/models.py",
+            "file": "django/db/migrations/operations/models.py",
             "name": "CreateModel.reduce"
           },
           {
-            "file": "<worktree>/django/db/migrations/operations/models.py",
+            "file": "django/db/migrations/operations/models.py",
             "name": "IndexOperation.reduce"
           },
           {
-            "file": "<worktree>/django/db/migrations/operations/models.py",
+            "file": "django/db/migrations/operations/models.py",
             "name": "RemoveIndex.reduce"
           },
           {
-            "file": "<worktree>/tests/migrations/test_optimizer.py",
+            "file": "tests/migrations/test_optimizer.py",
             "name": "OptimizerTests.test_add_remove_index"
           },
           {
-            "file": "<worktree>/tests/migrations/test_optimizer.py",
+            "file": "tests/migrations/test_optimizer.py",
             "name": "OptimizerTests.test_create_model_add_index"
           },
           {
-            "file": "<worktree>/tests/migrations/test_optimizer.py",
+            "file": "tests/migrations/test_optimizer.py",
             "name": "OptimizerTests.test_create_model_remove_index"
           },
           {
-            "file": "<worktree>/tests/migrations/test_optimizer.py",
+            "file": "tests/migrations/test_optimizer.py",
             "name": "OptimizerTests.test_optimize_through_add_remove_index"
           },
           {
-            "file": "<worktree>/tests/migrations/test_optimizer.py",
+            "file": "tests/migrations/test_optimizer.py",
             "name": "OptimizerTests.test_remove_index_delete_model"
           }
         ]
@@ -3541,178 +1535,67 @@
             "files": [
               "django/db/migrations/optimizer.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/db/migrations/optimizer.py": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "django/db/migrations/operations/models.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/db/migrations/operations/models.py": [
+                {
+                  "start": 1,
+                  "end": 360
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "tests/migrations/test_autodetector.py",
-              "tests/migrations/test_base.py",
-              "tests/migrations/test_operations.py",
-              "tests/utils_tests/test_lazyobject.py"
+              "django/db/migrations/operations/models.py"
             ],
             "spans": {
-              "tests/utils_tests/test_lazyobject.py": [
+              "django/db/migrations/operations/models.py": [
                 {
-                  "start": 471,
-                  "end": 471
+                  "start": 780,
+                  "end": 930
                 }
-              ],
-              "tests/migrations/test_base.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/migrations/test_optimizer.py"
+            ],
+            "spans": {
+              "tests/migrations/test_optimizer.py": [
                 {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 308,
-                  "end": 308
-                },
-                {
-                  "start": 315,
-                  "end": 315
+                  "start": 1,
+                  "end": 260
                 }
-              ],
-              "tests/migrations/test_autodetector.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/migrations/test_optimizer.py"
+            ],
+            "spans": {
+              "tests/migrations/test_optimizer.py": [
                 {
-                  "start": 2269,
-                  "end": 2269
-                },
-                {
-                  "start": 2591,
-                  "end": 2591
-                },
-                {
-                  "start": 2603,
-                  "end": 2603
-                },
-                {
-                  "start": 2618,
-                  "end": 2618
-                },
-                {
-                  "start": 2663,
-                  "end": 2663
-                },
-                {
-                  "start": 2779,
-                  "end": 2779
-                },
-                {
-                  "start": 4049,
-                  "end": 4049
-                },
-                {
-                  "start": 4106,
-                  "end": 4106
-                },
-                {
-                  "start": 4919,
-                  "end": 4919
-                },
-                {
-                  "start": 4933,
-                  "end": 4933
-                }
-              ],
-              "tests/migrations/test_operations.py": [
-                {
-                  "start": 3094,
-                  "end": 3094
-                },
-                {
-                  "start": 3098,
-                  "end": 3098
-                },
-                {
-                  "start": 3102,
-                  "end": 3102
-                },
-                {
-                  "start": 3104,
-                  "end": 3104
-                },
-                {
-                  "start": 3129,
-                  "end": 3129
-                },
-                {
-                  "start": 3135,
-                  "end": 3135
-                },
-                {
-                  "start": 3140,
-                  "end": 3140
-                },
-                {
-                  "start": 3163,
-                  "end": 3163
-                },
-                {
-                  "start": 3169,
-                  "end": 3169
-                },
-                {
-                  "start": 3309,
-                  "end": 3309
-                },
-                {
-                  "start": 3317,
-                  "end": 3317
-                },
-                {
-                  "start": 3321,
-                  "end": 3321
-                },
-                {
-                  "start": 3363,
-                  "end": 3363
-                },
-                {
-                  "start": 3386,
-                  "end": 3386
-                },
-                {
-                  "start": 3403,
-                  "end": 3403
-                },
-                {
-                  "start": 3425,
-                  "end": 3425
-                },
-                {
-                  "start": 4634,
-                  "end": 4634
-                },
-                {
-                  "start": 4636,
-                  "end": 4636
-                },
-                {
-                  "start": 4877,
-                  "end": 4877
-                },
-                {
-                  "start": 4879,
-                  "end": 4879
-                },
-                {
-                  "start": 5519,
-                  "end": 5519
-                },
-                {
-                  "start": 5521,
-                  "end": 5521
-                },
-                {
-                  "start": 5534,
-                  "end": 5534
+                  "start": 260,
+                  "end": 520
                 }
               ]
             },
@@ -3727,181 +1610,13 @@
           },
           {
             "files": [
-              "tests/migrations/test_autodetector.py",
-              "tests/migrations/test_base.py",
-              "tests/migrations/test_commands.py",
-              "tests/migrations/test_operations.py",
               "tests/migrations/test_optimizer.py"
             ],
             "spans": {
-              "tests/migrations/test_operations.py": [
-                {
-                  "start": 3094,
-                  "end": 3094
-                },
-                {
-                  "start": 3098,
-                  "end": 3098
-                },
-                {
-                  "start": 3102,
-                  "end": 3102
-                },
-                {
-                  "start": 3104,
-                  "end": 3104
-                },
-                {
-                  "start": 3129,
-                  "end": 3129
-                },
-                {
-                  "start": 3135,
-                  "end": 3135
-                },
-                {
-                  "start": 3140,
-                  "end": 3140
-                },
-                {
-                  "start": 3163,
-                  "end": 3163
-                },
-                {
-                  "start": 3169,
-                  "end": 3169
-                },
-                {
-                  "start": 3309,
-                  "end": 3309
-                },
-                {
-                  "start": 3317,
-                  "end": 3317
-                },
-                {
-                  "start": 3321,
-                  "end": 3321
-                },
-                {
-                  "start": 3363,
-                  "end": 3363
-                },
-                {
-                  "start": 3386,
-                  "end": 3386
-                },
-                {
-                  "start": 3403,
-                  "end": 3403
-                },
-                {
-                  "start": 3425,
-                  "end": 3425
-                },
-                {
-                  "start": 5519,
-                  "end": 5519
-                },
-                {
-                  "start": 5521,
-                  "end": 5521
-                },
-                {
-                  "start": 5534,
-                  "end": 5534
-                }
-              ],
-              "tests/migrations/test_base.py": [
-                {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 308,
-                  "end": 308
-                },
-                {
-                  "start": 315,
-                  "end": 315
-                }
-              ],
-              "tests/migrations/test_commands.py": [
-                {
-                  "start": 2789,
-                  "end": 2789
-                }
-              ],
-              "tests/migrations/test_autodetector.py": [
-                {
-                  "start": 2269,
-                  "end": 2269
-                },
-                {
-                  "start": 2591,
-                  "end": 2591
-                },
-                {
-                  "start": 2603,
-                  "end": 2603
-                },
-                {
-                  "start": 2618,
-                  "end": 2618
-                },
-                {
-                  "start": 2663,
-                  "end": 2663
-                },
-                {
-                  "start": 2779,
-                  "end": 2779
-                },
-                {
-                  "start": 4049,
-                  "end": 4049
-                },
-                {
-                  "start": 4106,
-                  "end": 4106
-                },
-                {
-                  "start": 4919,
-                  "end": 4919
-                },
-                {
-                  "start": 4933,
-                  "end": 4933
-                }
-              ],
               "tests/migrations/test_optimizer.py": [
                 {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 49,
-                  "end": 49
+                  "start": 1000,
+                  "end": 1185
                 }
               ]
             },
@@ -3911,185 +1626,53 @@
             "files": [
               "django/db/migrations/operations/base.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/db/migrations/operations/base.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "django/db/migrations/operations/models.py",
-              "tests/migrations/test_operations.py"
+              "django/db/migrations/operations/models.py"
             ],
             "spans": {
               "django/db/migrations/operations/models.py": [
                 {
-                  "start": 811,
-                  "end": 811
-                },
-                {
-                  "start": 865,
-                  "end": 865
-                },
-                {
-                  "start": 1057,
-                  "end": 1057
-                },
-                {
-                  "start": 1098,
-                  "end": 1098
+                  "start": 930,
+                  "end": 1085
                 }
-              ],
-              "tests/migrations/test_operations.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/migrations/test_optimizer.py"
+            ],
+            "spans": {
+              "tests/migrations/test_optimizer.py": [
                 {
-                  "start": 3102,
-                  "end": 3102
-                },
+                  "start": 1185,
+                  "end": 1325
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/models.py"
+            ],
+            "spans": {
+              "django/db/migrations/operations/models.py": [
                 {
-                  "start": 3104,
-                  "end": 3104
-                },
-                {
-                  "start": 3140,
-                  "end": 3140
-                },
-                {
-                  "start": 3169,
-                  "end": 3169
-                },
-                {
-                  "start": 3309,
-                  "end": 3309
-                },
-                {
-                  "start": 3317,
-                  "end": 3317
-                },
-                {
-                  "start": 3321,
-                  "end": 3321
-                },
-                {
-                  "start": 3363,
-                  "end": 3363
-                },
-                {
-                  "start": 3403,
-                  "end": 3403
-                },
-                {
-                  "start": 3564,
-                  "end": 3564
-                },
-                {
-                  "start": 3603,
-                  "end": 3603
-                },
-                {
-                  "start": 3634,
-                  "end": 3634
-                },
-                {
-                  "start": 3659,
-                  "end": 3659
-                },
-                {
-                  "start": 3671,
-                  "end": 3671
-                },
-                {
-                  "start": 3687,
-                  "end": 3687
-                },
-                {
-                  "start": 3704,
-                  "end": 3704
-                },
-                {
-                  "start": 3740,
-                  "end": 3740
-                },
-                {
-                  "start": 3764,
-                  "end": 3764
-                },
-                {
-                  "start": 3798,
-                  "end": 3798
-                },
-                {
-                  "start": 3827,
-                  "end": 3827
-                },
-                {
-                  "start": 3841,
-                  "end": 3841
-                },
-                {
-                  "start": 3883,
-                  "end": 3883
-                },
-                {
-                  "start": 3901,
-                  "end": 3901
-                },
-                {
-                  "start": 3945,
-                  "end": 3945
-                },
-                {
-                  "start": 3963,
-                  "end": 3963
-                },
-                {
-                  "start": 4007,
-                  "end": 4007
-                },
-                {
-                  "start": 4024,
-                  "end": 4024
-                },
-                {
-                  "start": 4069,
-                  "end": 4069
-                },
-                {
-                  "start": 4087,
-                  "end": 4087
-                },
-                {
-                  "start": 4118,
-                  "end": 4118
-                },
-                {
-                  "start": 4135,
-                  "end": 4135
-                },
-                {
-                  "start": 4167,
-                  "end": 4167
-                },
-                {
-                  "start": 4207,
-                  "end": 4207
-                },
-                {
-                  "start": 4242,
-                  "end": 4242
-                },
-                {
-                  "start": 4262,
-                  "end": 4262
-                },
-                {
-                  "start": 4297,
-                  "end": 4297
-                },
-                {
-                  "start": 5521,
-                  "end": 5521
-                },
-                {
-                  "start": 5534,
-                  "end": 5534
+                  "start": 1085,
+                  "end": 1165
                 }
               ]
             },
@@ -4099,7 +1682,28 @@
             "files": [
               "django/db/migrations/operations/fields.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/db/migrations/operations/fields.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/state.py"
+            ],
+            "spans": {
+              "django/db/migrations/state.py": [
+                {
+                  "start": 900,
+                  "end": 950
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -4111,32 +1715,125 @@
           },
           {
             "files": [
-              "django/db/migrations/operations/fields.py",
-              "django/db/migrations/operations/models.py"
+              "django/db/migrations/state.py"
+            ],
+            "spans": {
+              "django/db/migrations/state.py": [
+                {
+                  "start": 200,
+                  "end": 235
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/fields.py"
             ],
             "spans": {
               "django/db/migrations/operations/fields.py": [
                 {
-                  "start": 141,
-                  "end": 141
-                },
-                {
-                  "start": 191,
-                  "end": 191
+                  "start": 120,
+                  "end": 220
                 }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/models.py"
+            ],
+            "spans": {
               "django/db/migrations/operations/models.py": [
                 {
-                  "start": 8,
-                  "end": 8
-                },
+                  "start": 170,
+                  "end": 290
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/models.py"
+            ],
+            "spans": {
+              "django/db/migrations/operations/models.py": [
                 {
-                  "start": 138,
-                  "end": 138
-                },
+                  "start": 800,
+                  "end": 930
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/models.py"
+            ],
+            "spans": {
+              "django/db/migrations/operations/models.py": [
                 {
-                  "start": 245,
-                  "end": 245
+                  "start": 930,
+                  "end": 1015
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/migrations/test_optimizer.py"
+            ],
+            "spans": {
+              "tests/migrations/test_optimizer.py": [
+                {
+                  "start": 480,
+                  "end": 560
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/models.py"
+            ],
+            "spans": {
+              "django/db/migrations/operations/models.py": [
+                {
+                  "start": 840,
+                  "end": 980
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/migrations/operations/models.py"
+            ],
+            "spans": {
+              "django/db/migrations/operations/models.py": [
+                {
+                  "start": 200,
+                  "end": 280
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/migrations/test_optimizer.py"
+            ],
+            "spans": {
+              "tests/migrations/test_optimizer.py": [
+                {
+                  "start": 490,
+                  "end": 580
                 }
               ]
             },
@@ -4144,362 +1841,11 @@
           }
         ],
         "predFiles": [
-          "<worktree>/django/db/migrations/operations/models.py",
-          "<worktree>/tests/migrations/test_optimizer.py",
-          "django/db/migrations/operations/base.py",
-          "django/db/migrations/operations/fields.py",
           "django/db/migrations/operations/models.py",
-          "django/db/migrations/optimizer.py",
-          "django/db/migrations/state.py",
-          "tests/migrations/test_autodetector.py",
-          "tests/migrations/test_base.py",
-          "tests/migrations/test_commands.py",
-          "tests/migrations/test_operations.py",
-          "tests/migrations/test_optimizer.py",
-          "tests/utils_tests/test_lazyobject.py"
+          "tests/migrations/test_optimizer.py"
         ],
         "predSpans": {
-          "tests/utils_tests/test_lazyobject.py": [
-            {
-              "start": 471,
-              "end": 471
-            }
-          ],
-          "tests/migrations/test_base.py": [
-            {
-              "start": 301,
-              "end": 301
-            },
-            {
-              "start": 308,
-              "end": 308
-            },
-            {
-              "start": 315,
-              "end": 315
-            }
-          ],
-          "tests/migrations/test_autodetector.py": [
-            {
-              "start": 2269,
-              "end": 2269
-            },
-            {
-              "start": 2591,
-              "end": 2591
-            },
-            {
-              "start": 2603,
-              "end": 2603
-            },
-            {
-              "start": 2618,
-              "end": 2618
-            },
-            {
-              "start": 2663,
-              "end": 2663
-            },
-            {
-              "start": 2779,
-              "end": 2779
-            },
-            {
-              "start": 4049,
-              "end": 4049
-            },
-            {
-              "start": 4106,
-              "end": 4106
-            },
-            {
-              "start": 4919,
-              "end": 4919
-            },
-            {
-              "start": 4933,
-              "end": 4933
-            }
-          ],
-          "tests/migrations/test_operations.py": [
-            {
-              "start": 3094,
-              "end": 3094
-            },
-            {
-              "start": 3098,
-              "end": 3098
-            },
-            {
-              "start": 3102,
-              "end": 3102
-            },
-            {
-              "start": 3104,
-              "end": 3104
-            },
-            {
-              "start": 3129,
-              "end": 3129
-            },
-            {
-              "start": 3135,
-              "end": 3135
-            },
-            {
-              "start": 3140,
-              "end": 3140
-            },
-            {
-              "start": 3163,
-              "end": 3163
-            },
-            {
-              "start": 3169,
-              "end": 3169
-            },
-            {
-              "start": 3309,
-              "end": 3309
-            },
-            {
-              "start": 3317,
-              "end": 3317
-            },
-            {
-              "start": 3321,
-              "end": 3321
-            },
-            {
-              "start": 3363,
-              "end": 3363
-            },
-            {
-              "start": 3386,
-              "end": 3386
-            },
-            {
-              "start": 3403,
-              "end": 3403
-            },
-            {
-              "start": 3425,
-              "end": 3425
-            },
-            {
-              "start": 3564,
-              "end": 3564
-            },
-            {
-              "start": 3603,
-              "end": 3603
-            },
-            {
-              "start": 3634,
-              "end": 3634
-            },
-            {
-              "start": 3659,
-              "end": 3659
-            },
-            {
-              "start": 3671,
-              "end": 3671
-            },
-            {
-              "start": 3687,
-              "end": 3687
-            },
-            {
-              "start": 3704,
-              "end": 3704
-            },
-            {
-              "start": 3740,
-              "end": 3740
-            },
-            {
-              "start": 3764,
-              "end": 3764
-            },
-            {
-              "start": 3798,
-              "end": 3798
-            },
-            {
-              "start": 3827,
-              "end": 3827
-            },
-            {
-              "start": 3841,
-              "end": 3841
-            },
-            {
-              "start": 3883,
-              "end": 3883
-            },
-            {
-              "start": 3901,
-              "end": 3901
-            },
-            {
-              "start": 3945,
-              "end": 3945
-            },
-            {
-              "start": 3963,
-              "end": 3963
-            },
-            {
-              "start": 4007,
-              "end": 4007
-            },
-            {
-              "start": 4024,
-              "end": 4024
-            },
-            {
-              "start": 4069,
-              "end": 4069
-            },
-            {
-              "start": 4087,
-              "end": 4087
-            },
-            {
-              "start": 4118,
-              "end": 4118
-            },
-            {
-              "start": 4135,
-              "end": 4135
-            },
-            {
-              "start": 4167,
-              "end": 4167
-            },
-            {
-              "start": 4207,
-              "end": 4207
-            },
-            {
-              "start": 4242,
-              "end": 4242
-            },
-            {
-              "start": 4262,
-              "end": 4262
-            },
-            {
-              "start": 4297,
-              "end": 4297
-            },
-            {
-              "start": 4634,
-              "end": 4634
-            },
-            {
-              "start": 4636,
-              "end": 4636
-            },
-            {
-              "start": 4877,
-              "end": 4877
-            },
-            {
-              "start": 4879,
-              "end": 4879
-            },
-            {
-              "start": 5519,
-              "end": 5519
-            },
-            {
-              "start": 5521,
-              "end": 5521
-            },
-            {
-              "start": 5534,
-              "end": 5534
-            }
-          ],
-          "tests/migrations/test_commands.py": [
-            {
-              "start": 2789,
-              "end": 2789
-            }
-          ],
-          "tests/migrations/test_optimizer.py": [
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 49,
-              "end": 49
-            }
-          ],
           "django/db/migrations/operations/models.py": [
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 138,
-              "end": 138
-            },
-            {
-              "start": 245,
-              "end": 245
-            },
-            {
-              "start": 811,
-              "end": 811
-            },
-            {
-              "start": 865,
-              "end": 865
-            },
-            {
-              "start": 1057,
-              "end": 1057
-            },
-            {
-              "start": 1098,
-              "end": 1098
-            }
-          ],
-          "django/db/migrations/operations/fields.py": [
-            {
-              "start": 141,
-              "end": 141
-            },
-            {
-              "start": 191,
-              "end": 191
-            }
-          ],
-          "<worktree>/django/db/migrations/operations/models.py": [
             {
               "start": 202,
               "end": 256
@@ -4509,7 +1855,7 @@
               "end": 969
             }
           ],
-          "<worktree>/tests/migrations/test_optimizer.py": [
+          "tests/migrations/test_optimizer.py": [
             {
               "start": 490,
               "end": 569
@@ -4517,13 +1863,13 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/django/db/migrations/operations/models.py": [
+          "django/db/migrations/operations/models.py": [
             "AddIndex.reduce",
             "CreateModel.reduce",
             "IndexOperation.reduce",
             "RemoveIndex.reduce"
           ],
-          "<worktree>/tests/migrations/test_optimizer.py": [
+          "tests/migrations/test_optimizer.py": [
             "OptimizerTests.test_add_remove_index",
             "OptimizerTests.test_create_model_add_index",
             "OptimizerTests.test_create_model_remove_index",
@@ -4537,150 +1883,222 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.2,
+              "symbol": 0.06451612903225806,
+              "span": 0.21997063142437592,
+              "line": 0.16759776536312848
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.06451612903225806,
+              "span": 0.21997063142437592,
+              "line": 0.16759776536312848
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.6774193548387096,
+              "span": 0.7571218795888399,
+              "line": 0.7486033519553073
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.6774193548387096,
+              "span": 0.7571218795888399,
+              "line": 0.7486033519553073
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.6774193548387096,
+              "span": 0.7571218795888399,
+              "line": 0.7486033519553073
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.2,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.6774193548387096,
+              "span": 0.7571218795888399,
+              "line": 0.7486033519553073
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 0.4,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.6774193548387096,
+              "span": 0.7571218795888399,
+              "line": 0.7486033519553073
             }
           },
           {
             "step": 8,
             "coverage": {
-              "file": 0.4,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.6,
+              "symbol": 0.7419354838709677,
+              "span": 0.8160058737151248,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 9,
             "coverage": {
-              "file": 0.4,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.6,
+              "symbol": 0.7741935483870968,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 10,
             "coverage": {
-              "file": 0.4,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.6,
+              "symbol": 0.7741935483870968,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 0.6,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.7741935483870968,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 0.6,
-              "symbol": 0.06451612903225806,
-              "span": 0.009838472834067549,
-              "line": 0.0111731843575419
+              "symbol": 0.7741935483870968,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 13,
             "coverage": {
-              "file": 0.6,
-              "symbol": 0.06451612903225806,
-              "span": 0.009838472834067549,
-              "line": 0.0111731843575419
+              "file": 0.8,
+              "symbol": 0.8064516129032258,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 14,
             "coverage": {
               "file": 0.8,
-              "symbol": 0.06451612903225806,
-              "span": 0.009838472834067549,
-              "line": 0.0111731843575419
+              "symbol": 0.8064516129032258,
+              "span": 0.9033773861967694,
+              "line": 0.9050279329608939
             }
           },
           {
             "step": 15,
             "coverage": {
               "file": 0.8,
-              "symbol": 0.06451612903225806,
-              "span": 0.009838472834067549,
-              "line": 0.0111731843575419
+              "symbol": 0.9032258064516129,
+              "span": 0.9419970631424376,
+              "line": 0.9385474860335196
+            }
+          },
+          {
+            "step": 16,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9032258064516129,
+              "span": 0.9419970631424376,
+              "line": 0.9385474860335196
+            }
+          },
+          {
+            "step": 17,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9032258064516129,
+              "span": 0.9419970631424376,
+              "line": 0.9385474860335196
+            }
+          },
+          {
+            "step": 18,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9032258064516129,
+              "span": 0.9419970631424376,
+              "line": 0.9385474860335196
+            }
+          },
+          {
+            "step": 19,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9032258064516129,
+              "span": 0.9419970631424376,
+              "line": 0.9385474860335196
+            }
+          },
+          {
+            "step": 20,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9032258064516129,
+              "span": 0.9419970631424376,
+              "line": 0.9385474860335196
+            }
+          },
+          {
+            "step": 21,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9032258064516129,
+              "span": 0.9419970631424376,
+              "line": 0.9385474860335196
+            }
+          },
+          {
+            "step": 22,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9032258064516129,
+              "span": 0.9419970631424376,
+              "line": 0.9385474860335196
+            }
+          },
+          {
+            "step": 23,
+            "coverage": {
+              "file": 0.8,
+              "symbol": 0.9032258064516129,
+              "span": 0.9419970631424376,
+              "line": 0.9385474860335196
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.3466666666666667,
-          "symbol": 0.017204301075268817,
-          "span": 0.002623592755751346,
-          "line": 0.0029795158286778397
+          "file": 0.6260869565217392,
+          "symbol": 0.7433380084151473,
+          "span": 0.8234693226074188,
+          "line": 0.8158853534126792
         },
         "redundancy": {
-          "file": 0.42105263157894735,
-          "symbol": 0.36363636363636365,
-          "span": 0.3442289434422894,
-          "line": 0.3467741935483871
+          "file": 0.7391304347826086,
+          "symbol": 0.2764227642276422,
+          "span": 0.260038300618222,
+          "line": 0.2172657252888318
         }
       },
       "fixOverlap": {
@@ -4699,35 +2117,35 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/d0689d0c1cb54559e2c3/home/.agents/skills/superpowers/writing-plans/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: writing-plans\ndescription: Use when you have a spec or requirements for a multi-step task, before touching code\n---\n\n# Writing Plans\n\n## Overview\n\nWrite comprehensive implementation plans assuming the engineer has zero context for our codebase and questionable taste. Document everything they need to know: which files to touch for each task, code, testing, docs they might need to check, how to test it. Give them the whole plan as bite-sized tasks. DRY. YAGNI. TDD. Frequent commits.\n\nAssume they are a skilled developer, but know almost nothing about our toolset or problem domain. Assume they don't know good test design very well.\n\n**Announce at start:** \"I'm using the writing-plans skill to create the implementation plan.\"\n\n**Context:** This should be run in a dedicated worktree (created by brainstorming skill).\n\n**Save plans to:** `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`\n- (User preferences for plan location override this default)\n\n## Scope Check\n\nIf the spec covers multiple independent subsystems, it should have been broken into sub-project specs during brainstorming. If it wasn't, suggest breaking this into separate plans \u2014 one per subsystem. Each plan should produce working, testable software on its own.\n\n## File Structure\n\nBefore defining tasks, map out which files will be created or modified and what each one is responsible for. This is where decomposition decisions get locked in.\n\n- Design units with clear boundaries and well-defined interfaces. Each file should have one clear responsibility.\n- You reason best about code you can hold in context at once, and your edits are more reliable when files are focused. Prefer smaller, focused files over large ones that do too much.\n- Files that change together should live together. Split by responsibility, not by technical layer.\n- In existing codebases, follow established patterns. If the codebase uses large files, don't unilaterally restructure - but if a file you're modifying has grown unwieldy, including a split in the plan is reasonable.\n\nThis structure informs the task decomposition. Each task should produce self-contained changes that make sense independently.\n\n## Bite-Sized Task Granularity\n\n**Each step is one action (2-5 minutes):**\n- \"Write the failing test\" - step\n- \"Run it to make sure it fails\" - step\n- \"Implement the minimal code to make the test pass\" - step\n- \"Run the tests and make sure they pass\" - step\n- \"Commit\" - step\n\n## Plan Document Header\n\n**Every plan MUST start with this header:**\n\n```markdown\n# [Feature Name] Implementation Plan\n\n> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.\n\n**Goal:** [One sentence describing what this builds]\n\n**Architecture:** [2-3 sentences about approach]\n\n**Tech Stack:** [Key technologies/libraries]\n\n---\n```\n\n## Task Structure\n\n````markdown\n### Task N: [Component Name]\n\n**Files:**\n- Create: `exact/path/to/file.py`\n- Modify: `exact/path/to/existing.py:123-145`\n- Test: `tests/exact/path/to/test.py`\n\n- [ ] **Step 1: Write the failing test**\n\n```python\ndef test_specific_behavior():\n    result = function(input)\n    assert result == expected\n```\n\n- [ ] **Step 2: Run test to verify it fails**\n\nRun: `pytest tests/path/test.py::test_name -v`\nExpected: FAIL with \"function not defined\"\n\n- [ ] **Step 3: Write minimal implementation**\n\n```python\ndef function(input):\n    return expected\n```\n\n- [ ] **Step 4: Run test to verify it passes**\n\nRun: `pytest tests/path/test.py::test_name -v`\nExpected: PASS\n\n- [ ] **Step 5: Commit**\n\n```bash\ngit add tests/path/test.py src/path/file.py\ngit commit -m \"feat: add specific feature\"\n```\n````\n\n## Remember\n- Exact file paths always\n- Complete code in plan (not \"add validation\")\n- Exact commands with expected output\n- Reference relevant skills with @ syntax\n- DRY, YAGNI, TDD, frequent commits\n\n## Plan Review Loop\n\nA\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/d0689d0c1cb54559e2c3/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/d0689d0c1cb54559e2c3/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/d0689d0c1cb54559e2c3/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/d0689d0c1cb54559e2c3/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
@@ -4895,7 +2313,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/migrations/test_optimizer.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/migrations/test_optimizer.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -4963,7 +2390,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/django/db/migrations/operations/models.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/django/db/migrations/operations/models.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -5024,7 +2460,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/django/db/migrations/operations/models.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/django/db/migrations/operations/models.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",
@@ -5102,7 +2547,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/migrations/test_optimizer.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/migrations/test_optimizer.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

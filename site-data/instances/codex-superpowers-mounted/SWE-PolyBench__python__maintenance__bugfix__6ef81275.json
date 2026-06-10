@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-19T08:59:21Z",
       "completedAt": "2026-05-19T09:05:14Z",
       "durationMs": 352656,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1346916,
@@ -25,6 +40,28 @@
         "total_tokens": 1363178,
         "cache_read_input_tokens": 1220992
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 42,
+        "readToolCalls": 0,
+        "editToolCalls": 5
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/transformers/models/whisper/modeling_flax_whisper.py b/src/transformers/models/whisper/modeling_flax_whisper.py\nindex b8d6f07242..91b741b457 100644\n--- a/src/transformers/models/whisper/modeling_flax_whisper.py\n+++ b/src/transformers/models/whisper/modeling_flax_whisper.py\n@@ -46,6 +46,7 @@ from ...modeling_flax_utils import (\n )\n from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings\n from .configuration_whisper import WhisperConfig\n+from .tokenization_whisper import _normalize_language\n \n \n logger = logging.get_logger(__name__)\n@@ -1412,7 +1413,8 @@ class FlaxWhisperForConditionalGeneration(FlaxWhisperPreTrainedModel):\n \n         if hasattr(generation_config, \"is_multilingual\") and generation_config.is_multilingual:\n             if hasattr(generation_config, \"language\"):\n-                forced_decoder_ids.append((1, generation_config.lang_to_id[generation_config.language]))\n+                language_token = f\"<|{_normalize_language(generation_config.language)}|>\"\n+                forced_decoder_ids.append((1, generation_config.lang_to_id[language_token]))\n             else:\n                 forced_decoder_ids.append((1, None))\n \ndiff --git a/src/transformers/models/whisper/modeling_whisper.py b/src/transformers/models/whisper/modeling_whisper.py\nindex ed845febac..b67835cd9f 100644\n--- a/src/transformers/models/whisper/modeling_whisper.py\n+++ b/src/transformers/models/whisper/modeling_whisper.py\n@@ -36,7 +36,7 @@ from ...modeling_outputs import (\n from ...modeling_utils import PreTrainedModel\n from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings\n from .configuration_whisper import WhisperConfig\n-from .tokenization_whisper import TASK_IDS, TO_LANGUAGE_CODE\n+from .tokenization_whisper import TASK_IDS, _normalize_language\n \n \n logger = logging.get_logger(__name__)\n@@ -1569,15 +1569,7 @@ class WhisperForConditionalGeneration(WhisperPreTrainedModel):\n         forced_decoder_ids = []\n         if task is not None or language is not None:\n             if hasattr(generation_config, \"language\"):\n-                if generation_config.language in generation_config.lang_to_id.keys():\n-                    language_token = generation_config.language\n-                elif generation_config.language in TO_LANGUAGE_CODE.keys():\n-                    language_token = f\"<|{TO_LANGUAGE_CODE[generation_config.language]}|>\"\n-                else:\n-                    raise ValueError(\n-                        f\"Unsupported language: {self.language}. Language should be one of:\"\n-                        f\" {list(TO_LANGUAGE_CODE.keys()) if generation_config.language in TO_LANGUAGE_CODE.keys() else list(TO_LANGUAGE_CODE.values())}.\"\n-                    )\n+                language_token = f\"<|{_normalize_language(generation_config.language)}|>\"\n                 forced_decoder_ids.append((1, generation_config.lang_to_id[language_token]))\n             else:\n                 forced_decoder_ids.append((1, None))  # automatically detect the language\ndiff --git a/src/transformers/models/whisper/tokenization_whisper.py b/src/transformers/models/whisper/tokenization_whisper.py\nindex 24eb72a0b0..3e1ca6f562 100644\n--- a/src/transformers/models/whisper/tokenization_whisper.py\n+++ b/src/transformers/models/whisper/tokenization_whisper.py\n@@ -211,6 +211,24 @@ TO_LANGUAGE_CODE = {\n TASK_IDS = [\"translate\", \"transcribe\"]\n \n \n+def _normalize_language(language: str) -> str:\n+    language = language.lower()\n+\n+    if language.startswith(\"<|\") and language.endswith(\"|>\"):\n+        language = language[2:-2]\n+\n+    if language in TO_LANGUAGE_CODE:\n+        language = TO_LANGUAGE_CODE[language]\n+    elif language not in TO_LANGUAGE_CODE.values():\n+        is_language_code = len(language) == 2\n+        raise ValueError(\n+            f\"Unsupported language: {language}. Language should be one of:\"\n+            f\" {list(TO_LANGUAGE_CODE.values()) if is_language_code else list(TO_LANGUAGE_CODE.keys())}.\"\n+        )\n+\n+    return language\n+\n+\n class WhisperTokenizer(PreTrainedTokenizer):\n     \"\"\"\n     Construct a Whisper tokenizer.\n@@ -396,17 +414,7 @@ class WhisperTokenizer(PreTrainedTokenizer):\n         langs = tuple(LANGUAGES.keys())\n \n         if self.language is not None:\n-            self.language = self.language.lower()\n-            if self.language in TO_LANGUAGE_CODE:\n-                language_id = TO_LANGUAGE_CODE[self.language]\n-            elif self.language in TO_LANGUAGE_CODE.values():\n-                language_id = self.language\n-            else:\n-                is_language_code = len(self.language) == 2\n-                raise ValueError(\n-                    f\"Unsupported language: {self.language}. Language should be one of:\"\n-                    f\" {list(TO_LANGUAGE_CODE.values()) if is_language_code else list(TO_LANGUAGE_CODE.keys())}.\"\n-                )\n+            language_id = _normalize_language(self.language)\n \n         if self.task is not None:\n             if self.task not in TASK_IDS:\ndiff --git a/src/transformers/models/whisper/tokenization_whisper_fast.py b/src/transformers/models/whisper/tokenization_whisper_fast.py\nindex fb1bf89ed6..3d2671052d 100644\n--- a/src/transformers/models/whisper/tokenization_whisper_fast.py\n+++ b/src/transformers/models/whisper/tokenization_whisper_fast.py\n@@ -24,7 +24,7 @@ from ...tokenization_utils_base import BatchEncoding\n from ...tokenization_utils_fast import PreTrainedTokenizerFast\n from ...utils import logging\n from .english_normalizer import EnglishTextNormalizer\n-from .tokenization_whisper import LANGUAGES, TASK_IDS, TO_LANGUAGE_CODE, WhisperTokenizer, _decode_asr\n+from .tokenization_whisper import LANGUAGES, TASK_IDS, WhisperTokenizer, _decode_asr, _normalize_language\n \n \n logger = logging.get_logger(__name__)\n@@ -393,17 +393,7 @@ class WhisperTokenizerFast(PreTrainedTokenizerFast):\n         langs = tuple(LANGUAGES.keys())\n \n         if self.language is not None:\n-            self.language = self.language.lower()\n-            if self.language in TO_LANGUAGE_CODE:\n-                language_id = TO_LANGUAGE_CODE[self.language]\n-            elif self.language in TO_LANGUAGE_CODE.values():\n-                language_id = self.language\n-            else:\n-                is_language_code = len(self.language) == 2\n-                raise ValueError(\n-                    f\"Unsupported language: {self.language}. Language should be one of:\"\n-                    f\" {list(TO_LANGUAGE_CODE.values()) if is_language_code else list(TO_LANGUAGE_CODE.keys())}.\"\n-                )\n+            language_id = _normalize_language(self.language)\n \n         if self.task is not None:\n             if self.task not in TASK_IDS:\ndiff --git a/tests/models/whisper/test_modeling_flax_whisper.py b/tests/models/whisper/test_modeling_flax_whisper.py\nindex 3f1e201d72..734b5c2ea4 100644\n--- a/tests/models/whisper/test_modeling_flax_whisper.py\n+++ b/tests/models/whisper/test_modeling_flax_whisper.py\n@@ -18,6 +18,7 @@ import functools\n import inspect\n import tempfile\n import unittest\n+from unittest.mock import patch\n \n import transformers\n from transformers import WhisperConfig, is_flax_available\n@@ -46,6 +47,7 @@ if is_flax_available():\n         WhisperFeatureExtractor,\n         WhisperProcessor,\n     )\n+    from transformers.generation.flax_utils import FlaxGenerationMixin\n     from transformers.modeling_flax_pytorch_utils import load_flax_weights_in_pytorch_model\n \n \n@@ -249,6 +251,34 @@ class FlaxWhisperModelTest(FlaxModelTesterMixin, unittest.TestCase):\n                 for jitted_output, output in zip(jitted_outputs, outputs):\n                     self.assertEqual(jitted_output.shape, output.shape)\n \n+    def test_generate_accepts_language_code(self):\n+        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()\n+        model = FlaxWhisperForConditionalGeneration(config, input_shape=self.init_shape)\n+        model.generation_config.is_multilingual = True\n+        model.generation_config.lang_to_id = {\"<|de|>\": 1}\n+        model.generation_config.task_to_id = {\"transcribe\": 2, \"translate\": 3}\n+        model.generation_config.no_timestamps_token_id = 4\n+\n+        with patch.object(FlaxGenerationMixin, \"generate\", return_value=np.array([[1]])) as mock_generate:\n+            model.generate(inputs_dict[\"input_features\"], language=\"de\", task=\"transcribe\")\n+\n+        generation_config = mock_generate.call_args.args[1]\n+        self.assertListEqual(generation_config.forced_decoder_ids, [(1, 1), (2, 2), (3, 4)])\n+\n+    def test_generate_accepts_language_token(self):\n+        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()\n+        model = FlaxWhisperForConditionalGeneration(config, input_shape=self.init_shape)\n+        model.generation_config.is_multilingual = True\n+        model.generation_config.lang_to_id = {\"<|de|>\": 1}\n+        model.generation_config.task_to_id = {\"transcribe\": 2, \"translate\": 3}\n+        model.generation_config.no_timestamps_token_id = 4\n+\n+        with patch.object(FlaxGenerationMixin, \"generate\", return_value=np.array([[1]])) as mock_generate:\n+            model.generate(inputs_dict[\"input_features\"], language=\"<|de|>\", task=\"transcribe\")\n+\n+        generation_config = mock_generate.call_args.args[1]\n+        self.assertListEqual(generation_config.forced_decoder_ids, [(1, 1), (2, 2), (3, 4)])\n+\n     # overwrite because of `input_features`\n     @is_pt_flax_cross_test\n     def test_save_load_bf16_to_base_pt(self):\ndiff --git a/tests/models/whisper/test_modeling_whisper.py b/tests/models/whisper/test_modeling_whisper.py\nindex dd6ad07eb4..00634236bb 100644\n--- a/tests/models/whisper/test_modeling_whisper.py\n+++ b/tests/models/whisper/test_modeling_whisper.py\n@@ -19,6 +19,7 @@ import inspect\n import os\n import tempfile\n import unittest\n+from unittest.mock import patch\n \n import numpy as np\n \n@@ -49,6 +50,7 @@ if is_torch_available():\n         WhisperProcessor,\n         set_seed,\n     )\n+    from transformers.generation.utils import GenerationMixin\n     from transformers.models.whisper.modeling_whisper import WhisperDecoder, WhisperEncoder\n \n if is_flax_available():\n@@ -414,6 +416,32 @@ class WhisperModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMi\n         model.generate(input_features)\n         model.generate(input_features, num_beams=4, do_sample=True, early_stopping=False, num_return_sequences=3)\n \n+    def test_generate_accepts_language_code(self):\n+        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()\n+        model = WhisperForConditionalGeneration(config).eval().to(torch_device)\n+        model.generation_config.lang_to_id = {\"<|de|>\": 1}\n+        model.generation_config.task_to_id = {\"transcribe\": 2, \"translate\": 3}\n+        model.generation_config.no_timestamps_token_id = 4\n+\n+        with patch.object(GenerationMixin, \"generate\", return_value=torch.ones((1, 1), dtype=torch.long)) as mock_generate:\n+            model.generate(inputs_dict[\"input_features\"], language=\"de\", task=\"transcribe\")\n+\n+        generation_config = mock_generate.call_args.args[1]\n+        self.assertListEqual(generation_config.forced_decoder_ids, [(1, 1), (2, 2), (3, 4)])\n+\n+    def test_generate_accepts_language_token(self):\n+        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()\n+        model = WhisperForConditionalGeneration(config).eval().to(torch_device)\n+        model.generation_config.lang_to_id = {\"<|de|>\": 1}\n+        model.generation_config.task_to_id = {\"transcribe\": 2, \"translate\": 3}\n+        model.generation_config.no_timestamps_token_id = 4\n+\n+        with patch.object(GenerationMixin, \"generate\", return_value=torch.ones((1, 1), dtype=torch.long)) as mock_generate:\n+            model.generate(inputs_dict[\"input_features\"], language=\"<|de|>\", task=\"transcribe\")\n+\n+        generation_config = mock_generate.call_args.args[1]\n+        self.assertListEqual(generation_config.forced_decoder_ids, [(1, 1), (2, 2), (3, 4)])\n+\n     def test_forward_signature(self):\n         config, _ = self.model_tester.prepare_config_and_inputs_for_common()\n \n",
       "finalOutput": {
         "status": "completed",
@@ -94,144 +131,13 @@
         "predSteps": [
           {
             "files": [
-              "src/transformers/models/whisper/__init__.py",
-              "src/transformers/models/whisper/configuration_whisper.py",
-              "src/transformers/models/whisper/convert_openai_to_hf.py",
-              "src/transformers/models/whisper/english_normalizer.py",
-              "src/transformers/models/whisper/feature_extraction_whisper.py",
-              "src/transformers/models/whisper/modeling_flax_whisper.py",
-              "src/transformers/models/whisper/modeling_tf_whisper.py",
-              "src/transformers/models/whisper/modeling_whisper.py",
-              "src/transformers/models/whisper/processing_whisper.py",
-              "src/transformers/models/whisper/tokenization_whisper.py",
-              "src/transformers/models/whisper/tokenization_whisper_fast.py",
-              "tests/models/whisper/__init__.py",
-              "tests/models/whisper/test_feature_extraction_whisper.py",
-              "tests/models/whisper/test_modeling_flax_whisper.py",
-              "tests/models/whisper/test_modeling_tf_whisper.py",
-              "tests/models/whisper/test_modeling_whisper.py",
-              "tests/models/whisper/test_processor_whisper.py",
-              "tests/models/whisper/test_tokenization_whisper.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "src/transformers/models/whisper/modeling_flax_whisper.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/transformers/models/whisper/modeling_whisper.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/models/whisper/test_modeling_flax_whisper.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/models/whisper/test_modeling_whisper.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/transformers/models/whisper/modeling_flax_whisper.py",
-              "src/transformers/models/whisper/modeling_whisper.py"
             ],
             "spans": {
               "src/transformers/models/whisper/modeling_flax_whisper.py": [
                 {
-                  "start": 1388,
-                  "end": 1388
-                },
-                {
-                  "start": 1400,
-                  "end": 1400
-                },
-                {
-                  "start": 1401,
-                  "end": 1401
-                },
-                {
-                  "start": 1413,
-                  "end": 1413
-                },
-                {
-                  "start": 1415,
-                  "end": 1415
-                },
-                {
-                  "start": 1420,
-                  "end": 1420
-                },
-                {
-                  "start": 1422,
-                  "end": 1422
-                },
-                {
-                  "start": 1431,
-                  "end": 1431
-                },
-                {
-                  "start": 1433,
-                  "end": 1433
-                }
-              ],
-              "src/transformers/models/whisper/modeling_whisper.py": [
-                {
-                  "start": 1466,
-                  "end": 1466
-                },
-                {
-                  "start": 1521,
-                  "end": 1521
-                },
-                {
-                  "start": 1522,
-                  "end": 1522
-                },
-                {
-                  "start": 1553,
-                  "end": 1553
-                },
-                {
-                  "start": 1556,
-                  "end": 1556
-                },
-                {
-                  "start": 1572,
-                  "end": 1572
-                },
-                {
-                  "start": 1581,
-                  "end": 1581
-                },
-                {
-                  "start": 1587,
-                  "end": 1587
-                },
-                {
-                  "start": 1593,
-                  "end": 1593
-                },
-                {
-                  "start": 1594,
-                  "end": 1594
-                },
-                {
-                  "start": 1596,
-                  "end": 1596
+                  "start": 1380,
+                  "end": 1450
                 }
               ]
             },
@@ -239,20 +145,83 @@
           },
           {
             "files": [
-              "src/transformers/models/whisper/modeling_flax_whisper.py",
               "src/transformers/models/whisper/modeling_whisper.py"
             ],
             "spans": {
-              "src/transformers/models/whisper/modeling_flax_whisper.py": [
-                {
-                  "start": 1380,
-                  "end": 1380
-                }
-              ],
               "src/transformers/models/whisper/modeling_whisper.py": [
                 {
-                  "start": 1455,
-                  "end": 1455
+                  "start": 1450,
+                  "end": 1625
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_flax_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_modeling_flax_whisper.py": [
+                {
+                  "start": 520,
+                  "end": 575
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_modeling_whisper.py": [
+                {
+                  "start": 1170,
+                  "end": 1255
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_flax_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_modeling_flax_whisper.py": [
+                {
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_modeling_whisper.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/modeling_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/modeling_whisper.py": [
+                {
+                  "start": 1,
+                  "end": 120
                 }
               ]
             },
@@ -262,7 +231,28 @@
             "files": [
               "src/transformers/models/whisper/tokenization_whisper.py"
             ],
-            "spans": {},
+            "spans": {
+              "src/transformers/models/whisper/tokenization_whisper.py": [
+                {
+                  "start": 365,
+                  "end": 430
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/tokenization_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/tokenization_whisper.py": [
+                {
+                  "start": 190,
+                  "end": 230
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -272,20 +262,8 @@
             "spans": {
               "tests/models/whisper/test_modeling_flax_whisper.py": [
                 {
-                  "start": 535,
-                  "end": 535
-                },
-                {
-                  "start": 552,
-                  "end": 552
-                },
-                {
-                  "start": 559,
-                  "end": 559
-                },
-                {
-                  "start": 570,
-                  "end": 570
+                  "start": 640,
+                  "end": 710
                 }
               ]
             },
@@ -293,28 +271,153 @@
           },
           {
             "files": [
-              "tests/models/whisper/test_modeling_flax_whisper.py",
               "tests/models/whisper/test_modeling_whisper.py"
             ],
             "spans": {
               "tests/models/whisper/test_modeling_whisper.py": [
                 {
-                  "start": 93,
-                  "end": 93
-                },
+                  "start": 1280,
+                  "end": 1360
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/modeling_flax_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/modeling_flax_whisper.py": [
+                {
+                  "start": 1,
+                  "end": 90
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_modeling_whisper.py": [
                 {
                   "start": 276,
-                  "end": 276
+                  "end": 430
                 }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_flax_whisper.py"
+            ],
+            "spans": {
               "tests/models/whisper/test_modeling_flax_whisper.py": [
                 {
-                  "start": 53,
-                  "end": 53
-                },
+                  "start": 400,
+                  "end": 500
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_flax_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_modeling_flax_whisper.py": [
                 {
-                  "start": 194,
-                  "end": 194
+                  "start": 220,
+                  "end": 320
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_modeling_whisper.py": [
+                {
+                  "start": 360,
+                  "end": 450
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_flax_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_modeling_flax_whisper.py": [
+                {
+                  "start": 220,
+                  "end": 330
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/tokenization_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/tokenization_whisper.py": [
+                {
+                  "start": 208,
+                  "end": 225
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/tokenization_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/tokenization_whisper.py": [
+                {
+                  "start": 410,
+                  "end": 420
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/modeling_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/modeling_whisper.py": [
+                {
+                  "start": 1568,
+                  "end": 1578
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/modeling_flax_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/modeling_flax_whisper.py": [
+                {
+                  "start": 1412,
+                  "end": 1420
                 }
               ]
             },
@@ -327,8 +430,8 @@
             "spans": {
               "src/transformers/models/whisper/tokenization_whisper_fast.py": [
                 {
-                  "start": 27,
-                  "end": 27
+                  "start": 392,
+                  "end": 400
                 }
               ]
             },
@@ -336,187 +439,42 @@
           },
           {
             "files": [
-              "src/transformers/models/whisper/tokenization_whisper_fast.py"
+              "tests/models/whisper/test_modeling_whisper.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/models/whisper/test_modeling_whisper.py": [
+                {
+                  "start": 418,
+                  "end": 446
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_flax_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_modeling_flax_whisper.py": [
+                {
+                  "start": 253,
+                  "end": 283
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "src/transformers/models/whisper/__init__.py",
-          "src/transformers/models/whisper/configuration_whisper.py",
-          "src/transformers/models/whisper/convert_openai_to_hf.py",
-          "src/transformers/models/whisper/english_normalizer.py",
-          "src/transformers/models/whisper/feature_extraction_whisper.py",
           "src/transformers/models/whisper/modeling_flax_whisper.py",
-          "src/transformers/models/whisper/modeling_tf_whisper.py",
           "src/transformers/models/whisper/modeling_whisper.py",
-          "src/transformers/models/whisper/processing_whisper.py",
           "src/transformers/models/whisper/tokenization_whisper.py",
           "src/transformers/models/whisper/tokenization_whisper_fast.py",
-          "tests/models/whisper/__init__.py",
-          "tests/models/whisper/test_feature_extraction_whisper.py",
           "tests/models/whisper/test_modeling_flax_whisper.py",
-          "tests/models/whisper/test_modeling_tf_whisper.py",
-          "tests/models/whisper/test_modeling_whisper.py",
-          "tests/models/whisper/test_processor_whisper.py",
-          "tests/models/whisper/test_tokenization_whisper.py"
+          "tests/models/whisper/test_modeling_whisper.py"
         ],
         "predSpans": {
-          "src/transformers/models/whisper/modeling_flax_whisper.py": [
-            {
-              "start": 1380,
-              "end": 1380
-            },
-            {
-              "start": 1388,
-              "end": 1388
-            },
-            {
-              "start": 1400,
-              "end": 1400
-            },
-            {
-              "start": 1401,
-              "end": 1401
-            },
-            {
-              "start": 1413,
-              "end": 1413
-            },
-            {
-              "start": 1414,
-              "end": 1417
-            },
-            {
-              "start": 1415,
-              "end": 1415
-            },
-            {
-              "start": 1420,
-              "end": 1420
-            },
-            {
-              "start": 1422,
-              "end": 1422
-            },
-            {
-              "start": 1431,
-              "end": 1431
-            },
-            {
-              "start": 1433,
-              "end": 1433
-            }
-          ],
-          "src/transformers/models/whisper/modeling_whisper.py": [
-            {
-              "start": 1455,
-              "end": 1455
-            },
-            {
-              "start": 1466,
-              "end": 1466
-            },
-            {
-              "start": 1521,
-              "end": 1521
-            },
-            {
-              "start": 1522,
-              "end": 1522
-            },
-            {
-              "start": 1553,
-              "end": 1553
-            },
-            {
-              "start": 1556,
-              "end": 1556
-            },
-            {
-              "start": 1569,
-              "end": 1573
-            },
-            {
-              "start": 1572,
-              "end": 1572
-            },
-            {
-              "start": 1581,
-              "end": 1581
-            },
-            {
-              "start": 1587,
-              "end": 1587
-            },
-            {
-              "start": 1593,
-              "end": 1593
-            },
-            {
-              "start": 1594,
-              "end": 1594
-            },
-            {
-              "start": 1596,
-              "end": 1596
-            }
-          ],
-          "tests/models/whisper/test_modeling_flax_whisper.py": [
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 194,
-              "end": 194
-            },
-            {
-              "start": 254,
-              "end": 280
-            },
-            {
-              "start": 535,
-              "end": 535
-            },
-            {
-              "start": 552,
-              "end": 552
-            },
-            {
-              "start": 559,
-              "end": 559
-            },
-            {
-              "start": 570,
-              "end": 570
-            }
-          ],
-          "tests/models/whisper/test_modeling_whisper.py": [
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 276,
-              "end": 276
-            },
-            {
-              "start": 419,
-              "end": 443
-            }
-          ],
-          "src/transformers/models/whisper/tokenization_whisper_fast.py": [
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 395,
-              "end": 396
-            }
-          ],
           "src/transformers/models/whisper/tokenization_whisper.py": [
             {
               "start": 214,
@@ -525,6 +483,36 @@
             {
               "start": 416,
               "end": 417
+            }
+          ],
+          "src/transformers/models/whisper/tokenization_whisper_fast.py": [
+            {
+              "start": 395,
+              "end": 396
+            }
+          ],
+          "src/transformers/models/whisper/modeling_whisper.py": [
+            {
+              "start": 1569,
+              "end": 1573
+            }
+          ],
+          "src/transformers/models/whisper/modeling_flax_whisper.py": [
+            {
+              "start": 1414,
+              "end": 1417
+            }
+          ],
+          "tests/models/whisper/test_modeling_whisper.py": [
+            {
+              "start": 419,
+              "end": 443
+            }
+          ],
+          "tests/models/whisper/test_modeling_flax_whisper.py": [
+            {
+              "start": 254,
+              "end": 280
             }
           ]
         },
@@ -545,7 +533,7 @@
           {
             "step": 1,
             "coverage": {
-              "file": 1.0,
+              "file": 0.0,
               "symbol": 0.0,
               "span": 0.0,
               "line": 0.0
@@ -554,55 +542,55 @@
           {
             "step": 2,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.42592183705012143,
+              "line": 0.21333333333333335
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.42592183705012143,
+              "line": 0.21333333333333335
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.42592183705012143,
+              "line": 0.21333333333333335
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.42592183705012143,
+              "line": 0.21333333333333335
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 1.0,
+              "file": 0.5,
               "symbol": 1.0,
-              "span": 0.11282843894899536,
-              "line": 0.03333333333333333
+              "span": 0.42592183705012143,
+              "line": 0.21333333333333335
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 1.0,
+              "file": 0.5,
               "symbol": 1.0,
-              "span": 0.11282843894899536,
-              "line": 0.03333333333333333
+              "span": 0.4393905939500994,
+              "line": 0.22
             }
           },
           {
@@ -610,8 +598,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.11282843894899536,
-              "line": 0.03333333333333333
+              "span": 0.4393905939500994,
+              "line": 0.22
             }
           },
           {
@@ -619,8 +607,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.11282843894899536,
-              "line": 0.03333333333333333
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
             }
           },
           {
@@ -628,8 +616,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.11282843894899536,
-              "line": 0.03333333333333333
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
             }
           },
           {
@@ -637,8 +625,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.11282843894899536,
-              "line": 0.03333333333333333
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
             }
           },
           {
@@ -646,22 +634,130 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.11282843894899536,
-              "line": 0.03333333333333333
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
+            }
+          },
+          {
+            "step": 13,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
+            }
+          },
+          {
+            "step": 14,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
+            }
+          },
+          {
+            "step": 15,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
+            }
+          },
+          {
+            "step": 16,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
+            }
+          },
+          {
+            "step": 17,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
+            }
+          },
+          {
+            "step": 18,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
+            }
+          },
+          {
+            "step": 19,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
+            }
+          },
+          {
+            "step": 20,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
+            }
+          },
+          {
+            "step": 21,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
+            }
+          },
+          {
+            "step": 22,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
+            }
+          },
+          {
+            "step": 23,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
+            }
+          },
+          {
+            "step": 24,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.5495694413777876,
+              "line": 0.35333333333333333
             }
           }
         ],
         "aucCoverage": {
-          "file": 1.0,
-          "symbol": 0.5833333333333334,
-          "span": 0.06581658938691394,
-          "line": 0.01944444444444444
+          "file": 0.8333333333333334,
+          "symbol": 0.9583333333333334,
+          "span": 0.4917292264664754,
+          "line": 0.29833333333333334
         },
         "redundancy": {
-          "file": 0.4375,
-          "symbol": 0.2666666666666667,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.75,
+          "symbol": 0.31896551724137934,
+          "span": 0.15272947564450623,
+          "line": 0.15137844611528817
         }
       },
       "fixOverlap": {
@@ -834,7 +930,26 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/models/whisper/modeling_flax_whisper.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/transformers/models/whisper/modeling_whisper.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/transformers/models/whisper/tokenization_whisper.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/transformers/models/whisper/tokenization_whisper_fast.py",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "command_execution",
@@ -853,12 +968,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/models/whisper/test_modeling_whisper.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/models/whisper/test_modeling_whisper.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/models/whisper/test_modeling_flax_whisper.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/models/whisper/test_modeling_flax_whisper.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -884,7 +1017,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/models/whisper/test_modeling_flax_whisper.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/models/whisper/test_modeling_flax_whisper.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -917,7 +1059,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/models/whisper/tokenization_whisper_fast.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/models/whisper/tokenization_whisper_fast.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",
@@ -1070,9 +1221,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-19T08:59:23Z",
       "completedAt": "2026-05-19T09:06:07Z",
       "durationMs": 403650,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1926400,
@@ -1081,6 +1247,28 @@
         "total_tokens": 1944422,
         "cache_read_input_tokens": 1781120
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 52,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/transformers/models/whisper/modeling_flax_whisper.py b/src/transformers/models/whisper/modeling_flax_whisper.py\nindex b8d6f07242..91b741b457 100644\n--- a/src/transformers/models/whisper/modeling_flax_whisper.py\n+++ b/src/transformers/models/whisper/modeling_flax_whisper.py\n@@ -46,6 +46,7 @@ from ...modeling_flax_utils import (\n )\n from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings\n from .configuration_whisper import WhisperConfig\n+from .tokenization_whisper import _normalize_language\n \n \n logger = logging.get_logger(__name__)\n@@ -1412,7 +1413,8 @@ class FlaxWhisperForConditionalGeneration(FlaxWhisperPreTrainedModel):\n \n         if hasattr(generation_config, \"is_multilingual\") and generation_config.is_multilingual:\n             if hasattr(generation_config, \"language\"):\n-                forced_decoder_ids.append((1, generation_config.lang_to_id[generation_config.language]))\n+                language_token = f\"<|{_normalize_language(generation_config.language)}|>\"\n+                forced_decoder_ids.append((1, generation_config.lang_to_id[language_token]))\n             else:\n                 forced_decoder_ids.append((1, None))\n \ndiff --git a/src/transformers/models/whisper/modeling_whisper.py b/src/transformers/models/whisper/modeling_whisper.py\nindex ed845febac..b67835cd9f 100644\n--- a/src/transformers/models/whisper/modeling_whisper.py\n+++ b/src/transformers/models/whisper/modeling_whisper.py\n@@ -36,7 +36,7 @@ from ...modeling_outputs import (\n from ...modeling_utils import PreTrainedModel\n from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings\n from .configuration_whisper import WhisperConfig\n-from .tokenization_whisper import TASK_IDS, TO_LANGUAGE_CODE\n+from .tokenization_whisper import TASK_IDS, _normalize_language\n \n \n logger = logging.get_logger(__name__)\n@@ -1569,15 +1569,7 @@ class WhisperForConditionalGeneration(WhisperPreTrainedModel):\n         forced_decoder_ids = []\n         if task is not None or language is not None:\n             if hasattr(generation_config, \"language\"):\n-                if generation_config.language in generation_config.lang_to_id.keys():\n-                    language_token = generation_config.language\n-                elif generation_config.language in TO_LANGUAGE_CODE.keys():\n-                    language_token = f\"<|{TO_LANGUAGE_CODE[generation_config.language]}|>\"\n-                else:\n-                    raise ValueError(\n-                        f\"Unsupported language: {self.language}. Language should be one of:\"\n-                        f\" {list(TO_LANGUAGE_CODE.keys()) if generation_config.language in TO_LANGUAGE_CODE.keys() else list(TO_LANGUAGE_CODE.values())}.\"\n-                    )\n+                language_token = f\"<|{_normalize_language(generation_config.language)}|>\"\n                 forced_decoder_ids.append((1, generation_config.lang_to_id[language_token]))\n             else:\n                 forced_decoder_ids.append((1, None))  # automatically detect the language\ndiff --git a/src/transformers/models/whisper/tokenization_whisper.py b/src/transformers/models/whisper/tokenization_whisper.py\nindex 24eb72a0b0..9071889dd4 100644\n--- a/src/transformers/models/whisper/tokenization_whisper.py\n+++ b/src/transformers/models/whisper/tokenization_whisper.py\n@@ -211,6 +211,25 @@ TO_LANGUAGE_CODE = {\n TASK_IDS = [\"translate\", \"transcribe\"]\n \n \n+def _normalize_language(language: str) -> str:\n+    language = language.lower()\n+\n+    if language in TO_LANGUAGE_CODE:\n+        return TO_LANGUAGE_CODE[language]\n+    if language in TO_LANGUAGE_CODE.values():\n+        return language\n+    if language.startswith(\"<|\") and language.endswith(\"|>\"):\n+        language = language[2:-2]\n+        if language in TO_LANGUAGE_CODE.values():\n+            return language\n+\n+    is_language_code = len(language) == 2 or language.startswith(\"<|\")\n+    raise ValueError(\n+        f\"Unsupported language: {language}. Language should be one of:\"\n+        f\" {list(TO_LANGUAGE_CODE.values()) if is_language_code else list(TO_LANGUAGE_CODE.keys())}.\"\n+    )\n+\n+\n class WhisperTokenizer(PreTrainedTokenizer):\n     \"\"\"\n     Construct a Whisper tokenizer.\n@@ -396,17 +415,7 @@ class WhisperTokenizer(PreTrainedTokenizer):\n         langs = tuple(LANGUAGES.keys())\n \n         if self.language is not None:\n-            self.language = self.language.lower()\n-            if self.language in TO_LANGUAGE_CODE:\n-                language_id = TO_LANGUAGE_CODE[self.language]\n-            elif self.language in TO_LANGUAGE_CODE.values():\n-                language_id = self.language\n-            else:\n-                is_language_code = len(self.language) == 2\n-                raise ValueError(\n-                    f\"Unsupported language: {self.language}. Language should be one of:\"\n-                    f\" {list(TO_LANGUAGE_CODE.values()) if is_language_code else list(TO_LANGUAGE_CODE.keys())}.\"\n-                )\n+            language_id = _normalize_language(self.language)\n \n         if self.task is not None:\n             if self.task not in TASK_IDS:\ndiff --git a/src/transformers/models/whisper/tokenization_whisper_fast.py b/src/transformers/models/whisper/tokenization_whisper_fast.py\nindex fb1bf89ed6..3d2671052d 100644\n--- a/src/transformers/models/whisper/tokenization_whisper_fast.py\n+++ b/src/transformers/models/whisper/tokenization_whisper_fast.py\n@@ -24,7 +24,7 @@ from ...tokenization_utils_base import BatchEncoding\n from ...tokenization_utils_fast import PreTrainedTokenizerFast\n from ...utils import logging\n from .english_normalizer import EnglishTextNormalizer\n-from .tokenization_whisper import LANGUAGES, TASK_IDS, TO_LANGUAGE_CODE, WhisperTokenizer, _decode_asr\n+from .tokenization_whisper import LANGUAGES, TASK_IDS, WhisperTokenizer, _decode_asr, _normalize_language\n \n \n logger = logging.get_logger(__name__)\n@@ -393,17 +393,7 @@ class WhisperTokenizerFast(PreTrainedTokenizerFast):\n         langs = tuple(LANGUAGES.keys())\n \n         if self.language is not None:\n-            self.language = self.language.lower()\n-            if self.language in TO_LANGUAGE_CODE:\n-                language_id = TO_LANGUAGE_CODE[self.language]\n-            elif self.language in TO_LANGUAGE_CODE.values():\n-                language_id = self.language\n-            else:\n-                is_language_code = len(self.language) == 2\n-                raise ValueError(\n-                    f\"Unsupported language: {self.language}. Language should be one of:\"\n-                    f\" {list(TO_LANGUAGE_CODE.values()) if is_language_code else list(TO_LANGUAGE_CODE.keys())}.\"\n-                )\n+            language_id = _normalize_language(self.language)\n \n         if self.task is not None:\n             if self.task not in TASK_IDS:\ndiff --git a/tests/models/whisper/test_modeling_flax_whisper.py b/tests/models/whisper/test_modeling_flax_whisper.py\nindex 3f1e201d72..c9b5218676 100644\n--- a/tests/models/whisper/test_modeling_flax_whisper.py\n+++ b/tests/models/whisper/test_modeling_flax_whisper.py\n@@ -249,6 +249,21 @@ class FlaxWhisperModelTest(FlaxModelTesterMixin, unittest.TestCase):\n                 for jitted_output, output in zip(jitted_outputs, outputs):\n                     self.assertEqual(jitted_output.shape, output.shape)\n \n+    def test_generate_accepts_language_codes(self):\n+        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()\n+        input_features = inputs_dict[\"input_features\"][:1]\n+\n+        model = FlaxWhisperForConditionalGeneration(config, input_shape=self.init_shape)\n+        model.generation_config.is_multilingual = True\n+        model.generation_config.lang_to_id = {\"<|en|>\": 1, \"<|de|>\": 2}\n+        model.generation_config.task_to_id = {\"transcribe\": 3, \"translate\": 4}\n+        model.generation_config.no_timestamps_token_id = 5\n+\n+        for language in [\"<|de|>\", \"de\", \"german\"]:\n+            with self.subTest(language=language):\n+                generated_ids = model.generate(input_features, max_length=5, language=language, task=\"transcribe\").sequences\n+                self.assertListEqual(generated_ids[0, :4].tolist(), [config.decoder_start_token_id, 2, 3, 5])\n+\n     # overwrite because of `input_features`\n     @is_pt_flax_cross_test\n     def test_save_load_bf16_to_base_pt(self):\ndiff --git a/tests/models/whisper/test_modeling_whisper.py b/tests/models/whisper/test_modeling_whisper.py\nindex dd6ad07eb4..dc14689504 100644\n--- a/tests/models/whisper/test_modeling_whisper.py\n+++ b/tests/models/whisper/test_modeling_whisper.py\n@@ -414,6 +414,20 @@ class WhisperModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMi\n         model.generate(input_features)\n         model.generate(input_features, num_beams=4, do_sample=True, early_stopping=False, num_return_sequences=3)\n \n+    def test_generate_accepts_language_codes(self):\n+        config, input_dict = self.model_tester.prepare_config_and_inputs()\n+        input_features = input_dict[\"input_features\"][:1].to(torch_device)\n+\n+        model = WhisperForConditionalGeneration(config).eval().to(torch_device)\n+        model.generation_config.lang_to_id = {\"<|en|>\": 1, \"<|de|>\": 2}\n+        model.generation_config.task_to_id = {\"transcribe\": 3, \"translate\": 4}\n+        model.generation_config.no_timestamps_token_id = 5\n+\n+        for language in [\"<|de|>\", \"de\", \"german\"]:\n+            with self.subTest(language=language):\n+                generated_ids = model.generate(input_features, max_length=5, language=language, task=\"transcribe\")\n+                self.assertListEqual(generated_ids[0, :4].tolist(), [config.decoder_start_token_id, 2, 3, 5])\n+\n     def test_forward_signature(self):\n         config, _ = self.model_tester.prepare_config_and_inputs_for_common()\n \n",
       "finalOutput": {
         "status": "completed",
@@ -1150,1009 +1338,153 @@
         "predSteps": [
           {
             "files": [
-              "src/transformers/models/whisper/__init__.py",
-              "src/transformers/models/whisper/configuration_whisper.py",
-              "src/transformers/models/whisper/convert_openai_to_hf.py",
-              "src/transformers/models/whisper/english_normalizer.py",
-              "src/transformers/models/whisper/feature_extraction_whisper.py",
-              "src/transformers/models/whisper/modeling_flax_whisper.py",
-              "src/transformers/models/whisper/modeling_tf_whisper.py",
-              "src/transformers/models/whisper/modeling_whisper.py",
-              "src/transformers/models/whisper/processing_whisper.py",
-              "src/transformers/models/whisper/tokenization_whisper.py",
-              "src/transformers/models/whisper/tokenization_whisper_fast.py",
-              "tests/extended/test_trainer_ext.py",
-              "tests/fixtures/tests_samples/SQUAD/sample.json",
-              "tests/generation/test_beam_constraints.py",
-              "tests/generation/test_beam_search.py",
-              "tests/generation/test_configuration_utils.py",
-              "tests/generation/test_flax_logits_process.py",
-              "tests/generation/test_flax_utils.py",
-              "tests/generation/test_logits_process.py",
-              "tests/generation/test_stopping_criteria.py",
-              "tests/generation/test_streamers.py",
-              "tests/generation/test_tf_logits_process.py",
-              "tests/generation/test_tf_utils.py",
-              "tests/generation/test_utils.py",
-              "tests/mixed_int8/test_mixed_int8.py",
-              "tests/models/canine/test_modeling_canine.py",
-              "tests/models/canine/test_tokenization_canine.py",
-              "tests/models/dit/test_modeling_dit.py",
-              "tests/models/fnet/test_modeling_fnet.py",
-              "tests/models/fnet/test_tokenization_fnet.py",
-              "tests/models/git/test_modeling_git.py",
-              "tests/models/git/test_processor_git.py",
-              "tests/models/gpt_neox/test_modeling_gpt_neox.py",
-              "tests/models/layoutxlm/test_processor_layoutxlm.py",
-              "tests/models/layoutxlm/test_tokenization_layoutxlm.py",
-              "tests/models/lilt/test_modeling_lilt.py",
-              "tests/models/llama/test_modeling_llama.py",
-              "tests/models/llama/test_tokenization_llama.py",
-              "tests/models/mbart/test_modeling_flax_mbart.py",
-              "tests/models/mbart/test_modeling_mbart.py",
-              "tests/models/mbart/test_modeling_tf_mbart.py",
-              "tests/models/mbart/test_tokenization_mbart.py",
-              "tests/models/mbart50/test_tokenization_mbart50.py",
-              "tests/models/openai/test_modeling_openai.py",
-              "tests/models/openai/test_modeling_tf_openai.py",
-              "tests/models/openai/test_tokenization_openai.py",
-              "tests/models/realm/test_modeling_realm.py",
-              "tests/models/realm/test_retrieval_realm.py",
-              "tests/models/realm/test_tokenization_realm.py",
-              "tests/models/rembert/test_modeling_rembert.py",
-              "tests/models/rembert/test_modeling_tf_rembert.py",
-              "tests/models/roberta_prelayernorm/test_modeling_flax_roberta_prelayernorm.py",
-              "tests/models/roberta_prelayernorm/test_modeling_roberta_prelayernorm.py",
-              "tests/models/roberta_prelayernorm/test_modeling_tf_roberta_prelayernorm.py",
-              "tests/models/roformer/test_modeling_flax_roformer.py",
-              "tests/models/roformer/test_modeling_roformer.py",
-              "tests/models/roformer/test_modeling_tf_roformer.py",
-              "tests/models/roformer/test_tokenization_roformer.py",
-              "tests/models/wav2vec2_conformer/test_modeling_wav2vec2_conformer.py",
-              "tests/models/whisper/test_modeling_tf_whisper.py",
-              "tests/models/xglm/test_modeling_flax_xglm.py",
-              "tests/models/xglm/test_modeling_tf_xglm.py",
-              "tests/models/xglm/test_modeling_xglm.py",
-              "tests/models/xglm/test_tokenization_xglm.py",
-              "tests/onnx/test_onnx.py",
-              "tests/sagemaker/scripts/pytorch/run_glue_model_parallelism.py",
-              "tests/test_backbone_common.py",
-              "tests/test_feature_extraction_common.py",
-              "tests/test_image_processing_common.py",
-              "tests/test_image_transforms.py",
-              "tests/test_modeling_flax_common.py",
-              "tests/test_modeling_tf_common.py",
-              "tests/test_pipeline_mixin.py",
-              "tests/test_sequence_feature_extraction_common.py",
-              "tests/trainer/test_data_collator.py",
-              "tests/trainer/test_trainer.py",
-              "tests/trainer/test_trainer_callback.py",
-              "tests/trainer/test_trainer_distributed.py",
-              "tests/trainer/test_trainer_seq2seq.py",
-              "tests/trainer/test_trainer_tpu.py",
-              "tests/trainer/test_trainer_utils.py"
+              "src/transformers/models/whisper/modeling_flax_whisper.py"
             ],
             "spans": {
-              "tests/test_image_transforms.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/test_pipeline_mixin.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/test_sequence_feature_extraction_common.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/test_modeling_flax_common.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "tests/test_modeling_tf_common.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 1345,
-                  "end": 1345
-                },
-                {
-                  "start": 1418,
-                  "end": 1418
-                }
-              ],
-              "tests/generation/test_logits_process.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "src/transformers/models/whisper/feature_extraction_whisper.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "src/transformers/models/whisper/english_normalizer.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "src/transformers/models/whisper/convert_openai_to_hf.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "src/transformers/models/whisper/configuration_whisper.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "src/transformers/models/whisper/processing_whisper.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 45,
-                  "end": 45
-                }
-              ],
-              "src/transformers/models/whisper/tokenization_whisper.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 195,
-                  "end": 195
-                },
-                {
-                  "start": 197,
-                  "end": 197
-                },
-                {
-                  "start": 241,
-                  "end": 241
-                },
-                {
-                  "start": 242,
-                  "end": 242
-                },
-                {
-                  "start": 268,
-                  "end": 268
-                },
-                {
-                  "start": 309,
-                  "end": 309
-                },
-                {
-                  "start": 365,
-                  "end": 365
-                },
-                {
-                  "start": 372,
-                  "end": 372
-                },
-                {
-                  "start": 374,
-                  "end": 374
-                },
-                {
-                  "start": 378,
-                  "end": 378
-                },
-                {
-                  "start": 379,
-                  "end": 379
-                },
-                {
-                  "start": 385,
-                  "end": 385
-                },
-                {
-                  "start": 398,
-                  "end": 398
-                },
-                {
-                  "start": 399,
-                  "end": 399
-                },
-                {
-                  "start": 400,
-                  "end": 400
-                },
-                {
-                  "start": 401,
-                  "end": 401
-                },
-                {
-                  "start": 402,
-                  "end": 402
-                },
-                {
-                  "start": 403,
-                  "end": 403
-                },
-                {
-                  "start": 405,
-                  "end": 405
-                },
-                {
-                  "start": 407,
-                  "end": 407
-                },
-                {
-                  "start": 408,
-                  "end": 408
-                },
-                {
-                  "start": 416,
-                  "end": 416
-                },
-                {
-                  "start": 417,
-                  "end": 417
-                },
-                {
-                  "start": 698,
-                  "end": 698
-                },
-                {
-                  "start": 699,
-                  "end": 699
-                },
-                {
-                  "start": 708,
-                  "end": 708
-                },
-                {
-                  "start": 713,
-                  "end": 713
-                },
-                {
-                  "start": 718,
-                  "end": 718
-                },
-                {
-                  "start": 728,
-                  "end": 728
-                },
-                {
-                  "start": 736,
-                  "end": 736
-                },
-                {
-                  "start": 739,
-                  "end": 739
-                },
-                {
-                  "start": 797,
-                  "end": 797
-                },
-                {
-                  "start": 801,
-                  "end": 801
-                },
-                {
-                  "start": 802,
-                  "end": 802
-                },
-                {
-                  "start": 803,
-                  "end": 803
-                },
-                {
-                  "start": 804,
-                  "end": 804
-                },
-                {
-                  "start": 806,
-                  "end": 806
-                },
-                {
-                  "start": 817,
-                  "end": 817
-                },
-                {
-                  "start": 818,
-                  "end": 818
-                },
-                {
-                  "start": 893,
-                  "end": 893
-                },
-                {
-                  "start": 899,
-                  "end": 899
-                },
-                {
-                  "start": 900,
-                  "end": 900
-                }
-              ],
-              "src/transformers/models/whisper/__init__.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "src/transformers/models/whisper/modeling_tf_whisper.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 1207,
-                  "end": 1207
-                },
-                {
-                  "start": 1265,
-                  "end": 1265
-                }
-              ],
               "src/transformers/models/whisper/modeling_flax_whisper.py": [
                 {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 1241,
-                  "end": 1241
-                },
-                {
-                  "start": 1387,
-                  "end": 1387
-                },
-                {
-                  "start": 1403,
-                  "end": 1403
-                },
-                {
-                  "start": 1404,
-                  "end": 1404
-                },
-                {
-                  "start": 1414,
-                  "end": 1414
-                },
-                {
-                  "start": 1415,
-                  "end": 1415
+                  "start": 1330,
+                  "end": 1460
                 }
-              ],
-              "src/transformers/models/whisper/tokenization_whisper_fast.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 117,
-                  "end": 117
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 144,
-                  "end": 144
-                },
-                {
-                  "start": 176,
-                  "end": 176
-                },
-                {
-                  "start": 347,
-                  "end": 347
-                },
-                {
-                  "start": 354,
-                  "end": 354
-                },
-                {
-                  "start": 356,
-                  "end": 356
-                },
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/tokenization_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/tokenization_whisper.py": [
                 {
                   "start": 360,
-                  "end": 360
-                },
-                {
-                  "start": 361,
-                  "end": 361
-                },
-                {
-                  "start": 367,
-                  "end": 367
-                },
-                {
-                  "start": 395,
-                  "end": 395
-                },
-                {
-                  "start": 396,
-                  "end": 396
-                },
-                {
-                  "start": 397,
-                  "end": 397
-                },
-                {
-                  "start": 398,
-                  "end": 398
-                },
-                {
-                  "start": 399,
-                  "end": 399
-                },
-                {
-                  "start": 400,
-                  "end": 400
-                },
-                {
-                  "start": 402,
-                  "end": 402
-                },
-                {
-                  "start": 404,
-                  "end": 404
-                },
-                {
-                  "start": 405,
-                  "end": 405
-                },
-                {
-                  "start": 413,
-                  "end": 413
-                },
-                {
-                  "start": 414,
-                  "end": 414
-                },
-                {
-                  "start": 470,
-                  "end": 470
-                },
-                {
-                  "start": 471,
-                  "end": 471
-                },
-                {
-                  "start": 480,
-                  "end": 480
-                },
-                {
-                  "start": 485,
-                  "end": 485
-                }
-              ],
-              "tests/generation/test_flax_utils.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "tests/generation/test_stopping_criteria.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "src/transformers/models/whisper/modeling_whisper.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 1309,
-                  "end": 1309
-                },
-                {
-                  "start": 1379,
-                  "end": 1379
-                },
-                {
-                  "start": 1465,
-                  "end": 1465
-                },
-                {
-                  "start": 1471,
-                  "end": 1471
-                },
-                {
-                  "start": 1519,
-                  "end": 1519
-                },
-                {
-                  "start": 1521,
-                  "end": 1521
-                },
-                {
-                  "start": 1564,
-                  "end": 1564
-                },
-                {
-                  "start": 1565,
-                  "end": 1565
-                },
-                {
-                  "start": 1570,
-                  "end": 1570
-                },
-                {
-                  "start": 1571,
-                  "end": 1571
-                },
-                {
-                  "start": 1572,
-                  "end": 1572
-                },
-                {
-                  "start": 1573,
-                  "end": 1573
-                },
-                {
-                  "start": 1574,
-                  "end": 1574
-                },
-                {
-                  "start": 1575,
-                  "end": 1575
-                },
-                {
-                  "start": 1578,
-                  "end": 1578
-                },
-                {
-                  "start": 1579,
-                  "end": 1579
-                },
-                {
-                  "start": 1581,
-                  "end": 1581
-                },
-                {
-                  "start": 1583,
-                  "end": 1583
-                }
-              ],
-              "tests/generation/test_flax_logits_process.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/generation/test_tf_logits_process.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/sagemaker/scripts/pytorch/run_glue_model_parallelism.py": [
-                {
-                  "start": 14,
-                  "end": 14
-                }
-              ],
-              "tests/fixtures/tests_samples/SQUAD/sample.json": [
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 99,
-                  "end": 99
-                }
-              ],
-              "tests/generation/test_tf_utils.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/generation/test_beam_constraints.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/generation/test_streamers.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/generation/test_configuration_utils.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/generation/test_beam_search.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/trainer/test_data_collator.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 264,
-                  "end": 264
-                },
-                {
-                  "start": 551,
-                  "end": 551
-                },
-                {
-                  "start": 828,
-                  "end": 828
-                }
-              ],
-              "tests/trainer/test_trainer_tpu.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "tests/trainer/test_trainer_distributed.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "tests/generation/test_utils.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/trainer/test_trainer_seq2seq.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/trainer/test_trainer.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/trainer/test_trainer_callback.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "tests/extended/test_trainer_ext.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "tests/trainer/test_trainer_utils.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/test_backbone_common.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/test_image_processing_common.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/test_feature_extraction_common.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/onnx/test_onnx.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "tests/models/dit/test_modeling_dit.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/layoutxlm/test_tokenization_layoutxlm.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/mbart/test_tokenization_mbart.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 230,
-                  "end": 230
-                },
-                {
-                  "start": 239,
-                  "end": 239
-                }
-              ],
-              "tests/models/roformer/test_tokenization_roformer.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/roformer/test_modeling_flax_roformer.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "tests/models/roformer/test_modeling_roformer.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/layoutxlm/test_processor_layoutxlm.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "tests/models/roberta_prelayernorm/test_modeling_flax_roberta_prelayernorm.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "tests/models/roformer/test_modeling_tf_roformer.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/xglm/test_modeling_tf_xglm.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/xglm/test_modeling_xglm.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/roberta_prelayernorm/test_modeling_roberta_prelayernorm.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/roberta_prelayernorm/test_modeling_tf_roberta_prelayernorm.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/xglm/test_modeling_flax_xglm.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/xglm/test_tokenization_xglm.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/mbart/test_modeling_flax_mbart.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "tests/models/mbart/test_modeling_tf_mbart.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/mbart/test_modeling_mbart.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/mbart50/test_tokenization_mbart50.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 220,
-                  "end": 220
-                },
-                {
-                  "start": 230,
-                  "end": 230
-                }
-              ],
-              "tests/models/gpt_neox/test_modeling_gpt_neox.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/wav2vec2_conformer/test_modeling_wav2vec2_conformer.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/mixed_int8/test_mixed_int8.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/lilt/test_modeling_lilt.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/canine/test_tokenization_canine.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/canine/test_modeling_canine.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/openai/test_modeling_tf_openai.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/fnet/test_modeling_fnet.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/openai/test_tokenization_openai.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/fnet/test_tokenization_fnet.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/openai/test_modeling_openai.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/realm/test_retrieval_realm.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/realm/test_tokenization_realm.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/llama/test_tokenization_llama.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 447,
-                  "end": 447
-                }
-              ],
-              "tests/models/git/test_processor_git.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "tests/models/llama/test_modeling_llama.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/git/test_modeling_git.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/realm/test_modeling_realm.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/rembert/test_modeling_rembert.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/models/rembert/test_modeling_tf_rembert.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
+                  "end": 460
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_tf_whisper.py"
+            ],
+            "spans": {
               "tests/models/whisper/test_modeling_tf_whisper.py": [
                 {
-                  "start": 13,
-                  "end": 13
-                },
+                  "start": 640,
+                  "end": 760
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/tokenization_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/tokenization_whisper.py": [
                 {
-                  "start": 580,
-                  "end": 580
-                },
+                  "start": 200,
+                  "end": 280
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_tokenization_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_tokenization_whisper.py": [
                 {
-                  "start": 621,
-                  "end": 621
-                },
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_flax_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_modeling_flax_whisper.py": [
                 {
-                  "start": 701,
-                  "end": 701
+                  "start": 520,
+                  "end": 590
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_tokenization_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_tokenization_whisper.py": [
+                {
+                  "start": 280,
+                  "end": 360
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/modeling_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/modeling_whisper.py": [
+                {
+                  "start": 1540,
+                  "end": 1608
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_modeling_whisper.py": [
+                {
+                  "start": 1160,
+                  "end": 1235
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/tokenization_whisper_fast.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/tokenization_whisper_fast.py": [
+                {
+                  "start": 330,
+                  "end": 430
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/modeling_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/modeling_whisper.py": [
+                {
+                  "start": 1495,
+                  "end": 1535
                 }
               ]
             },
@@ -2162,290 +1494,102 @@
             "files": [
               "src/transformers/models/whisper/modeling_flax_whisper.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/transformers/models/whisper/tokenization_whisper.py"
-            ],
-            "spans": {},
+            "spans": {
+              "src/transformers/models/whisper/modeling_flax_whisper.py": [
+                {
+                  "start": 1368,
+                  "end": 1418
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/models/whisper/test_modeling_tf_whisper.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/models/whisper/test_tokenization_whisper.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/transformers/models/whisper/modeling_flax_whisper.py",
-              "src/transformers/models/whisper/modeling_whisper.py",
-              "src/transformers/models/whisper/processing_whisper.py",
-              "src/transformers/models/whisper/tokenization_whisper.py",
-              "src/transformers/models/whisper/tokenization_whisper_fast.py",
-              "tests/models/whisper/test_modeling_flax_whisper.py",
-              "tests/models/whisper/test_modeling_tf_whisper.py",
-              "tests/models/whisper/test_modeling_whisper.py",
-              "tests/models/whisper/test_processor_whisper.py",
-              "tests/models/whisper/test_tokenization_whisper.py"
-            ],
             "spans": {
-              "src/transformers/models/whisper/modeling_flax_whisper.py": [
-                {
-                  "start": 1411,
-                  "end": 1411
-                },
-                {
-                  "start": 1415,
-                  "end": 1415
-                },
-                {
-                  "start": 1417,
-                  "end": 1417
-                },
-                {
-                  "start": 1420,
-                  "end": 1420
-                },
-                {
-                  "start": 1422,
-                  "end": 1422
-                },
-                {
-                  "start": 1431,
-                  "end": 1431
-                },
-                {
-                  "start": 1432,
-                  "end": 1432
-                },
-                {
-                  "start": 1433,
-                  "end": 1433
-                },
-                {
-                  "start": 1435,
-                  "end": 1435
-                },
-                {
-                  "start": 1436,
-                  "end": 1436
-                }
-              ],
-              "src/transformers/models/whisper/tokenization_whisper.py": [
-                {
-                  "start": 365,
-                  "end": 365
-                },
-                {
-                  "start": 374,
-                  "end": 374
-                },
-                {
-                  "start": 698,
-                  "end": 698
-                },
-                {
-                  "start": 699,
-                  "end": 699
-                },
-                {
-                  "start": 705,
-                  "end": 705
-                },
-                {
-                  "start": 706,
-                  "end": 706
-                }
-              ],
-              "tests/models/whisper/test_processor_whisper.py": [
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 141,
-                  "end": 141
-                },
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 144,
-                  "end": 144
-                },
-                {
-                  "start": 148,
-                  "end": 148
-                }
-              ],
               "tests/models/whisper/test_modeling_tf_whisper.py": [
                 {
-                  "start": 701,
-                  "end": 701
-                },
-                {
-                  "start": 738,
-                  "end": 738
+                  "start": 680,
+                  "end": 730
                 }
-              ],
-              "tests/models/whisper/test_tokenization_whisper.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/modeling_tf_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/modeling_tf_whisper.py": [
                 {
-                  "start": 293,
-                  "end": 293
-                },
-                {
-                  "start": 299,
-                  "end": 299
+                  "start": 1460,
+                  "end": 1535
                 }
-              ],
-              "src/transformers/models/whisper/processing_whisper.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/modeling_tf_whisper.py"
+            ],
+            "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/modeling_tf_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/modeling_tf_whisper.py": [
                 {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 45,
-                  "end": 45
+                  "start": 1270,
+                  "end": 1395
                 }
-              ],
-              "tests/models/whisper/test_modeling_flax_whisper.py": [
-                {
-                  "start": 535,
-                  "end": 535
-                },
-                {
-                  "start": 552,
-                  "end": 552
-                },
-                {
-                  "start": 559,
-                  "end": 559
-                },
-                {
-                  "start": 570,
-                  "end": 570
-                }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_whisper.py"
+            ],
+            "spans": {
               "tests/models/whisper/test_modeling_whisper.py": [
                 {
-                  "start": 1188,
-                  "end": 1188
-                },
-                {
-                  "start": 1219,
-                  "end": 1219
+                  "start": 1,
+                  "end": 260
                 }
-              ],
-              "src/transformers/models/whisper/modeling_whisper.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_flax_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_modeling_flax_whisper.py": [
                 {
-                  "start": 1517,
-                  "end": 1517
-                },
-                {
-                  "start": 1521,
-                  "end": 1521
-                },
-                {
-                  "start": 1569,
-                  "end": 1569
-                },
-                {
-                  "start": 1572,
-                  "end": 1572
-                },
-                {
-                  "start": 1581,
-                  "end": 1581
-                },
-                {
-                  "start": 1583,
-                  "end": 1583
-                },
-                {
-                  "start": 1587,
-                  "end": 1587
-                },
-                {
-                  "start": 1593,
-                  "end": 1593
-                },
-                {
-                  "start": 1595,
-                  "end": 1595
-                },
-                {
-                  "start": 1596,
-                  "end": 1596
-                },
-                {
-                  "start": 1599,
-                  "end": 1599
-                },
-                {
-                  "start": 1600,
-                  "end": 1600
-                },
-                {
-                  "start": 1602,
-                  "end": 1602
-                },
-                {
-                  "start": 1603,
-                  "end": 1603
-                },
-                {
-                  "start": 1605,
-                  "end": 1605
-                },
-                {
-                  "start": 1610,
-                  "end": 1610
-                },
-                {
-                  "start": 1611,
-                  "end": 1611
+                  "start": 1,
+                  "end": 220
                 }
-              ],
-              "src/transformers/models/whisper/tokenization_whisper_fast.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/tokenization_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/tokenization_whisper.py": [
                 {
-                  "start": 347,
-                  "end": 347
-                },
-                {
-                  "start": 356,
-                  "end": 356
-                },
-                {
-                  "start": 469,
-                  "end": 469
-                },
-                {
-                  "start": 470,
-                  "end": 470
-                },
-                {
-                  "start": 471,
-                  "end": 471
-                },
-                {
-                  "start": 477,
-                  "end": 477
-                },
-                {
-                  "start": 478,
-                  "end": 478
+                  "start": 150,
+                  "end": 220
                 }
               ]
             },
@@ -2460,64 +1604,125 @@
           },
           {
             "files": [
-              "src/transformers/models/whisper/modeling_whisper.py"
+              "tests/models/whisper/test_modeling_flax_whisper.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/models/whisper/test_modeling_flax_whisper.py": [
+                {
+                  "start": 450,
+                  "end": 520
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/modeling_flax_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/modeling_flax_whisper.py": [
+                {
+                  "start": 1,
+                  "end": 80
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/models/whisper/test_modeling_whisper.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/models/whisper/test_modeling_whisper.py": [
+                {
+                  "start": 260,
+                  "end": 420
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/whisper/test_modeling_flax_whisper.py"
+            ],
+            "spans": {
+              "tests/models/whisper/test_modeling_flax_whisper.py": [
+                {
+                  "start": 220,
+                  "end": 360
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/transformers/models/whisper/tokenization_whisper_fast.py"
             ],
-            "spans": {},
+            "spans": {
+              "src/transformers/models/whisper/tokenization_whisper_fast.py": [
+                {
+                  "start": 1,
+                  "end": 80
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/transformers/models/whisper/modeling_tf_whisper.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/transformers/models/whisper/modeling_flax_whisper.py",
               "src/transformers/models/whisper/modeling_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/modeling_whisper.py": [
+                {
+                  "start": 1,
+                  "end": 60
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/modeling_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/modeling_whisper.py": [
+                {
+                  "start": 1564,
+                  "end": 1588
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/tokenization_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/tokenization_whisper.py": [
+                {
+                  "start": 200,
+                  "end": 235
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/modeling_flax_whisper.py"
             ],
             "spans": {
               "src/transformers/models/whisper/modeling_flax_whisper.py": [
                 {
-                  "start": 1415,
-                  "end": 1415
-                }
-              ],
-              "src/transformers/models/whisper/modeling_whisper.py": [
-                {
-                  "start": 39,
-                  "end": 39
-                },
-                {
-                  "start": 1519,
-                  "end": 1519
-                },
-                {
-                  "start": 1574,
-                  "end": 1574
-                },
-                {
-                  "start": 1575,
-                  "end": 1575
-                },
-                {
-                  "start": 1579,
-                  "end": 1579
+                  "start": 1408,
+                  "end": 1424
                 }
               ]
             },
@@ -2525,52 +1730,13 @@
           },
           {
             "files": [
-              "tests/models/whisper/test_modeling_flax_whisper.py",
               "tests/models/whisper/test_modeling_whisper.py"
             ],
             "spans": {
-              "tests/models/whisper/test_modeling_flax_whisper.py": [
-                {
-                  "start": 123,
-                  "end": 123
-                }
-              ],
               "tests/models/whisper/test_modeling_whisper.py": [
                 {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 146,
-                  "end": 146
-                },
-                {
-                  "start": 184,
-                  "end": 184
-                },
-                {
-                  "start": 276,
-                  "end": 276
-                },
-                {
-                  "start": 996,
-                  "end": 996
-                },
-                {
-                  "start": 1417,
-                  "end": 1417
-                },
-                {
-                  "start": 1488,
-                  "end": 1488
-                },
-                {
-                  "start": 1498,
-                  "end": 1498
-                },
-                {
-                  "start": 1531,
-                  "end": 1531
+                  "start": 392,
+                  "end": 425
                 }
               ]
             },
@@ -2578,153 +1744,41 @@
           },
           {
             "files": [
-              "tests/extended/test_trainer_ext.py",
-              "tests/models/whisper/test_modeling_flax_whisper.py",
-              "tests/models/whisper/test_processor_whisper.py",
-              "tests/pipelines/test_pipelines_automatic_speech_recognition.py",
-              "tests/test_configuration_common.py",
-              "tests/test_feature_extraction_common.py",
-              "tests/test_image_processing_common.py",
-              "tests/test_modeling_common.py",
-              "tests/test_modeling_tf_common.py",
-              "tests/test_tokenization_common.py",
-              "tests/trainer/test_trainer.py",
-              "tests/utils/test_file_utils.py",
-              "tests/utils/test_hub_utils.py"
+              "tests/models/whisper/test_modeling_flax_whisper.py"
             ],
             "spans": {
               "tests/models/whisper/test_modeling_flax_whisper.py": [
                 {
-                  "start": 535,
-                  "end": 535
-                },
-                {
-                  "start": 552,
-                  "end": 552
-                },
-                {
-                  "start": 559,
-                  "end": 559
-                },
-                {
-                  "start": 570,
-                  "end": 570
-                },
-                {
-                  "start": 535,
-                  "end": 535
-                },
-                {
-                  "start": 552,
-                  "end": 552
-                },
-                {
-                  "start": 559,
-                  "end": 559
-                },
-                {
-                  "start": 570,
-                  "end": 570
+                  "start": 245,
+                  "end": 286
                 }
-              ],
-              "tests/test_modeling_tf_common.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/tokenization_whisper_fast.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/tokenization_whisper_fast.py": [
                 {
-                  "start": 2030,
-                  "end": 2030
+                  "start": 388,
+                  "end": 398
                 }
-              ],
-              "tests/trainer/test_trainer.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/whisper/tokenization_whisper.py"
+            ],
+            "spans": {
+              "src/transformers/models/whisper/tokenization_whisper.py": [
                 {
-                  "start": 1449,
-                  "end": 1449
-                },
-                {
-                  "start": 1453,
-                  "end": 1453
-                }
-              ],
-              "tests/extended/test_trainer_ext.py": [
-                {
-                  "start": 380,
-                  "end": 380
-                }
-              ],
-              "tests/test_feature_extraction_common.py": [
-                {
-                  "start": 86,
-                  "end": 86
-                }
-              ],
-              "tests/test_image_processing_common.py": [
-                {
-                  "start": 218,
-                  "end": 218
-                }
-              ],
-              "tests/test_configuration_common.py": [
-                {
-                  "start": 360,
-                  "end": 360
-                }
-              ],
-              "tests/test_modeling_common.py": [
-                {
-                  "start": 3351,
-                  "end": 3351
-                }
-              ],
-              "tests/test_tokenization_common.py": [
-                {
-                  "start": 3957,
-                  "end": 3957
-                },
-                {
-                  "start": 3975,
-                  "end": 3975
-                }
-              ],
-              "tests/models/whisper/test_processor_whisper.py": [
-                {
-                  "start": 141,
-                  "end": 141
-                },
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 144,
-                  "end": 144
-                },
-                {
-                  "start": 148,
-                  "end": 148
-                }
-              ],
-              "tests/pipelines/test_pipelines_automatic_speech_recognition.py": [
-                {
-                  "start": 307,
-                  "end": 307
-                }
-              ],
-              "tests/utils/test_file_utils.py": [
-                {
-                  "start": 77,
-                  "end": 77
-                },
-                {
-                  "start": 84,
-                  "end": 84
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                }
-              ],
-              "tests/utils/test_hub_utils.py": [
-                {
-                  "start": 92,
-                  "end": 92
+                  "start": 410,
+                  "end": 420
                 }
               ]
             },
@@ -2732,1335 +1786,52 @@
           }
         ],
         "predFiles": [
-          "src/transformers/models/whisper/__init__.py",
-          "src/transformers/models/whisper/configuration_whisper.py",
-          "src/transformers/models/whisper/convert_openai_to_hf.py",
-          "src/transformers/models/whisper/english_normalizer.py",
-          "src/transformers/models/whisper/feature_extraction_whisper.py",
           "src/transformers/models/whisper/modeling_flax_whisper.py",
-          "src/transformers/models/whisper/modeling_tf_whisper.py",
           "src/transformers/models/whisper/modeling_whisper.py",
-          "src/transformers/models/whisper/processing_whisper.py",
           "src/transformers/models/whisper/tokenization_whisper.py",
           "src/transformers/models/whisper/tokenization_whisper_fast.py",
-          "tests/extended/test_trainer_ext.py",
-          "tests/fixtures/tests_samples/SQUAD/sample.json",
-          "tests/generation/test_beam_constraints.py",
-          "tests/generation/test_beam_search.py",
-          "tests/generation/test_configuration_utils.py",
-          "tests/generation/test_flax_logits_process.py",
-          "tests/generation/test_flax_utils.py",
-          "tests/generation/test_logits_process.py",
-          "tests/generation/test_stopping_criteria.py",
-          "tests/generation/test_streamers.py",
-          "tests/generation/test_tf_logits_process.py",
-          "tests/generation/test_tf_utils.py",
-          "tests/generation/test_utils.py",
-          "tests/mixed_int8/test_mixed_int8.py",
-          "tests/models/canine/test_modeling_canine.py",
-          "tests/models/canine/test_tokenization_canine.py",
-          "tests/models/dit/test_modeling_dit.py",
-          "tests/models/fnet/test_modeling_fnet.py",
-          "tests/models/fnet/test_tokenization_fnet.py",
-          "tests/models/git/test_modeling_git.py",
-          "tests/models/git/test_processor_git.py",
-          "tests/models/gpt_neox/test_modeling_gpt_neox.py",
-          "tests/models/layoutxlm/test_processor_layoutxlm.py",
-          "tests/models/layoutxlm/test_tokenization_layoutxlm.py",
-          "tests/models/lilt/test_modeling_lilt.py",
-          "tests/models/llama/test_modeling_llama.py",
-          "tests/models/llama/test_tokenization_llama.py",
-          "tests/models/mbart/test_modeling_flax_mbart.py",
-          "tests/models/mbart/test_modeling_mbart.py",
-          "tests/models/mbart/test_modeling_tf_mbart.py",
-          "tests/models/mbart/test_tokenization_mbart.py",
-          "tests/models/mbart50/test_tokenization_mbart50.py",
-          "tests/models/openai/test_modeling_openai.py",
-          "tests/models/openai/test_modeling_tf_openai.py",
-          "tests/models/openai/test_tokenization_openai.py",
-          "tests/models/realm/test_modeling_realm.py",
-          "tests/models/realm/test_retrieval_realm.py",
-          "tests/models/realm/test_tokenization_realm.py",
-          "tests/models/rembert/test_modeling_rembert.py",
-          "tests/models/rembert/test_modeling_tf_rembert.py",
-          "tests/models/roberta_prelayernorm/test_modeling_flax_roberta_prelayernorm.py",
-          "tests/models/roberta_prelayernorm/test_modeling_roberta_prelayernorm.py",
-          "tests/models/roberta_prelayernorm/test_modeling_tf_roberta_prelayernorm.py",
-          "tests/models/roformer/test_modeling_flax_roformer.py",
-          "tests/models/roformer/test_modeling_roformer.py",
-          "tests/models/roformer/test_modeling_tf_roformer.py",
-          "tests/models/roformer/test_tokenization_roformer.py",
-          "tests/models/wav2vec2_conformer/test_modeling_wav2vec2_conformer.py",
           "tests/models/whisper/test_modeling_flax_whisper.py",
-          "tests/models/whisper/test_modeling_tf_whisper.py",
-          "tests/models/whisper/test_modeling_whisper.py",
-          "tests/models/whisper/test_processor_whisper.py",
-          "tests/models/whisper/test_tokenization_whisper.py",
-          "tests/models/xglm/test_modeling_flax_xglm.py",
-          "tests/models/xglm/test_modeling_tf_xglm.py",
-          "tests/models/xglm/test_modeling_xglm.py",
-          "tests/models/xglm/test_tokenization_xglm.py",
-          "tests/onnx/test_onnx.py",
-          "tests/pipelines/test_pipelines_automatic_speech_recognition.py",
-          "tests/sagemaker/scripts/pytorch/run_glue_model_parallelism.py",
-          "tests/test_backbone_common.py",
-          "tests/test_configuration_common.py",
-          "tests/test_feature_extraction_common.py",
-          "tests/test_image_processing_common.py",
-          "tests/test_image_transforms.py",
-          "tests/test_modeling_common.py",
-          "tests/test_modeling_flax_common.py",
-          "tests/test_modeling_tf_common.py",
-          "tests/test_pipeline_mixin.py",
-          "tests/test_sequence_feature_extraction_common.py",
-          "tests/test_tokenization_common.py",
-          "tests/trainer/test_data_collator.py",
-          "tests/trainer/test_trainer.py",
-          "tests/trainer/test_trainer_callback.py",
-          "tests/trainer/test_trainer_distributed.py",
-          "tests/trainer/test_trainer_seq2seq.py",
-          "tests/trainer/test_trainer_tpu.py",
-          "tests/trainer/test_trainer_utils.py",
-          "tests/utils/test_file_utils.py",
-          "tests/utils/test_hub_utils.py"
+          "tests/models/whisper/test_modeling_whisper.py"
         ],
         "predSpans": {
-          "tests/test_image_transforms.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/test_pipeline_mixin.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/test_sequence_feature_extraction_common.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/test_modeling_flax_common.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "tests/test_modeling_tf_common.py": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 1345,
-              "end": 1345
-            },
-            {
-              "start": 1418,
-              "end": 1418
-            },
-            {
-              "start": 2030,
-              "end": 2030
-            }
-          ],
-          "tests/generation/test_logits_process.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "src/transformers/models/whisper/feature_extraction_whisper.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "src/transformers/models/whisper/english_normalizer.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "src/transformers/models/whisper/convert_openai_to_hf.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "src/transformers/models/whisper/configuration_whisper.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "src/transformers/models/whisper/processing_whisper.py": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 45,
-              "end": 45
-            }
-          ],
           "src/transformers/models/whisper/tokenization_whisper.py": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 195,
-              "end": 195
-            },
-            {
-              "start": 197,
-              "end": 197
-            },
             {
               "start": 214,
               "end": 230
             },
             {
-              "start": 241,
-              "end": 241
-            },
-            {
-              "start": 242,
-              "end": 242
-            },
-            {
-              "start": 268,
-              "end": 268
-            },
-            {
-              "start": 309,
-              "end": 309
-            },
-            {
-              "start": 365,
-              "end": 365
-            },
-            {
-              "start": 372,
-              "end": 372
-            },
-            {
-              "start": 374,
-              "end": 374
-            },
-            {
-              "start": 378,
-              "end": 378
-            },
-            {
-              "start": 379,
-              "end": 379
-            },
-            {
-              "start": 385,
-              "end": 385
-            },
-            {
-              "start": 398,
-              "end": 398
-            },
-            {
-              "start": 399,
-              "end": 399
-            },
-            {
-              "start": 400,
-              "end": 400
-            },
-            {
-              "start": 401,
-              "end": 401
-            },
-            {
-              "start": 402,
-              "end": 402
-            },
-            {
-              "start": 403,
-              "end": 403
-            },
-            {
-              "start": 405,
-              "end": 405
-            },
-            {
-              "start": 407,
-              "end": 407
-            },
-            {
-              "start": 408,
-              "end": 408
-            },
-            {
-              "start": 416,
-              "end": 416
-            },
-            {
-              "start": 417,
-              "end": 417
-            },
-            {
               "start": 417,
               "end": 418
-            },
-            {
-              "start": 698,
-              "end": 698
-            },
-            {
-              "start": 699,
-              "end": 699
-            },
-            {
-              "start": 705,
-              "end": 705
-            },
-            {
-              "start": 706,
-              "end": 706
-            },
-            {
-              "start": 708,
-              "end": 708
-            },
-            {
-              "start": 713,
-              "end": 713
-            },
-            {
-              "start": 718,
-              "end": 718
-            },
-            {
-              "start": 728,
-              "end": 728
-            },
-            {
-              "start": 736,
-              "end": 736
-            },
-            {
-              "start": 739,
-              "end": 739
-            },
-            {
-              "start": 797,
-              "end": 797
-            },
-            {
-              "start": 801,
-              "end": 801
-            },
-            {
-              "start": 802,
-              "end": 802
-            },
-            {
-              "start": 803,
-              "end": 803
-            },
-            {
-              "start": 804,
-              "end": 804
-            },
-            {
-              "start": 806,
-              "end": 806
-            },
-            {
-              "start": 817,
-              "end": 817
-            },
-            {
-              "start": 818,
-              "end": 818
-            },
-            {
-              "start": 893,
-              "end": 893
-            },
-            {
-              "start": 899,
-              "end": 899
-            },
-            {
-              "start": 900,
-              "end": 900
-            }
-          ],
-          "src/transformers/models/whisper/__init__.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "src/transformers/models/whisper/modeling_tf_whisper.py": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 1207,
-              "end": 1207
-            },
-            {
-              "start": 1265,
-              "end": 1265
-            }
-          ],
-          "src/transformers/models/whisper/modeling_flax_whisper.py": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 1241,
-              "end": 1241
-            },
-            {
-              "start": 1387,
-              "end": 1387
-            },
-            {
-              "start": 1403,
-              "end": 1403
-            },
-            {
-              "start": 1404,
-              "end": 1404
-            },
-            {
-              "start": 1411,
-              "end": 1411
-            },
-            {
-              "start": 1412,
-              "end": 1424
-            },
-            {
-              "start": 1414,
-              "end": 1414
-            },
-            {
-              "start": 1415,
-              "end": 1415
-            },
-            {
-              "start": 1417,
-              "end": 1417
-            },
-            {
-              "start": 1420,
-              "end": 1420
-            },
-            {
-              "start": 1422,
-              "end": 1422
-            },
-            {
-              "start": 1431,
-              "end": 1431
-            },
-            {
-              "start": 1432,
-              "end": 1432
-            },
-            {
-              "start": 1433,
-              "end": 1433
-            },
-            {
-              "start": 1435,
-              "end": 1435
-            },
-            {
-              "start": 1436,
-              "end": 1436
             }
           ],
           "src/transformers/models/whisper/tokenization_whisper_fast.py": [
             {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 117,
-              "end": 117
-            },
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 144,
-              "end": 144
-            },
-            {
-              "start": 176,
-              "end": 176
-            },
-            {
-              "start": 347,
-              "end": 347
-            },
-            {
-              "start": 354,
-              "end": 354
-            },
-            {
-              "start": 356,
-              "end": 356
-            },
-            {
-              "start": 360,
-              "end": 360
-            },
-            {
-              "start": 361,
-              "end": 361
-            },
-            {
-              "start": 367,
-              "end": 367
-            },
-            {
-              "start": 395,
-              "end": 395
-            },
-            {
               "start": 395,
               "end": 396
-            },
-            {
-              "start": 396,
-              "end": 396
-            },
-            {
-              "start": 397,
-              "end": 397
-            },
-            {
-              "start": 398,
-              "end": 398
-            },
-            {
-              "start": 399,
-              "end": 399
-            },
-            {
-              "start": 400,
-              "end": 400
-            },
-            {
-              "start": 402,
-              "end": 402
-            },
-            {
-              "start": 404,
-              "end": 404
-            },
-            {
-              "start": 405,
-              "end": 405
-            },
-            {
-              "start": 413,
-              "end": 413
-            },
-            {
-              "start": 414,
-              "end": 414
-            },
-            {
-              "start": 469,
-              "end": 469
-            },
-            {
-              "start": 470,
-              "end": 470
-            },
-            {
-              "start": 471,
-              "end": 471
-            },
-            {
-              "start": 477,
-              "end": 477
-            },
-            {
-              "start": 478,
-              "end": 478
-            },
-            {
-              "start": 480,
-              "end": 480
-            },
-            {
-              "start": 485,
-              "end": 485
-            }
-          ],
-          "tests/generation/test_flax_utils.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "tests/generation/test_stopping_criteria.py": [
-            {
-              "start": 13,
-              "end": 13
             }
           ],
           "src/transformers/models/whisper/modeling_whisper.py": [
             {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 39,
-              "end": 39
-            },
-            {
-              "start": 1309,
-              "end": 1309
-            },
-            {
-              "start": 1379,
-              "end": 1379
-            },
-            {
-              "start": 1465,
-              "end": 1465
-            },
-            {
-              "start": 1471,
-              "end": 1471
-            },
-            {
-              "start": 1517,
-              "end": 1517
-            },
-            {
-              "start": 1519,
-              "end": 1519
-            },
-            {
-              "start": 1521,
-              "end": 1521
-            },
-            {
-              "start": 1564,
-              "end": 1564
-            },
-            {
               "start": 1564,
               "end": 1588
-            },
-            {
-              "start": 1565,
-              "end": 1565
-            },
-            {
-              "start": 1569,
-              "end": 1569
-            },
-            {
-              "start": 1570,
-              "end": 1570
-            },
-            {
-              "start": 1571,
-              "end": 1571
-            },
-            {
-              "start": 1572,
-              "end": 1572
-            },
-            {
-              "start": 1573,
-              "end": 1573
-            },
-            {
-              "start": 1574,
-              "end": 1574
-            },
-            {
-              "start": 1575,
-              "end": 1575
-            },
-            {
-              "start": 1578,
-              "end": 1578
-            },
-            {
-              "start": 1579,
-              "end": 1579
-            },
-            {
-              "start": 1581,
-              "end": 1581
-            },
-            {
-              "start": 1583,
-              "end": 1583
-            },
-            {
-              "start": 1587,
-              "end": 1587
-            },
-            {
-              "start": 1593,
-              "end": 1593
-            },
-            {
-              "start": 1595,
-              "end": 1595
-            },
-            {
-              "start": 1596,
-              "end": 1596
-            },
-            {
-              "start": 1599,
-              "end": 1599
-            },
-            {
-              "start": 1600,
-              "end": 1600
-            },
-            {
-              "start": 1602,
-              "end": 1602
-            },
-            {
-              "start": 1603,
-              "end": 1603
-            },
-            {
-              "start": 1605,
-              "end": 1605
-            },
-            {
-              "start": 1610,
-              "end": 1610
-            },
-            {
-              "start": 1611,
-              "end": 1611
-            }
-          ],
-          "tests/generation/test_flax_logits_process.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/generation/test_tf_logits_process.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/sagemaker/scripts/pytorch/run_glue_model_parallelism.py": [
-            {
-              "start": 14,
-              "end": 14
-            }
-          ],
-          "tests/fixtures/tests_samples/SQUAD/sample.json": [
-            {
-              "start": 82,
-              "end": 82
-            },
-            {
-              "start": 99,
-              "end": 99
-            }
-          ],
-          "tests/generation/test_tf_utils.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/generation/test_beam_constraints.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/generation/test_streamers.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/generation/test_configuration_utils.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/generation/test_beam_search.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/trainer/test_data_collator.py": [
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 264,
-              "end": 264
-            },
-            {
-              "start": 551,
-              "end": 551
-            },
-            {
-              "start": 828,
-              "end": 828
-            }
-          ],
-          "tests/trainer/test_trainer_tpu.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "tests/trainer/test_trainer_distributed.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "tests/generation/test_utils.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/trainer/test_trainer_seq2seq.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/trainer/test_trainer.py": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 1449,
-              "end": 1449
-            },
-            {
-              "start": 1453,
-              "end": 1453
-            }
-          ],
-          "tests/trainer/test_trainer_callback.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "tests/extended/test_trainer_ext.py": [
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 380,
-              "end": 380
-            }
-          ],
-          "tests/trainer/test_trainer_utils.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/test_backbone_common.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/test_image_processing_common.py": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 218,
-              "end": 218
-            }
-          ],
-          "tests/test_feature_extraction_common.py": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 86,
-              "end": 86
-            }
-          ],
-          "tests/onnx/test_onnx.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "tests/models/dit/test_modeling_dit.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/layoutxlm/test_tokenization_layoutxlm.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/mbart/test_tokenization_mbart.py": [
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 230,
-              "end": 230
-            },
-            {
-              "start": 239,
-              "end": 239
-            }
-          ],
-          "tests/models/roformer/test_tokenization_roformer.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/roformer/test_modeling_flax_roformer.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "tests/models/roformer/test_modeling_roformer.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/layoutxlm/test_processor_layoutxlm.py": [
-            {
-              "start": 12,
-              "end": 12
             }
           ],
-          "tests/models/roberta_prelayernorm/test_modeling_flax_roberta_prelayernorm.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "tests/models/roformer/test_modeling_tf_roformer.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/xglm/test_modeling_tf_xglm.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/xglm/test_modeling_xglm.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/roberta_prelayernorm/test_modeling_roberta_prelayernorm.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/roberta_prelayernorm/test_modeling_tf_roberta_prelayernorm.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/xglm/test_modeling_flax_xglm.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/xglm/test_tokenization_xglm.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/mbart/test_modeling_flax_mbart.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "tests/models/mbart/test_modeling_tf_mbart.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/mbart/test_modeling_mbart.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/mbart50/test_tokenization_mbart50.py": [
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 220,
-              "end": 220
-            },
-            {
-              "start": 230,
-              "end": 230
-            }
-          ],
-          "tests/models/gpt_neox/test_modeling_gpt_neox.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/wav2vec2_conformer/test_modeling_wav2vec2_conformer.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/mixed_int8/test_mixed_int8.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/lilt/test_modeling_lilt.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/canine/test_tokenization_canine.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/canine/test_modeling_canine.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/openai/test_modeling_tf_openai.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/fnet/test_modeling_fnet.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/openai/test_tokenization_openai.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/fnet/test_tokenization_fnet.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/openai/test_modeling_openai.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/realm/test_retrieval_realm.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/realm/test_tokenization_realm.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/llama/test_tokenization_llama.py": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 447,
-              "end": 447
-            }
-          ],
-          "tests/models/git/test_processor_git.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "tests/models/llama/test_modeling_llama.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/git/test_modeling_git.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/realm/test_modeling_realm.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/rembert/test_modeling_rembert.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/rembert/test_modeling_tf_rembert.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/models/whisper/test_modeling_tf_whisper.py": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 580,
-              "end": 580
-            },
-            {
-              "start": 621,
-              "end": 621
-            },
-            {
-              "start": 701,
-              "end": 701
-            },
-            {
-              "start": 738,
-              "end": 738
-            }
-          ],
-          "tests/models/whisper/test_processor_whisper.py": [
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 141,
-              "end": 141
-            },
-            {
-              "start": 143,
-              "end": 143
-            },
-            {
-              "start": 144,
-              "end": 144
-            },
-            {
-              "start": 148,
-              "end": 148
-            }
-          ],
-          "tests/models/whisper/test_tokenization_whisper.py": [
-            {
-              "start": 293,
-              "end": 293
-            },
-            {
-              "start": 299,
-              "end": 299
-            }
-          ],
-          "tests/models/whisper/test_modeling_flax_whisper.py": [
-            {
-              "start": 123,
-              "end": 123
-            },
-            {
-              "start": 252,
-              "end": 265
-            },
-            {
-              "start": 535,
-              "end": 535
-            },
-            {
-              "start": 552,
-              "end": 552
-            },
-            {
-              "start": 559,
-              "end": 559
-            },
+          "src/transformers/models/whisper/modeling_flax_whisper.py": [
             {
-              "start": 570,
-              "end": 570
+              "start": 1412,
+              "end": 1424
             }
           ],
           "tests/models/whisper/test_modeling_whisper.py": [
             {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 146,
-              "end": 146
-            },
-            {
-              "start": 184,
-              "end": 184
-            },
-            {
-              "start": 276,
-              "end": 276
-            },
-            {
               "start": 417,
               "end": 428
-            },
-            {
-              "start": 996,
-              "end": 996
-            },
-            {
-              "start": 1188,
-              "end": 1188
-            },
-            {
-              "start": 1219,
-              "end": 1219
-            },
-            {
-              "start": 1417,
-              "end": 1417
-            },
-            {
-              "start": 1488,
-              "end": 1488
-            },
-            {
-              "start": 1498,
-              "end": 1498
-            },
-            {
-              "start": 1531,
-              "end": 1531
             }
           ],
-          "tests/test_configuration_common.py": [
+          "tests/models/whisper/test_modeling_flax_whisper.py": [
             {
-              "start": 360,
-              "end": 360
-            }
-          ],
-          "tests/test_modeling_common.py": [
-            {
-              "start": 3351,
-              "end": 3351
-            }
-          ],
-          "tests/test_tokenization_common.py": [
-            {
-              "start": 3957,
-              "end": 3957
-            },
-            {
-              "start": 3975,
-              "end": 3975
-            }
-          ],
-          "tests/pipelines/test_pipelines_automatic_speech_recognition.py": [
-            {
-              "start": 307,
-              "end": 307
-            }
-          ],
-          "tests/utils/test_file_utils.py": [
-            {
-              "start": 77,
-              "end": 77
-            },
-            {
-              "start": 84,
-              "end": 84
-            },
-            {
-              "start": 91,
-              "end": 91
-            }
-          ],
-          "tests/utils/test_hub_utils.py": [
-            {
-              "start": 92,
-              "end": 92
+              "start": 252,
+              "end": 265
             }
           ]
         },
@@ -4090,7 +1861,7 @@
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
+              "file": 0.5,
               "symbol": 0.0,
               "span": 0.0,
               "line": 0.0
@@ -4099,7 +1870,7 @@
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
+              "file": 0.5,
               "symbol": 0.0,
               "span": 0.0,
               "line": 0.0
@@ -4108,37 +1879,37 @@
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
+              "file": 0.5,
               "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "span": 0.05343342901302716,
+              "line": 0.07333333333333333
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
+              "file": 0.5,
               "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "span": 0.05343342901302716,
+              "line": 0.07333333333333333
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.0,
+              "file": 0.5,
               "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "span": 0.05343342901302716,
+              "line": 0.07333333333333333
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.24862000441598586,
-              "line": 0.1
+              "file": 0.5,
+              "symbol": 0.0,
+              "span": 0.05343342901302716,
+              "line": 0.07333333333333333
             }
           },
           {
@@ -4146,8 +1917,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.24862000441598586,
-              "line": 0.1
+              "span": 0.41907705895341135,
+              "line": 0.26666666666666666
             }
           },
           {
@@ -4155,8 +1926,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.24862000441598586,
-              "line": 0.1
+              "span": 0.41907705895341135,
+              "line": 0.26666666666666666
             }
           },
           {
@@ -4164,8 +1935,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.24862000441598586,
-              "line": 0.1
+              "span": 0.41907705895341135,
+              "line": 0.26666666666666666
             }
           },
           {
@@ -4173,8 +1944,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.24862000441598586,
-              "line": 0.1
+              "span": 0.4793552660631486,
+              "line": 0.2866666666666667
             }
           },
           {
@@ -4182,8 +1953,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.30470302495032014,
-              "line": 0.12
+              "span": 0.4793552660631486,
+              "line": 0.2866666666666667
             }
           },
           {
@@ -4191,8 +1962,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.30470302495032014,
-              "line": 0.12
+              "span": 0.4793552660631486,
+              "line": 0.2866666666666667
             }
           },
           {
@@ -4200,8 +1971,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.30470302495032014,
-              "line": 0.12
+              "span": 0.4793552660631486,
+              "line": 0.2866666666666667
             }
           },
           {
@@ -4209,8 +1980,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.30470302495032014,
-              "line": 0.12
+              "span": 0.4793552660631486,
+              "line": 0.2866666666666667
             }
           },
           {
@@ -4218,8 +1989,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.30470302495032014,
-              "line": 0.12
+              "span": 0.4793552660631486,
+              "line": 0.2866666666666667
             }
           },
           {
@@ -4227,8 +1998,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.30470302495032014,
-              "line": 0.12
+              "span": 0.4793552660631486,
+              "line": 0.2866666666666667
             }
           },
           {
@@ -4236,8 +2007,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.3181717818502981,
-              "line": 0.12666666666666668
+              "span": 0.4793552660631486,
+              "line": 0.2866666666666667
             }
           },
           {
@@ -4245,8 +2016,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.3181717818502981,
-              "line": 0.12666666666666668
+              "span": 0.7228968867299624,
+              "line": 0.6133333333333333
             }
           },
           {
@@ -4254,22 +2025,139 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.3181717818502981,
-              "line": 0.12666666666666668
+              "span": 0.7228968867299624,
+              "line": 0.6133333333333333
+            }
+          },
+          {
+            "step": 21,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.7228968867299624,
+              "line": 0.6133333333333333
+            }
+          },
+          {
+            "step": 22,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.7228968867299624,
+              "line": 0.6133333333333333
+            }
+          },
+          {
+            "step": 23,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.7228968867299624,
+              "line": 0.6133333333333333
+            }
+          },
+          {
+            "step": 24,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.7228968867299624,
+              "line": 0.6133333333333333
+            }
+          },
+          {
+            "step": 25,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.7228968867299624,
+              "line": 0.6133333333333333
+            }
+          },
+          {
+            "step": 26,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.7363656436299404,
+              "line": 0.62
+            }
+          },
+          {
+            "step": 27,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.7363656436299404,
+              "line": 0.62
+            }
+          },
+          {
+            "step": 28,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.7363656436299404,
+              "line": 0.62
+            }
+          },
+          {
+            "step": 29,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.7363656436299404,
+              "line": 0.62
+            }
+          },
+          {
+            "step": 30,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.7363656436299404,
+              "line": 0.62
+            }
+          },
+          {
+            "step": 31,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.7363656436299404,
+              "line": 0.62
+            }
+          },
+          {
+            "step": 32,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.7363656436299404,
+              "line": 0.62
+            }
+          },
+          {
+            "step": 33,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.7363656436299404,
+              "line": 0.62
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.7,
-          "symbol": 0.7,
-          "span": 0.2012916758666372,
-          "line": 0.08000000000000002
+          "file": 0.8787878787878788,
+          "symbol": 0.7878787878787878,
+          "span": 0.49263667810808465,
+          "line": 0.38303030303030305
         },
         "redundancy": {
-          "file": 0.2222222222222222,
-          "symbol": 0.2090909090909091,
-          "span": 0.11329923273657294,
-          "line": 0.10139860139860135
+          "file": 0.7272727272727273,
+          "symbol": 0.2569444444444444,
+          "span": 0.10100811786698993,
+          "line": 0.10772578890097928
         }
       },
       "fixOverlap": {
@@ -4288,42 +2176,42 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/33f793a7d6ec1032038e/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/33f793a7d6ec1032038e/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/33f793a7d6ec1032038e/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/33f793a7d6ec1032038e/home/.agents/skills/superpowers/systematic-debugging/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: systematic-debugging\ndescription: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes\n---\n\n# Systematic Debugging\n\n## Overview\n\nRandom fixes waste time and create new bugs. Quick patches mask underlying issues.\n\n**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.\n\n**Violating the letter of this process is violating the spirit of debugging.**\n\n## The Iron Law\n\n```\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST\n```\n\nIf you haven't completed Phase 1, you cannot propose fixes.\n\n## When to Use\n\nUse for ANY technical issue:\n- Test failures\n- Bugs in production\n- Unexpected behavior\n- Performance problems\n- Build failures\n- Integration issues\n\n**Use this ESPECIALLY when:**\n- Under time pressure (emergencies make guessing tempting)\n- \"Just one quick fix\" seems obvious\n- You've already tried multiple fixes\n- Previous fix didn't work\n- You don't fully understand the issue\n\n**Don't skip when:**\n- Issue seems simple (simple bugs have root causes too)\n- You're in a hurry (rushing guarantees rework)\n- Manager wants it fixed NOW (systematic is faster than thrashing)\n\n## The Four Phases\n\nYou MUST complete each phase before proceeding to the next.\n\n### Phase 1: Root Cause Investigation\n\n**BEFORE attempting ANY fix:**\n\n1. **Read Error Messages Carefully**\n   - Don't skip past errors or warnings\n   - They often contain the exact solution\n   - Read stack traces completely\n   - Note line numbers, file paths, error codes\n\n2. **Reproduce Consistently**\n   - Can you trigger it reliably?\n   - What are the exact steps?\n   - Does it happen every time?\n   - If not reproducible \u2192 gather more data, don't guess\n\n3. **Check Recent Changes**\n   - What changed that could cause this?\n   - Git diff, recent commits\n   - New dependencies, config changes\n   - Environmental differences\n\n4. **Gather Evidence in Multi-Component Systems**\n\n   **WHEN system has multiple components (CI \u2192 build \u2192 signing, API \u2192 service \u2192 database):**\n\n   **BEFORE proposing fixes, add diagnostic instrumentation:**\n   ```\n   For EACH component boundary:\n     - Log what data enters component\n     - Log what data exits component\n     - Verify environment/config propagation\n     - Check state at each layer\n\n   Run once to gather evidence showing WHERE it breaks\n   THEN analyze evidence to identify failing component\n   THEN investigate that specific component\n   ```\n\n   **Example (multi-layer system):**\n   ```bash\n   # Layer 1: Workflow\n   echo \"=== Secrets available in workflow: ===\"\n   echo \"IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}\"\n\n   # Layer 2: Build script\n   echo \"=== Env vars in build script: ===\"\n   env | grep IDENTITY || echo \"IDENTITY not in environment\"\n\n   # Layer 3: Signing script\n   echo \"=== Keychain state: ===\"\n   security list-keychains\n   security find-identity -v\n\n   # Layer 4: Actual signing\n   codesign --sign \"$IDENTITY\" --verbose=4 \"$APP\"\n   ```\n\n   **This reveals:** Which layer fails (secrets \u2192 workflow \u2713, workflow \u2192 build \u2717)\n\n5. **Trace Data Flow**\n\n   **WHEN error is deep in call stack:**\n\n   See `root-cause-tracing.md` in this directory for the complete backward tracing technique.\n\n   **Quick version:**\n   - Where does bad value originate?\n   - What called this with bad value?\n   - Keep tracing up until you find the source\n   - Fix at source, not at symptom\n\n### Phase 2: Pattern Analysis\n\n**Find the pattern before fixing:**\n\n1. **Find Working Examples**\n   - Locate similar working code in same codebase\n   - What works that's similar to what's broken?\n\n2. **Compare Against References**\n   - If implementing pattern, read reference implementation COMPLETELY\n   - Don't skim - read every line\n   - Understand the pattern fully before applying\n\n3. **Identify Differences**\n   - What's different between working and broken?\n   - List every difference, however small\n   - Don't assume \"that can't matter\"\n\n4. **Understand Dependencies**\n   - What other components does this need?\n   - \u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/33f793a7d6ec1032038e/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/33f793a7d6ec1032038e/home/.agents/skills/superpowers/writing-plans/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: writing-plans\ndescription: Use when you have a spec or requirements for a multi-step task, before touching code\n---\n\n# Writing Plans\n\n## Overview\n\nWrite comprehensive implementation plans assuming the engineer has zero context for our codebase and questionable taste. Document everything they need to know: which files to touch for each task, code, testing, docs they might need to check, how to test it. Give them the whole plan as bite-sized tasks. DRY. YAGNI. TDD. Frequent commits.\n\nAssume they are a skilled developer, but know almost nothing about our toolset or problem domain. Assume they don't know good test design very well.\n\n**Announce at start:** \"I'm using the writing-plans skill to create the implementation plan.\"\n\n**Context:** This should be run in a dedicated worktree (created by brainstorming skill).\n\n**Save plans to:** `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`\n- (User preferences for plan location override this default)\n\n## Scope Check\n\nIf the spec covers multiple independent subsystems, it should have been broken into sub-project specs during brainstorming. If it wasn't, suggest breaking this into separate plans \u2014 one per subsystem. Each plan should produce working, testable software on its own.\n\n## File Structure\n\nBefore defining tasks, map out which files will be created or modified and what each one is responsible for. This is where decomposition decisions get locked in.\n\n- Design units with clear boundaries and well-defined interfaces. Each file should have one clear responsibility.\n- You reason best about code you can hold in context at once, and your edits are more reliable when files are focused. Prefer smaller, focused files over large ones that do too much.\n- Files that change together should live together. Split by responsibility, not by technical layer.\n- In existing codebases, follow established patterns. If the codebase uses large files, don't unilaterally restructure - but if a file you're modifying has grown unwieldy, including a split in the plan is reasonable.\n\nThis structure informs the task decomposition. Each task should produce self-contained changes that make sense independently.\n\n## Bite-Sized Task Granularity\n\n**Each step is one action (2-5 minutes):**\n- \"Write the failing test\" - step\n- \"Run it to make sure it fails\" - step\n- \"Implement the minimal code to make the test pass\" - step\n- \"Run the tests and make sure they pass\" - step\n- \"Commit\" - step\n\n## Plan Document Header\n\n**Every plan MUST start with this header:**\n\n```markdown\n# [Feature Name] Implementation Plan\n\n> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.\n\n**Goal:** [One sentence describing what this builds]\n\n**Architecture:** [2-3 sentences about approach]\n\n**Tech Stack:** [Key technologies/libraries]\n\n---\n```\n\n## Task Structure\n\n````markdown\n### Task N: [Component Name]\n\n**Files:**\n- Create: `exact/path/to/file.py`\n- Modify: `exact/path/to/existing.py:123-145`\n- Test: `tests/exact/path/to/test.py`\n\n- [ ] **Step 1: Write the failing test**\n\n```python\ndef test_specific_behavior():\n    result = function(input)\n    assert result == expected\n```\n\n- [ ] **Step 2: Run test to verify it fails**\n\nRun: `pytest tests/path/test.py::test_name -v`\nExpected: FAIL with \"function not defined\"\n\n- [ ] **Step 3: Write minimal implementation**\n\n```python\ndef function(input):\n    return expected\n```\n\n- [ ] **Step 4: Run test to verify it passes**\n\nRun: `pytest tests/path/test.py::test_name -v`\nExpected: PASS\n\n- [ ] **Step 5: Commit**\n\n```bash\ngit add tests/path/test.py src/path/file.py\ngit commit -m \"feat: add specific feature\"\n```\n````\n\n## Remember\n- Exact file paths always\n- Complete code in plan (not \"add validation\")\n- Exact commands with expected output\n- Reference relevant skills with @ syntax\n- DRY, YAGNI, TDD, frequent commits\n\n## Plan Review Loop\n\nA\u2026",
           "exitCode": 0
         },
@@ -4547,7 +2435,18 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/models/whisper/test_modeling_flax_whisper.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/tests/models/whisper/test_modeling_whisper.py",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "command_execution",
@@ -4580,7 +2479,26 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/models/whisper/modeling_flax_whisper.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/transformers/models/whisper/modeling_whisper.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/transformers/models/whisper/tokenization_whisper.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/transformers/models/whisper/tokenization_whisper_fast.py",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "todo_list",

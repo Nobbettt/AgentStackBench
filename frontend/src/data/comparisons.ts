@@ -8,9 +8,11 @@ import type {
   ComparisonCard,
   ComparisonData,
   ComparisonInstance,
+  ComparisonInstanceBundle,
   ComparisonInstanceDetail,
   ComparisonInstanceDetailTraceEntry,
   ComparisonInstanceDetailVariant,
+  ComparisonInstancesPayload,
   FilterMode,
   LeaderboardRow,
 } from "@/data/comparison-types";
@@ -19,9 +21,11 @@ export type {
   ComparisonCard,
   ComparisonData,
   ComparisonInstance,
+  ComparisonInstanceBundle,
   ComparisonInstanceDetail,
   ComparisonInstanceDetailTraceEntry,
   ComparisonInstanceDetailVariant,
+  ComparisonInstancesPayload,
   FilterMode,
   LeaderboardRow,
 } from "@/data/comparison-types";
@@ -479,4 +483,52 @@ export function cardsForFilter(data: ComparisonData, filter: FilterMode): Compar
 
 export function findComparisonById(data: ComparisonData, id: string): ComparisonCard | undefined {
   return data.comparisonCards.find((item) => item.id === id);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function mergePlainObjects<T extends Record<string, unknown>>(base: T, patch: Record<string, unknown>): T {
+  const next: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    const current = next[key];
+    next[key] = isPlainObject(current) && isPlainObject(value)
+      ? mergePlainObjects(current, value)
+      : value;
+  }
+  return next as T;
+}
+
+function mergeInstances(
+  existingInstances: ComparisonCard["variants"][number]["instances"] | undefined,
+  incomingInstances: ComparisonInstancesPayload["variants"][number]["instances"] | undefined,
+): ComparisonCard["variants"][number]["instances"] {
+  const instancesById = new Map<string, Record<string, unknown>>();
+  for (const instance of existingInstances ?? []) {
+    instancesById.set(instance.instanceId, instance as unknown as Record<string, unknown>);
+  }
+  for (const instance of incomingInstances ?? []) {
+    const existing = instancesById.get(instance.instanceId);
+    instancesById.set(
+      instance.instanceId,
+      existing ? mergePlainObjects(existing, instance as unknown as Record<string, unknown>) : instance as unknown as Record<string, unknown>,
+    );
+  }
+  return Array.from(instancesById.values()) as NonNullable<ComparisonCard["variants"][number]["instances"]>;
+}
+
+export function withComparisonInstances(comparison: ComparisonCard, payload: ComparisonInstancesPayload): ComparisonCard {
+  if (payload.comparisonId !== comparison.id) {
+    return comparison;
+  }
+
+  const instancesByLabel = new Map(payload.variants.map((variant) => [variant.label, variant.instances]));
+  return {
+    ...comparison,
+    variants: comparison.variants.map((variant) => ({
+      ...variant,
+      instances: mergeInstances(variant.instances, instancesByLabel.get(variant.label)),
+    })),
+  };
 }

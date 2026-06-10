@@ -1,3 +1,7 @@
+.. SPDX-License-Identifier: Apache-2.0
+.. Fork note: Modified by Norbert Laszlo on 2026-06-02 from upstream ContextBench.
+.. Summary of changes: clarify fork context aggregate uses file/block/line/symbol F1.
+
 Leaderboard
 ===========
 
@@ -136,7 +140,7 @@ Evaluation Criteria
 Submissions are ranked by:
 
 1. **Primary metric**: Pass@1 (task success rate)
-2. **Context F1**: Balanced file/symbol/span F1 score
+2. **Context F1**: Macro-average file/block/line/symbol F1 score
 3. **Efficiency**: AUC-Coverage (how quickly relevant context is found)
 4. **Cost**: Average inference cost per instance
 

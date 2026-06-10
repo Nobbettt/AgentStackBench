@@ -14,9 +14,28 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [
+          "tests/roots/test-ext-inheritance_diagram-svg/my_package/index.rst"
+        ],
+        "missingTrajectoryPaths": [
+          "tests/roots/test-ext-inheritance_diagram-svg/my_package/index.rst"
+        ],
+        "missingFinalPathCount": 1,
+        "missingTrajectoryPathCount": 1
+      },
       "startedAt": "2026-05-19T09:30:36Z",
       "completedAt": "2026-05-19T09:37:12Z",
       "durationMs": 396266,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1398678,
@@ -25,6 +44,28 @@
         "total_tokens": 1417493,
         "cache_read_input_tokens": 1183872
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 41,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/sphinx/ext/graphviz.py b/sphinx/ext/graphviz.py\nindex 8b21d9e3b..6c32c1b6c 100644\n--- a/sphinx/ext/graphviz.py\n+++ b/sphinx/ext/graphviz.py\n@@ -26,7 +26,7 @@ from sphinx.util import logging\n from sphinx.util.docutils import SphinxDirective, SphinxTranslator\n from sphinx.util.i18n import search_image_for_language\n from sphinx.util.nodes import set_source_info\n-from sphinx.util.osutil import ensuredir\n+from sphinx.util.osutil import canon_path, ensuredir, relpath\n from sphinx.util.typing import OptionSpec\n from sphinx.writers.html import HTML5Translator\n from sphinx.writers.latex import LaTeXTranslator\n@@ -218,11 +218,15 @@ class GraphvizSimple(SphinxDirective):\n \n \n def fix_svg_relative_paths(self: SphinxTranslator, filepath: str) -> None:\n-    \"\"\"Change relative links in generated svg files to be relative to imgpath.\"\"\"\n+    \"\"\"Change page-relative links in generated SVG files to be SVG-relative.\"\"\"\n     tree = ET.parse(filepath)  # NoQA: S314\n     root = tree.getroot()\n     ns = {'svg': 'http://www.w3.org/2000/svg', 'xlink': 'http://www.w3.org/1999/xlink'}\n     href_name = '{http://www.w3.org/1999/xlink}href'\n+    current_doctreedir = path.dirname(\n+        self.builder.get_outfilename(self.builder.current_docname)\n+    )\n+    imagedir = path.dirname(filepath)\n     modified = False\n \n     for element in chain(\n@@ -230,15 +234,12 @@ def fix_svg_relative_paths(self: SphinxTranslator, filepath: str) -> None:\n         root.findall('.//svg:a[@xlink:href]', ns),\n     ):\n         scheme, hostname, url, query, fragment = urlsplit(element.attrib[href_name])\n-        if hostname:\n+        if scheme or hostname or url.startswith('/'):\n             # not a relative link\n             continue\n \n-        old_path = path.join(self.builder.outdir, url)\n-        new_path = path.relpath(\n-            old_path,\n-            start=path.join(self.builder.outdir, self.builder.imgpath),\n-        )\n+        old_path = path.normpath(path.join(current_doctreedir, url))\n+        new_path = canon_path(relpath(old_path, start=imagedir))\n         modified_url = urlunsplit((scheme, hostname, new_path, query, fragment))\n \n         element.set(href_name, modified_url)\ndiff --git a/sphinx/ext/inheritance_diagram.py b/sphinx/ext/inheritance_diagram.py\nindex 6e3985512..fc7b15896 100644\n--- a/sphinx/ext/inheritance_diagram.py\n+++ b/sphinx/ext/inheritance_diagram.py\n@@ -412,13 +412,10 @@ def html_visit_inheritance_diagram(self: HTML5Translator, node: inheritance_diag\n     pending_xrefs = cast(Iterable[addnodes.pending_xref], node)\n     for child in pending_xrefs:\n         if child.get('refuri') is not None:\n-            if graphviz_output_format == 'SVG':\n-                urls[child['reftitle']] = \"../\" + child.get('refuri')\n-            else:\n-                urls[child['reftitle']] = child.get('refuri')\n+            urls[child['reftitle']] = child.get('refuri')\n         elif child.get('refid') is not None:\n             if graphviz_output_format == 'SVG':\n-                urls[child['reftitle']] = '../' + current_filename + '#' + child.get('refid')\n+                urls[child['reftitle']] = current_filename + '#' + child.get('refid')\n             else:\n                 urls[child['reftitle']] = '#' + child.get('refid')\n \ndiff --git a/tests/test_ext_inheritance_diagram.py b/tests/test_ext_inheritance_diagram.py\nindex 16581b075..4767c0b28 100644\n--- a/tests/test_ext_inheritance_diagram.py\n+++ b/tests/test_ext_inheritance_diagram.py\n@@ -171,6 +171,20 @@ def test_inheritance_diagram_svg_html(app, status, warning):\n     assert re.search(pattern, content, re.M)\n \n \n+@pytest.mark.sphinx('html', testroot='ext-inheritance_diagram-svg',\n+                    confoverrides={'graphviz_output_format': 'svg'})\n+@pytest.mark.usefixtures('if_graphviz_found')\n+def test_inheritance_diagram_svg_html_nested_links(app, status, warning):\n+    app.builder.build_all()\n+\n+    image = next((app.outdir / '_images').glob('inheritance-*.svg'))\n+    image_content = image.read_text(encoding='utf8')\n+\n+    assert 'ns1:href=\"../my_package/bar.html#test.Bar\"' in image_content\n+    assert 'ns1:href=\"../my_package/baz.html#test.Baz\"' in image_content\n+    assert 'ns1:href=\"../my_package/foo.html#test.Foo\"' in image_content\n+\n+\n @pytest.mark.sphinx('latex', testroot='ext-inheritance_diagram')\n @pytest.mark.usefixtures('if_graphviz_found')\n def test_inheritance_diagram_latex(app, status, warning):\n",
       "finalOutput": {
         "status": "completed",
@@ -79,156 +120,25 @@
             "files": [
               "sphinx/ext/inheritance_diagram.py"
             ],
-            "spans": {},
+            "spans": {
+              "sphinx/ext/inheritance_diagram.py": [
+                {
+                  "start": 380,
+                  "end": 460
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "sphinx/ext/graphviz.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/test_ext_graphviz.py",
-              "tests/test_ext_inheritance_diagram.py"
-            ],
             "spans": {
-              "tests/test_ext_inheritance_diagram.py": [
+              "sphinx/ext/graphviz.py": [
                 {
-                  "start": 1,
-                  "end": 1
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 18,
-                  "end": 18
-                },
-                {
-                  "start": 46,
-                  "end": 46
-                },
-                {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                },
-                {
-                  "start": 88,
-                  "end": 88
-                },
-                {
-                  "start": 106,
-                  "end": 106
-                },
-                {
-                  "start": 129,
-                  "end": 129
-                },
-                {
-                  "start": 138,
-                  "end": 138
-                },
-                {
-                  "start": 140,
-                  "end": 140
-                },
-                {
-                  "start": 147,
-                  "end": 147
-                },
-                {
-                  "start": 148,
-                  "end": 148
-                },
-                {
-                  "start": 154,
-                  "end": 154
-                },
-                {
-                  "start": 155,
-                  "end": 155
-                },
-                {
-                  "start": 157,
-                  "end": 157
-                },
-                {
-                  "start": 164,
-                  "end": 164
-                },
-                {
-                  "start": 165,
-                  "end": 165
-                },
-                {
-                  "start": 174,
-                  "end": 174
-                },
-                {
-                  "start": 176,
-                  "end": 176
-                },
-                {
-                  "start": 182,
-                  "end": 182
-                },
-                {
-                  "start": 187,
-                  "end": 187
-                },
-                {
-                  "start": 188,
-                  "end": 188
-                },
-                {
-                  "start": 190,
-                  "end": 190
-                },
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 205,
-                  "end": 205
-                },
-                {
-                  "start": 206,
-                  "end": 206
-                },
-                {
-                  "start": 217,
-                  "end": 217
-                }
-              ],
-              "tests/test_ext_graphviz.py": [
-                {
-                  "start": 43,
-                  "end": 43
-                },
-                {
-                  "start": 161,
-                  "end": 161
-                },
-                {
-                  "start": 163,
-                  "end": 163
-                },
-                {
-                  "start": 188,
-                  "end": 188
+                  "start": 200,
+                  "end": 380
                 }
               ]
             },
@@ -238,262 +148,39 @@
             "files": [
               "tests/test_ext_graphviz.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/test_ext_graphviz.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/test_ext_inheritance_diagram.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/roots/test-ext-autodoc/target/inheritance.py",
-              "tests/roots/test-ext-graphviz/_static/images/test.svg",
-              "tests/roots/test-ext-graphviz/conf.py",
-              "tests/roots/test-ext-graphviz/graph.dot",
-              "tests/roots/test-ext-graphviz/graph.xx.dot",
-              "tests/roots/test-ext-graphviz/index.rst",
-              "tests/roots/test-ext-inheritance_diagram/conf.py",
-              "tests/roots/test-ext-inheritance_diagram/example/__init__.py",
-              "tests/roots/test-ext-inheritance_diagram/example/sphinx.py",
-              "tests/roots/test-ext-inheritance_diagram/index.rst",
-              "tests/roots/test-ext-inheritance_diagram/test.py",
-              "tests/roots/test-inheritance/basic_diagram.rst",
-              "tests/roots/test-inheritance/conf.py",
-              "tests/roots/test-inheritance/diagram_module_w_2_top_classes.rst",
-              "tests/roots/test-inheritance/diagram_w_1_top_class.rst",
-              "tests/roots/test-inheritance/diagram_w_2_top_classes.rst",
-              "tests/roots/test-inheritance/diagram_w_nested_classes.rst",
-              "tests/roots/test-inheritance/diagram_w_parts.rst",
-              "tests/roots/test-inheritance/dummy/__init__.py",
-              "tests/roots/test-inheritance/dummy/test.py",
-              "tests/roots/test-inheritance/dummy/test_nested.py",
-              "tests/roots/test-inheritance/index.rst"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "sphinx/builders/__init__.py",
-              "sphinx/builders/html/__init__.py",
-              "sphinx/builders/latex/__init__.py",
-              "sphinx/builders/singlehtml.py",
-              "sphinx/builders/texinfo.py",
-              "sphinx/builders/text.py",
-              "sphinx/ext/graphviz.py",
-              "sphinx/ext/imgmath.py",
-              "sphinx/ext/inheritance_diagram.py",
-              "sphinx/ext/todo.py",
-              "sphinx/ext/viewcode.py",
-              "sphinx/writers/html5.py"
-            ],
             "spans": {
-              "sphinx/ext/viewcode.py": [
+              "tests/test_ext_inheritance_diagram.py": [
                 {
-                  "start": 248,
-                  "end": 248
-                },
-                {
-                  "start": 329,
-                  "end": 329
-                },
-                {
-                  "start": 331,
-                  "end": 331
-                }
-              ],
-              "sphinx/ext/todo.py": [
-                {
-                  "start": 170,
-                  "end": 170
-                }
-              ],
-              "sphinx/ext/imgmath.py": [
-                {
-                  "start": 337,
-                  "end": 337
-                },
-                {
-                  "start": 378,
-                  "end": 378
-                }
-              ],
-              "sphinx/ext/inheritance_diagram.py": [
-                {
-                  "start": 410,
-                  "end": 410
-                }
-              ],
-              "sphinx/ext/graphviz.py": [
-                {
-                  "start": 221,
-                  "end": 221
-                },
-                {
-                  "start": 240,
-                  "end": 240
-                },
-                {
-                  "start": 260,
+                  "start": 1,
                   "end": 260
                 }
-              ],
-              "sphinx/builders/singlehtml.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/ext/graphviz.py"
+            ],
+            "spans": {
+              "sphinx/ext/graphviz.py": [
                 {
-                  "start": 45,
-                  "end": 45
-                }
-              ],
-              "sphinx/builders/text.py": [
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 64,
-                  "end": 64
-                }
-              ],
-              "sphinx/builders/__init__.py": [
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 102,
-                  "end": 102
-                },
-                {
-                  "start": 144,
-                  "end": 144
-                },
-                {
-                  "start": 149,
-                  "end": 149
-                }
-              ],
-              "sphinx/builders/texinfo.py": [
-                {
-                  "start": 66,
-                  "end": 66
-                }
-              ],
-              "sphinx/builders/html/__init__.py": [
-                {
-                  "start": 48,
-                  "end": 48
-                },
-                {
-                  "start": 224,
-                  "end": 224
-                },
-                {
-                  "start": 259,
-                  "end": 259
-                },
-                {
-                  "start": 591,
-                  "end": 591
-                },
-                {
-                  "start": 600,
-                  "end": 600
-                },
-                {
-                  "start": 611,
-                  "end": 611
-                },
-                {
-                  "start": 672,
-                  "end": 672
-                },
-                {
-                  "start": 673,
-                  "end": 673
-                },
-                {
-                  "start": 674,
-                  "end": 674
-                },
-                {
-                  "start": 684,
-                  "end": 684
-                },
-                {
-                  "start": 931,
-                  "end": 931
-                },
-                {
-                  "start": 1041,
-                  "end": 1041
-                },
-                {
-                  "start": 1050,
-                  "end": 1050
-                },
-                {
-                  "start": 1058,
-                  "end": 1058
-                },
-                {
-                  "start": 1062,
-                  "end": 1062
-                },
-                {
-                  "start": 1202,
-                  "end": 1202
-                },
-                {
-                  "start": 1210,
-                  "end": 1210
-                },
-                {
-                  "start": 1225,
-                  "end": 1225
-                },
-                {
-                  "start": 1237,
-                  "end": 1237
-                },
-                {
-                  "start": 1241,
-                  "end": 1241
-                },
-                {
-                  "start": 1247,
-                  "end": 1247
-                },
-                {
-                  "start": 1275,
-                  "end": 1275
-                },
-                {
-                  "start": 1280,
-                  "end": 1280
-                },
-                {
-                  "start": 1285,
-                  "end": 1285
-                }
-              ],
-              "sphinx/builders/latex/__init__.py": [
-                {
-                  "start": 141,
-                  "end": 141
-                }
-              ],
-              "sphinx/writers/html5.py": [
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 665,
-                  "end": 665
+                  "start": 1,
+                  "end": 140
                 }
               ]
             },
@@ -503,95 +190,11 @@
             "files": [
               "tests/roots/test-ext-inheritance_diagram/index.rst"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "sphinx/builders/html/__init__.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "sphinx/builders/__init__.py",
-              "sphinx/builders/dirhtml.py",
-              "sphinx/builders/dummy.py",
-              "sphinx/builders/gettext.py",
-              "sphinx/builders/html/__init__.py",
-              "sphinx/builders/latex/__init__.py",
-              "sphinx/builders/manpage.py",
-              "sphinx/builders/singlehtml.py",
-              "sphinx/builders/texinfo.py",
-              "sphinx/builders/text.py",
-              "sphinx/builders/xml.py"
-            ],
             "spans": {
-              "sphinx/builders/dummy.py": [
+              "tests/roots/test-ext-inheritance_diagram/index.rst": [
                 {
-                  "start": 26,
-                  "end": 26
-                }
-              ],
-              "sphinx/builders/singlehtml.py": [
-                {
-                  "start": 36,
-                  "end": 36
-                }
-              ],
-              "sphinx/builders/dirhtml.py": [
-                {
-                  "start": 24,
-                  "end": 24
-                }
-              ],
-              "sphinx/builders/text.py": [
-                {
-                  "start": 57,
-                  "end": 57
-                }
-              ],
-              "sphinx/builders/__init__.py": [
-                {
-                  "start": 136,
-                  "end": 136
-                }
-              ],
-              "sphinx/builders/xml.py": [
-                {
-                  "start": 62,
-                  "end": 62
-                }
-              ],
-              "sphinx/builders/gettext.py": [
-                {
-                  "start": 139,
-                  "end": 139
-                }
-              ],
-              "sphinx/builders/manpage.py": [
-                {
-                  "start": 46,
-                  "end": 46
-                }
-              ],
-              "sphinx/builders/texinfo.py": [
-                {
-                  "start": 61,
-                  "end": 61
-                }
-              ],
-              "sphinx/builders/html/__init__.py": [
-                {
-                  "start": 1030,
-                  "end": 1030
-                }
-              ],
-              "sphinx/builders/latex/__init__.py": [
-                {
-                  "start": 136,
-                  "end": 136
+                  "start": 1,
+                  "end": 140
                 }
               ]
             },
@@ -599,68 +202,62 @@
           },
           {
             "files": [
-              "sphinx/builders/dirhtml.py",
               "sphinx/builders/html/__init__.py"
             ],
             "spans": {
-              "sphinx/builders/dirhtml.py": [
+              "sphinx/builders/html/__init__.py": [
                 {
-                  "start": 31,
-                  "end": 31
-                },
+                  "start": 650,
+                  "end": 700
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/builders/__init__.py",
+              "sphinx/builders/html/__init__.py"
+            ],
+            "spans": {
+              "sphinx/builders/__init__.py": [
                 {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 36,
-                  "end": 36
-                },
-                {
-                  "start": 39,
-                  "end": 39
+                  "start": 130,
+                  "end": 165
                 }
               ],
               "sphinx/builders/html/__init__.py": [
                 {
-                  "start": 428,
-                  "end": 428
-                },
+                  "start": 1010,
+                  "end": 1065
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/builders/dirhtml.py"
+            ],
+            "spans": {
+              "sphinx/builders/dirhtml.py": [
                 {
-                  "start": 731,
-                  "end": 731
-                },
+                  "start": 1,
+                  "end": 80
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/ext/inheritance_diagram.py"
+            ],
+            "spans": {
+              "sphinx/ext/inheritance_diagram.py": [
                 {
-                  "start": 975,
-                  "end": 975
-                },
-                {
-                  "start": 1034,
-                  "end": 1034
-                },
-                {
-                  "start": 1115,
-                  "end": 1115
-                },
-                {
-                  "start": 1116,
-                  "end": 1116
-                },
-                {
-                  "start": 1117,
-                  "end": 1117
-                },
-                {
-                  "start": 1118,
-                  "end": 1118
-                },
-                {
-                  "start": 1120,
-                  "end": 1120
-                },
-                {
-                  "start": 1124,
-                  "end": 1124
+                  "start": 320,
+                  "end": 390
                 }
               ]
             },
@@ -670,547 +267,124 @@
             "files": [
               "tests/roots/test-ext-inheritance_diagram/conf.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/roots/test-ext-inheritance_diagram/conf.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/roots/test-ext-inheritance_diagram/test.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/roots/test-ext-inheritance_diagram/test.py": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "@contextlib.contextmanager"
+              "sphinx/util/osutil.py"
             ],
-            "spans": {},
+            "spans": {
+              "sphinx/util/osutil.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "pyproject.toml",
-              "tox.ini"
+              "sphinx/ext/graphviz.py"
             ],
-            "spans": {},
+            "spans": {
+              "sphinx/ext/graphviz.py": [
+                {
+                  "start": 218,
+                  "end": 248
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/ext/inheritance_diagram.py"
+            ],
+            "spans": {
+              "sphinx/ext/inheritance_diagram.py": [
+                {
+                  "start": 404,
+                  "end": 425
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/roots/test-ext-inheritance_diagram-svg/my_package/index.rst"
             ],
-            "spans": {},
+            "spans": {
+              "tests/roots/test-ext-inheritance_diagram-svg/my_package/index.rst": [
+                {
+                  "start": 1,
+                  "end": 11
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_ext_inheritance_diagram.py"
+            ],
+            "spans": {
+              "tests/test_ext_inheritance_diagram.py": [
+                {
+                  "start": 150,
+                  "end": 195
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "@contextlib.contextmanager",
-          "pyproject.toml",
-          "sphinx/builders/__init__.py",
-          "sphinx/builders/dirhtml.py",
-          "sphinx/builders/dummy.py",
-          "sphinx/builders/gettext.py",
-          "sphinx/builders/html/__init__.py",
-          "sphinx/builders/latex/__init__.py",
-          "sphinx/builders/manpage.py",
-          "sphinx/builders/singlehtml.py",
-          "sphinx/builders/texinfo.py",
-          "sphinx/builders/text.py",
-          "sphinx/builders/xml.py",
           "sphinx/ext/graphviz.py",
-          "sphinx/ext/imgmath.py",
           "sphinx/ext/inheritance_diagram.py",
-          "sphinx/ext/todo.py",
-          "sphinx/ext/viewcode.py",
-          "sphinx/writers/html5.py",
-          "tests/roots/test-ext-autodoc/target/inheritance.py",
-          "tests/roots/test-ext-graphviz/_static/images/test.svg",
-          "tests/roots/test-ext-graphviz/conf.py",
-          "tests/roots/test-ext-graphviz/graph.dot",
-          "tests/roots/test-ext-graphviz/graph.xx.dot",
-          "tests/roots/test-ext-graphviz/index.rst",
           "tests/roots/test-ext-inheritance_diagram-svg/my_package/index.rst",
-          "tests/roots/test-ext-inheritance_diagram/conf.py",
-          "tests/roots/test-ext-inheritance_diagram/example/__init__.py",
-          "tests/roots/test-ext-inheritance_diagram/example/sphinx.py",
-          "tests/roots/test-ext-inheritance_diagram/index.rst",
-          "tests/roots/test-ext-inheritance_diagram/test.py",
-          "tests/roots/test-inheritance/basic_diagram.rst",
-          "tests/roots/test-inheritance/conf.py",
-          "tests/roots/test-inheritance/diagram_module_w_2_top_classes.rst",
-          "tests/roots/test-inheritance/diagram_w_1_top_class.rst",
-          "tests/roots/test-inheritance/diagram_w_2_top_classes.rst",
-          "tests/roots/test-inheritance/diagram_w_nested_classes.rst",
-          "tests/roots/test-inheritance/diagram_w_parts.rst",
-          "tests/roots/test-inheritance/dummy/__init__.py",
-          "tests/roots/test-inheritance/dummy/test.py",
-          "tests/roots/test-inheritance/dummy/test_nested.py",
-          "tests/roots/test-inheritance/index.rst",
-          "tests/test_ext_graphviz.py",
-          "tests/test_ext_inheritance_diagram.py",
-          "tox.ini"
+          "tests/test_ext_inheritance_diagram.py"
         ],
         "predSpans": {
-          "tests/test_ext_inheritance_diagram.py": [
+          "sphinx/ext/graphviz.py": [
             {
-              "start": 1,
-              "end": 1
-            },
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 18,
-              "end": 18
-            },
-            {
-              "start": 46,
-              "end": 46
-            },
-            {
-              "start": 58,
-              "end": 58
-            },
-            {
-              "start": 69,
-              "end": 69
-            },
-            {
-              "start": 88,
-              "end": 88
-            },
-            {
-              "start": 106,
-              "end": 106
-            },
-            {
-              "start": 129,
-              "end": 129
-            },
-            {
-              "start": 138,
-              "end": 138
-            },
-            {
-              "start": 140,
-              "end": 140
-            },
-            {
-              "start": 147,
-              "end": 147
-            },
-            {
-              "start": 148,
-              "end": 148
-            },
-            {
-              "start": 154,
-              "end": 154
-            },
-            {
-              "start": 154,
-              "end": 185
-            },
-            {
-              "start": 155,
-              "end": 155
-            },
-            {
-              "start": 157,
-              "end": 157
-            },
-            {
-              "start": 164,
-              "end": 164
-            },
-            {
-              "start": 165,
-              "end": 165
-            },
-            {
-              "start": 174,
-              "end": 174
-            },
-            {
-              "start": 176,
-              "end": 176
-            },
-            {
-              "start": 182,
-              "end": 182
-            },
-            {
-              "start": 187,
-              "end": 187
-            },
-            {
-              "start": 188,
-              "end": 188
-            },
-            {
-              "start": 190,
-              "end": 190
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 205,
-              "end": 205
-            },
-            {
-              "start": 206,
-              "end": 206
-            },
-            {
-              "start": 217,
-              "end": 217
-            }
-          ],
-          "tests/test_ext_graphviz.py": [
-            {
-              "start": 43,
-              "end": 43
-            },
-            {
-              "start": 161,
-              "end": 161
-            },
-            {
-              "start": 163,
-              "end": 163
-            },
-            {
-              "start": 188,
-              "end": 188
-            }
-          ],
-          "sphinx/ext/viewcode.py": [
-            {
-              "start": 248,
-              "end": 248
-            },
-            {
-              "start": 329,
-              "end": 329
-            },
-            {
-              "start": 331,
-              "end": 331
-            }
-          ],
-          "sphinx/ext/todo.py": [
-            {
-              "start": 170,
-              "end": 170
-            }
-          ],
-          "sphinx/ext/imgmath.py": [
-            {
-              "start": 337,
-              "end": 337
-            },
-            {
-              "start": 378,
-              "end": 378
+              "start": 220,
+              "end": 243
             }
           ],
           "sphinx/ext/inheritance_diagram.py": [
             {
               "start": 408,
               "end": 423
-            },
-            {
-              "start": 410,
-              "end": 410
             }
           ],
-          "sphinx/ext/graphviz.py": [
+          "tests/test_ext_inheritance_diagram.py": [
             {
-              "start": 220,
-              "end": 243
-            },
-            {
-              "start": 221,
-              "end": 221
-            },
-            {
-              "start": 240,
-              "end": 240
-            },
-            {
-              "start": 260,
-              "end": 260
-            }
-          ],
-          "sphinx/builders/singlehtml.py": [
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 45,
-              "end": 45
-            }
-          ],
-          "sphinx/builders/text.py": [
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 64,
-              "end": 64
-            }
-          ],
-          "sphinx/builders/__init__.py": [
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 102,
-              "end": 102
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 144,
-              "end": 144
-            },
-            {
-              "start": 149,
-              "end": 149
-            }
-          ],
-          "sphinx/builders/texinfo.py": [
-            {
-              "start": 61,
-              "end": 61
-            },
-            {
-              "start": 66,
-              "end": 66
-            }
-          ],
-          "sphinx/builders/html/__init__.py": [
-            {
-              "start": 48,
-              "end": 48
-            },
-            {
-              "start": 224,
-              "end": 224
-            },
-            {
-              "start": 259,
-              "end": 259
-            },
-            {
-              "start": 428,
-              "end": 428
-            },
-            {
-              "start": 591,
-              "end": 591
-            },
-            {
-              "start": 600,
-              "end": 600
-            },
-            {
-              "start": 611,
-              "end": 611
-            },
-            {
-              "start": 672,
-              "end": 672
-            },
-            {
-              "start": 673,
-              "end": 673
-            },
-            {
-              "start": 674,
-              "end": 674
-            },
-            {
-              "start": 684,
-              "end": 684
-            },
-            {
-              "start": 731,
-              "end": 731
-            },
-            {
-              "start": 931,
-              "end": 931
-            },
-            {
-              "start": 975,
-              "end": 975
-            },
-            {
-              "start": 1030,
-              "end": 1030
-            },
-            {
-              "start": 1034,
-              "end": 1034
-            },
-            {
-              "start": 1041,
-              "end": 1041
-            },
-            {
-              "start": 1050,
-              "end": 1050
-            },
-            {
-              "start": 1058,
-              "end": 1058
-            },
-            {
-              "start": 1062,
-              "end": 1062
-            },
-            {
-              "start": 1115,
-              "end": 1115
-            },
-            {
-              "start": 1116,
-              "end": 1116
-            },
-            {
-              "start": 1117,
-              "end": 1117
-            },
-            {
-              "start": 1118,
-              "end": 1118
-            },
-            {
-              "start": 1120,
-              "end": 1120
-            },
-            {
-              "start": 1124,
-              "end": 1124
-            },
-            {
-              "start": 1202,
-              "end": 1202
-            },
-            {
-              "start": 1210,
-              "end": 1210
-            },
-            {
-              "start": 1225,
-              "end": 1225
-            },
-            {
-              "start": 1237,
-              "end": 1237
-            },
-            {
-              "start": 1241,
-              "end": 1241
-            },
-            {
-              "start": 1247,
-              "end": 1247
-            },
-            {
-              "start": 1275,
-              "end": 1275
-            },
-            {
-              "start": 1280,
-              "end": 1280
-            },
-            {
-              "start": 1285,
-              "end": 1285
-            }
-          ],
-          "sphinx/builders/latex/__init__.py": [
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 141,
-              "end": 141
-            }
-          ],
-          "sphinx/writers/html5.py": [
-            {
-              "start": 60,
-              "end": 60
-            },
-            {
-              "start": 665,
-              "end": 665
-            }
-          ],
-          "sphinx/builders/dummy.py": [
-            {
-              "start": 26,
-              "end": 26
-            }
-          ],
-          "sphinx/builders/dirhtml.py": [
-            {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 39,
-              "end": 39
-            }
-          ],
-          "sphinx/builders/xml.py": [
-            {
-              "start": 62,
-              "end": 62
-            }
-          ],
-          "sphinx/builders/gettext.py": [
-            {
-              "start": 139,
-              "end": 139
-            }
-          ],
-          "sphinx/builders/manpage.py": [
-            {
-              "start": 46,
-              "end": 46
+              "start": 154,
+              "end": 185
             }
           ],
           "tests/roots/test-ext-inheritance_diagram-svg/my_package/index.rst": [
@@ -1238,158 +412,167 @@
             "step": 1,
             "coverage": {
               "file": 0.25,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.3333333333333333,
+              "span": 0.17198651863600317,
+              "line": 0.1759656652360515
             }
           },
           {
             "step": 2,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.5555555555555556,
+              "span": 0.5160586835844568,
+              "line": 0.5364806866952789
             }
           },
           {
             "step": 3,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.5555555555555556,
+              "span": 0.5160586835844568,
+              "line": 0.5364806866952789
             }
           },
           {
             "step": 4,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.5555555555555556,
+              "span": 0.5160586835844568,
+              "line": 0.5364806866952789
             }
           },
           {
             "step": 5,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.5555555555555556,
+              "span": 0.5160586835844568,
+              "line": 0.5364806866952789
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.5555555555555556,
+              "span": 0.5160586835844568,
+              "line": 0.5364806866952789
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.3333333333333333,
-              "span": 0.028548770816812053,
-              "line": 0.017167381974248927
+              "symbol": 0.5555555555555556,
+              "span": 0.5160586835844568,
+              "line": 0.5364806866952789
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.3333333333333333,
-              "span": 0.028548770816812053,
-              "line": 0.017167381974248927
+              "symbol": 0.5555555555555556,
+              "span": 0.5160586835844568,
+              "line": 0.5364806866952789
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.3333333333333333,
-              "span": 0.028548770816812053,
-              "line": 0.017167381974248927
+              "symbol": 0.5555555555555556,
+              "span": 0.5160586835844568,
+              "line": 0.5364806866952789
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.3333333333333333,
-              "span": 0.028548770816812053,
-              "line": 0.017167381974248927
+              "symbol": 0.7777777777777778,
+              "span": 0.686558287073751,
+              "line": 0.6909871244635193
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.3333333333333333,
-              "span": 0.028548770816812053,
-              "line": 0.017167381974248927
+              "symbol": 0.7777777777777778,
+              "span": 0.686558287073751,
+              "line": 0.6909871244635193
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.3333333333333333,
-              "span": 0.028548770816812053,
-              "line": 0.017167381974248927
+              "symbol": 0.7777777777777778,
+              "span": 0.686558287073751,
+              "line": 0.6909871244635193
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.3333333333333333,
-              "span": 0.028548770816812053,
-              "line": 0.017167381974248927
+              "symbol": 0.7777777777777778,
+              "span": 0.686558287073751,
+              "line": 0.6909871244635193
             }
           },
           {
             "step": 14,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.3333333333333333,
-              "span": 0.028548770816812053,
-              "line": 0.017167381974248927
+              "symbol": 0.7777777777777778,
+              "span": 0.686558287073751,
+              "line": 0.6909871244635193
             }
           },
           {
             "step": 15,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.3333333333333333,
-              "span": 0.028548770816812053,
-              "line": 0.017167381974248927
+              "symbol": 0.7777777777777778,
+              "span": 0.686558287073751,
+              "line": 0.6909871244635193
             }
           },
           {
             "step": 16,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.3333333333333333,
-              "span": 0.028548770816812053,
-              "line": 0.017167381974248927
+              "symbol": 0.7777777777777778,
+              "span": 0.686558287073751,
+              "line": 0.6909871244635193
+            }
+          },
+          {
+            "step": 17,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.7777777777777778,
+              "span": 0.686558287073751,
+              "line": 0.6909871244635193
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.484375,
-          "symbol": 0.20833333333333334,
-          "span": 0.017842981760507536,
-          "line": 0.010729613733905581
+          "file": 0.4852941176470588,
+          "symbol": 0.6470588235294118,
+          "span": 0.5760542519942157,
+          "line": 0.5879828326180256
         },
         "redundancy": {
-          "file": 0.27118644067796616,
-          "symbol": 0.12676056338028174,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.33333333333333337,
+          "symbol": 0.09375,
+          "span": 0.08206438981944741,
+          "line": 0.05626598465473143
         }
       },
       "fixOverlap": {
@@ -1561,7 +744,50 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/sphinx/ext/graphviz.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/sphinx/ext/inheritance_diagram.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg/conf.py",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg/index.rst",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg/my_package/bar.rst",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg/my_package/baz.rst",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg/my_package/foo.rst",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg/my_package/index.rst",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg/test.py",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/tests/test_ext_inheritance_diagram.py",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "todo_list",
@@ -1684,7 +910,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg/my_package/index.rst",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg/my_package/index.rst",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -1776,9 +1011,31 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [
+          "tests/roots/test-ext-inheritance_diagram-svg-links/conf.py",
+          "tests/roots/test-ext-inheritance_diagram-svg-links/index.rst",
+          "tests/roots/test-ext-inheritance_diagram-svg-links/my_package/__init__.py",
+          "tests/roots/test-ext-inheritance_diagram-svg-links/my_package/index.rst",
+          "tests/roots/test-ext-inheritance_diagram-svg-links/my_package/my_class_1.rst",
+          "tests/roots/test-ext-inheritance_diagram-svg-links/my_package/my_class_2.rst"
+        ],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 6,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-19T09:30:37Z",
       "completedAt": "2026-05-19T09:39:55Z",
       "durationMs": 557890,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1777557,
@@ -1787,6 +1044,28 @@
         "total_tokens": 1802479,
         "cache_read_input_tokens": 1668096
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 49,
+        "readToolCalls": 0,
+        "editToolCalls": 6
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/sphinx/ext/graphviz.py b/sphinx/ext/graphviz.py\nindex 8b21d9e3b..c7b547e5d 100644\n--- a/sphinx/ext/graphviz.py\n+++ b/sphinx/ext/graphviz.py\n@@ -26,7 +26,7 @@ from sphinx.util import logging\n from sphinx.util.docutils import SphinxDirective, SphinxTranslator\n from sphinx.util.i18n import search_image_for_language\n from sphinx.util.nodes import set_source_info\n-from sphinx.util.osutil import ensuredir\n+from sphinx.util.osutil import ensuredir, relative_uri\n from sphinx.util.typing import OptionSpec\n from sphinx.writers.html import HTML5Translator\n from sphinx.writers.latex import LaTeXTranslator\n@@ -217,7 +217,23 @@ class GraphvizSimple(SphinxDirective):\n             return [figure]\n \n \n-def fix_svg_relative_paths(self: SphinxTranslator, filepath: str) -> None:\n+def _relative_uri_to_current_document(self: SphinxTranslator, docname: str, uri: str) -> str:\n+    current_uri = self.builder.get_target_uri(docname)\n+    dirname = posixpath.dirname(current_uri)\n+\n+    if uri:\n+        return posixpath.normpath(posixpath.join(dirname, uri))\n+    if current_uri.endswith('/'):\n+        return current_uri\n+    if current_uri.endswith('/index' + self.builder.out_suffix):\n+        return posixpath.dirname(current_uri) + '/'\n+    if current_uri == 'index' + self.builder.out_suffix:\n+        return ''\n+\n+    return current_uri\n+\n+\n+def fix_svg_relative_paths(self: SphinxTranslator, filepath: str, docname: str) -> None:\n     \"\"\"Change relative links in generated svg files to be relative to imgpath.\"\"\"\n     tree = ET.parse(filepath)  # NoQA: S314\n     root = tree.getroot()\n@@ -230,15 +246,17 @@ def fix_svg_relative_paths(self: SphinxTranslator, filepath: str) -> None:\n         root.findall('.//svg:a[@xlink:href]', ns),\n     ):\n         scheme, hostname, url, query, fragment = urlsplit(element.attrib[href_name])\n-        if hostname:\n+        if scheme or hostname or url.startswith('/'):\n             # not a relative link\n             continue\n \n-        old_path = path.join(self.builder.outdir, url)\n-        new_path = path.relpath(\n-            old_path,\n-            start=path.join(self.builder.outdir, self.builder.imgpath),\n+        target_uri = _relative_uri_to_current_document(self, docname, url)\n+        new_path = relative_uri(\n+            posixpath.join(self.builder.imagedir, path.basename(filepath)),\n+            target_uri,\n         )\n+        if target_uri == '' and new_path == '../':\n+            new_path = '..'\n         modified_url = urlunsplit((scheme, hostname, new_path, query, fragment))\n \n         element.set(href_name, modified_url)\n@@ -273,7 +291,7 @@ def render_dot(self: SphinxTranslator, code: str, options: dict, format: str,\n     dot_args.extend(self.builder.config.graphviz_dot_args)\n     dot_args.extend(['-T' + format, '-o' + outfn])\n \n-    docname = options.get('docname', 'index')\n+    docname = options.get('docname', self.builder.current_docname)\n     if filename:\n         cwd = path.dirname(path.join(self.builder.srcdir, filename))\n     else:\n@@ -300,7 +318,7 @@ def render_dot(self: SphinxTranslator, code: str, options: dict, format: str,\n                                '[stdout]\\n%r') % (ret.stderr, ret.stdout))\n \n     if format == 'svg':\n-        fix_svg_relative_paths(self, outfn)\n+        fix_svg_relative_paths(self, outfn, docname)\n \n     return relfn, outfn\n \ndiff --git a/sphinx/ext/inheritance_diagram.py b/sphinx/ext/inheritance_diagram.py\nindex 6e3985512..83ee4f0ea 100644\n--- a/sphinx/ext/inheritance_diagram.py\n+++ b/sphinx/ext/inheritance_diagram.py\n@@ -406,21 +406,13 @@ def html_visit_inheritance_diagram(self: HTML5Translator, node: inheritance_diag\n     name = 'inheritance%s' % graph_hash\n \n     # Create a mapping from fully-qualified class names to URLs.\n-    graphviz_output_format = self.builder.env.config.graphviz_output_format.upper()\n-    current_filename = self.builder.current_docname + self.builder.out_suffix\n     urls = {}\n     pending_xrefs = cast(Iterable[addnodes.pending_xref], node)\n     for child in pending_xrefs:\n         if child.get('refuri') is not None:\n-            if graphviz_output_format == 'SVG':\n-                urls[child['reftitle']] = \"../\" + child.get('refuri')\n-            else:\n-                urls[child['reftitle']] = child.get('refuri')\n+            urls[child['reftitle']] = child.get('refuri')\n         elif child.get('refid') is not None:\n-            if graphviz_output_format == 'SVG':\n-                urls[child['reftitle']] = '../' + current_filename + '#' + child.get('refid')\n-            else:\n-                urls[child['reftitle']] = '#' + child.get('refid')\n+            urls[child['reftitle']] = '#' + child.get('refid')\n \n     dotcode = graph.generate_dot(name, urls, env=self.builder.env)\n     render_dot_html(self, node, dotcode, {}, 'inheritance', 'inheritance',\ndiff --git a/tests/test_ext_graphviz.py b/tests/test_ext_graphviz.py\nindex 44e5d8429..d5cb1ae50 100644\n--- a/tests/test_ext_graphviz.py\n+++ b/tests/test_ext_graphviz.py\n@@ -1,10 +1,11 @@\n \"\"\"Test sphinx.ext.graphviz extension.\"\"\"\n \n import re\n+from types import SimpleNamespace\n \n import pytest\n \n-from sphinx.ext.graphviz import ClickableMapDefinition\n+from sphinx.ext.graphviz import ClickableMapDefinition, fix_svg_relative_paths\n \n \n @pytest.mark.sphinx('html', testroot='ext-graphviz')\n@@ -188,3 +189,54 @@ def test_graphviz_parse_mapfile():\n     assert cmap.id == 'inheritance66ff5471b9'\n     assert len(cmap.clickable) == 0\n     assert cmap.generate_clickable_map() == ''\n+\n+\n+def test_fix_svg_relative_paths_for_nested_page(tmp_path):\n+    image_path = tmp_path / 'graphviz.svg'\n+    image_path.write_text(\n+        '<svg xmlns=\"http://www.w3.org/2000/svg\" '\n+        'xmlns:xlink=\"http://www.w3.org/1999/xlink\">'\n+        '<a xlink:href=\"my_class_1.html#my_package.MyClass1\" />'\n+        '</svg>',\n+        encoding='utf8',\n+    )\n+\n+    translator = SimpleNamespace(\n+        builder=SimpleNamespace(\n+            outdir=str(tmp_path),\n+            imgpath='_images',\n+            imagedir='_images',\n+            get_target_uri=lambda docname: docname + '.html',\n+        )\n+    )\n+\n+    fix_svg_relative_paths(translator, str(image_path), 'my_package/index')\n+\n+    assert 'ns1:href=\"../my_package/my_class_1.html#my_package.MyClass1\"' in (\n+        image_path.read_text(encoding='utf8')\n+    )\n+\n+\n+def test_fix_svg_relative_paths_for_same_page_anchor(tmp_path):\n+    image_path = tmp_path / 'graphviz.svg'\n+    image_path.write_text(\n+        '<svg xmlns=\"http://www.w3.org/2000/svg\" '\n+        'xmlns:xlink=\"http://www.w3.org/1999/xlink\">'\n+        '<a xlink:href=\"#graphviz\" />'\n+        '</svg>',\n+        encoding='utf8',\n+    )\n+\n+    translator = SimpleNamespace(\n+        builder=SimpleNamespace(\n+            outdir=str(tmp_path),\n+            imgpath='_images',\n+            imagedir='_images',\n+            out_suffix='.html',\n+            get_target_uri=lambda docname: 'index.html',\n+        )\n+    )\n+\n+    fix_svg_relative_paths(translator, str(image_path), 'index')\n+\n+    assert 'ns1:href=\"..#graphviz\"' in image_path.read_text(encoding='utf8')\ndiff --git a/tests/test_ext_inheritance_diagram.py b/tests/test_ext_inheritance_diagram.py\nindex 16581b075..245aa9db6 100644\n--- a/tests/test_ext_inheritance_diagram.py\n+++ b/tests/test_ext_inheritance_diagram.py\n@@ -171,6 +171,22 @@ def test_inheritance_diagram_svg_html(app, status, warning):\n     assert re.search(pattern, content, re.M)\n \n \n+@pytest.mark.sphinx('html', testroot='ext-inheritance_diagram-svg-links',\n+                    confoverrides={'graphviz_output_format': 'svg'})\n+@pytest.mark.usefixtures('if_graphviz_found')\n+def test_inheritance_diagram_svg_html_links_for_nested_pages(app, status, warning):\n+    app.builder.build_all()\n+\n+    content = (app.outdir / 'my_package' / 'index.html').read_text(encoding='utf8')\n+    image_path_match = re.search(r'<object data=\"([^\"]+\\.svg)\"', content)\n+    assert image_path_match\n+\n+    image_path = image_path_match.group(1)\n+    image_content = (app.outdir / 'my_package' / image_path).read_text(encoding='utf8')\n+    assert 'ns1:href=\"../my_package/my_class_1.html#my_package.MyClass1\"' in image_content\n+    assert 'ns1:href=\"../my_package/my_class_2.html#my_package.MyClass2\"' in image_content\n+\n+\n @pytest.mark.sphinx('latex', testroot='ext-inheritance_diagram')\n @pytest.mark.usefixtures('if_graphviz_found')\n def test_inheritance_diagram_latex(app, status, warning):\n",
       "finalOutput": {
         "status": "completed",
@@ -1879,27 +1158,13 @@
         "predSteps": [
           {
             "files": [
-              "tests/roots/test-ext-inheritance_diagram/conf.py",
-              "tests/roots/test-ext-inheritance_diagram/index.rst",
-              "tests/roots/test-inheritance/conf.py"
+              "sphinx/ext/inheritance_diagram.py"
             ],
             "spans": {
-              "tests/roots/test-inheritance/conf.py": [
+              "sphinx/ext/inheritance_diagram.py": [
                 {
-                  "start": 6,
-                  "end": 6
-                }
-              ],
-              "tests/roots/test-ext-inheritance_diagram/conf.py": [
-                {
-                  "start": 6,
-                  "end": 6
-                }
-              ],
-              "tests/roots/test-ext-inheritance_diagram/index.rst": [
-                {
-                  "start": 2,
-                  "end": 2
+                  "start": 392,
+                  "end": 438
                 }
               ]
             },
@@ -1907,64 +1172,55 @@
           },
           {
             "files": [
-              "sphinx/ext/inheritance_diagram.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "sphinx/ext/graphviz.py"
             ],
-            "spans": {},
+            "spans": {
+              "sphinx/ext/graphviz.py": [
+                {
+                  "start": 300,
+                  "end": 380
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/test_ext_inheritance_diagram.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/test_ext_inheritance_diagram.py": [
+                {
+                  "start": 138,
+                  "end": 190
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/test_ext_graphviz.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/test_ext_graphviz.py": [
+                {
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "sphinx/ext/graphviz.py",
-              "sphinx/ext/inheritance_diagram.py"
+              "sphinx/ext/graphviz.py"
             ],
             "spans": {
-              "sphinx/ext/inheritance_diagram.py": [
-                {
-                  "start": 410,
-                  "end": 410
-                },
-                {
-                  "start": 414,
-                  "end": 414
-                },
-                {
-                  "start": 416,
-                  "end": 416
-                },
-                {
-                  "start": 418,
-                  "end": 418
-                }
-              ],
               "sphinx/ext/graphviz.py": [
                 {
-                  "start": 220,
-                  "end": 220
-                },
-                {
-                  "start": 303,
-                  "end": 303
+                  "start": 1,
+                  "end": 140
                 }
               ]
             },
@@ -1974,146 +1230,25 @@
             "files": [
               "tests/roots/test-ext-inheritance_diagram/index.rst"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/roots/test-ext-inheritance_diagram/conf.py",
-              "tests/roots/test-ext-inheritance_diagram/example/__init__.py",
-              "tests/roots/test-ext-inheritance_diagram/example/sphinx.py",
-              "tests/roots/test-ext-inheritance_diagram/index.rst",
-              "tests/roots/test-ext-inheritance_diagram/test.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "sphinx/builders/__init__.py",
-              "sphinx/builders/html/__init__.py",
-              "sphinx/builders/latex/__init__.py",
-              "sphinx/builders/singlehtml.py",
-              "sphinx/builders/texinfo.py",
-              "sphinx/domains/std.py",
-              "sphinx/environment/adapters/indexentries.py",
-              "sphinx/environment/adapters/toctree.py",
-              "sphinx/errors.py",
-              "sphinx/ext/todo.py",
-              "sphinx/util/nodes.py",
-              "sphinx/util/osutil.py"
-            ],
             "spans": {
-              "sphinx/errors.py": [
+              "tests/roots/test-ext-inheritance_diagram/index.rst": [
                 {
-                  "start": 120,
+                  "start": 1,
                   "end": 120
                 }
-              ],
-              "sphinx/ext/todo.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/ext/graphviz.py"
+            ],
+            "spans": {
+              "sphinx/ext/graphviz.py": [
                 {
-                  "start": 170,
-                  "end": 170
-                }
-              ],
-              "sphinx/environment/adapters/indexentries.py": [
-                {
-                  "start": 35,
-                  "end": 35
-                }
-              ],
-              "sphinx/environment/adapters/toctree.py": [
-                {
-                  "start": 266,
-                  "end": 266
-                }
-              ],
-              "sphinx/util/osutil.py": [
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 61,
-                  "end": 61
-                }
-              ],
-              "sphinx/util/nodes.py": [
-                {
-                  "start": 553,
-                  "end": 553
-                },
-                {
-                  "start": 556,
-                  "end": 556
-                }
-              ],
-              "sphinx/builders/singlehtml.py": [
-                {
-                  "start": 45,
-                  "end": 45
-                }
-              ],
-              "sphinx/builders/texinfo.py": [
-                {
-                  "start": 66,
-                  "end": 66
-                }
-              ],
-              "sphinx/builders/__init__.py": [
-                {
-                  "start": 144,
-                  "end": 144
-                },
-                {
-                  "start": 149,
-                  "end": 149
-                }
-              ],
-              "sphinx/builders/html/__init__.py": [
-                {
-                  "start": 591,
-                  "end": 591
-                },
-                {
-                  "start": 600,
-                  "end": 600
-                },
-                {
-                  "start": 611,
-                  "end": 611
-                },
-                {
-                  "start": 672,
-                  "end": 672
-                },
-                {
-                  "start": 673,
-                  "end": 673
-                },
-                {
-                  "start": 684,
-                  "end": 684
-                },
-                {
-                  "start": 1058,
-                  "end": 1058
-                }
-              ],
-              "sphinx/builders/latex/__init__.py": [
-                {
-                  "start": 141,
-                  "end": 141
-                }
-              ],
-              "sphinx/domains/std.py": [
-                {
-                  "start": 775,
-                  "end": 775
+                  "start": 220,
+                  "end": 310
                 }
               ]
             },
@@ -2123,90 +1258,123 @@
             "files": [
               "sphinx/util/osutil.py"
             ],
-            "spans": {},
+            "spans": {
+              "sphinx/util/osutil.py": [
+                {
+                  "start": 1,
+                  "end": 100
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/ext/inheritance_diagram.py"
+            ],
+            "spans": {
+              "sphinx/ext/inheritance_diagram.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/roots/test-ext-inheritance_diagram/test.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/roots/test-ext-inheritance_diagram/test.py": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/roots/test-ext-inheritance_diagram/conf.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/roots/test-ext-inheritance_diagram/conf.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/roots/test-ext-inheritance_diagram/example/sphinx.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/roots/test-ext-inheritance_diagram/example/sphinx.py": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "pyproject.toml",
-              "tox.ini"
+              "tests/test_ext_graphviz.py"
             ],
             "spans": {
-              "tox.ini": [
+              "tests/test_ext_graphviz.py": [
                 {
-                  "start": 1,
-                  "end": 1
-                },
-                {
-                  "start": 27,
-                  "end": 27
+                  "start": 200,
+                  "end": 260
                 }
-              ],
-              "pyproject.toml": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/ext/graphviz.py"
+            ],
+            "spans": {
+              "sphinx/ext/graphviz.py": [
                 {
-                  "start": 1,
-                  "end": 1
-                },
+                  "start": 220,
+                  "end": 330
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/ext/inheritance_diagram.py"
+            ],
+            "spans": {
+              "sphinx/ext/inheritance_diagram.py": [
                 {
-                  "start": 77,
-                  "end": 77
-                },
+                  "start": 400,
+                  "end": 430
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_ext_inheritance_diagram.py"
+            ],
+            "spans": {
+              "tests/test_ext_inheritance_diagram.py": [
                 {
-                  "start": 92,
-                  "end": 92
-                },
-                {
-                  "start": 122,
-                  "end": 122
-                },
-                {
-                  "start": 142,
-                  "end": 142
-                },
-                {
-                  "start": 224,
-                  "end": 224
-                },
-                {
-                  "start": 225,
-                  "end": 225
-                },
-                {
-                  "start": 226,
-                  "end": 226
-                },
-                {
-                  "start": 227,
-                  "end": 227
-                },
-                {
-                  "start": 228,
-                  "end": 228
-                },
-                {
-                  "start": 353,
-                  "end": 353
+                  "start": 150,
+                  "end": 190
                 }
               ]
             },
@@ -2214,258 +1382,28 @@
           }
         ],
         "predFiles": [
-          "pyproject.toml",
-          "sphinx/builders/__init__.py",
-          "sphinx/builders/html/__init__.py",
-          "sphinx/builders/latex/__init__.py",
-          "sphinx/builders/singlehtml.py",
-          "sphinx/builders/texinfo.py",
-          "sphinx/domains/std.py",
-          "sphinx/environment/adapters/indexentries.py",
-          "sphinx/environment/adapters/toctree.py",
-          "sphinx/errors.py",
           "sphinx/ext/graphviz.py",
           "sphinx/ext/inheritance_diagram.py",
-          "sphinx/ext/todo.py",
-          "sphinx/util/nodes.py",
-          "sphinx/util/osutil.py",
           "tests/roots/test-ext-inheritance_diagram-svg-links/conf.py",
           "tests/roots/test-ext-inheritance_diagram-svg-links/index.rst",
           "tests/roots/test-ext-inheritance_diagram-svg-links/my_package/__init__.py",
           "tests/roots/test-ext-inheritance_diagram-svg-links/my_package/index.rst",
           "tests/roots/test-ext-inheritance_diagram-svg-links/my_package/my_class_1.rst",
           "tests/roots/test-ext-inheritance_diagram-svg-links/my_package/my_class_2.rst",
-          "tests/roots/test-ext-inheritance_diagram/conf.py",
-          "tests/roots/test-ext-inheritance_diagram/example/__init__.py",
-          "tests/roots/test-ext-inheritance_diagram/example/sphinx.py",
-          "tests/roots/test-ext-inheritance_diagram/index.rst",
-          "tests/roots/test-ext-inheritance_diagram/test.py",
-          "tests/roots/test-inheritance/conf.py",
           "tests/test_ext_graphviz.py",
-          "tests/test_ext_inheritance_diagram.py",
-          "tox.ini"
+          "tests/test_ext_inheritance_diagram.py"
         ],
         "predSpans": {
-          "tests/roots/test-inheritance/conf.py": [
+          "sphinx/ext/graphviz.py": [
             {
-              "start": 6,
-              "end": 6
-            }
-          ],
-          "tests/roots/test-ext-inheritance_diagram/conf.py": [
-            {
-              "start": 6,
-              "end": 6
-            }
-          ],
-          "tests/roots/test-ext-inheritance_diagram/index.rst": [
-            {
-              "start": 2,
-              "end": 2
+              "start": 220,
+              "end": 321
             }
           ],
           "sphinx/ext/inheritance_diagram.py": [
             {
               "start": 400,
               "end": 419
-            },
-            {
-              "start": 410,
-              "end": 410
-            },
-            {
-              "start": 414,
-              "end": 414
-            },
-            {
-              "start": 416,
-              "end": 416
-            },
-            {
-              "start": 418,
-              "end": 418
-            }
-          ],
-          "sphinx/ext/graphviz.py": [
-            {
-              "start": 220,
-              "end": 220
-            },
-            {
-              "start": 220,
-              "end": 321
-            },
-            {
-              "start": 303,
-              "end": 303
-            }
-          ],
-          "sphinx/errors.py": [
-            {
-              "start": 120,
-              "end": 120
-            }
-          ],
-          "sphinx/ext/todo.py": [
-            {
-              "start": 170,
-              "end": 170
-            }
-          ],
-          "sphinx/environment/adapters/indexentries.py": [
-            {
-              "start": 35,
-              "end": 35
-            }
-          ],
-          "sphinx/environment/adapters/toctree.py": [
-            {
-              "start": 266,
-              "end": 266
-            }
-          ],
-          "sphinx/util/osutil.py": [
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 61,
-              "end": 61
-            }
-          ],
-          "sphinx/util/nodes.py": [
-            {
-              "start": 553,
-              "end": 553
-            },
-            {
-              "start": 556,
-              "end": 556
-            }
-          ],
-          "sphinx/builders/singlehtml.py": [
-            {
-              "start": 45,
-              "end": 45
-            }
-          ],
-          "sphinx/builders/texinfo.py": [
-            {
-              "start": 66,
-              "end": 66
-            }
-          ],
-          "sphinx/builders/__init__.py": [
-            {
-              "start": 144,
-              "end": 144
-            },
-            {
-              "start": 149,
-              "end": 149
-            }
-          ],
-          "sphinx/builders/html/__init__.py": [
-            {
-              "start": 591,
-              "end": 591
-            },
-            {
-              "start": 600,
-              "end": 600
-            },
-            {
-              "start": 611,
-              "end": 611
-            },
-            {
-              "start": 672,
-              "end": 672
-            },
-            {
-              "start": 673,
-              "end": 673
-            },
-            {
-              "start": 684,
-              "end": 684
-            },
-            {
-              "start": 1058,
-              "end": 1058
-            }
-          ],
-          "sphinx/builders/latex/__init__.py": [
-            {
-              "start": 141,
-              "end": 141
-            }
-          ],
-          "sphinx/domains/std.py": [
-            {
-              "start": 775,
-              "end": 775
-            }
-          ],
-          "tox.ini": [
-            {
-              "start": 1,
-              "end": 1
-            },
-            {
-              "start": 27,
-              "end": 27
-            }
-          ],
-          "pyproject.toml": [
-            {
-              "start": 1,
-              "end": 1
-            },
-            {
-              "start": 77,
-              "end": 77
-            },
-            {
-              "start": 92,
-              "end": 92
-            },
-            {
-              "start": 122,
-              "end": 122
-            },
-            {
-              "start": 142,
-              "end": 142
-            },
-            {
-              "start": 224,
-              "end": 224
-            },
-            {
-              "start": 225,
-              "end": 225
-            },
-            {
-              "start": 226,
-              "end": 226
-            },
-            {
-              "start": 227,
-              "end": 227
-            },
-            {
-              "start": 228,
-              "end": 228
-            },
-            {
-              "start": 353,
-              "end": 353
             }
           ],
           "tests/test_ext_graphviz.py": [
@@ -2533,91 +1471,91 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.25,
+              "symbol": 0.1111111111111111,
+              "span": 0.1352101506740682,
+              "line": 0.12875536480686695
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.2222222222222222,
+              "span": 0.15196272799365582,
+              "line": 0.15450643776824036
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.2222222222222222,
+              "span": 0.15196272799365582,
+              "line": 0.15450643776824036
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.2222222222222222,
+              "span": 0.15196272799365582,
+              "line": 0.15450643776824036
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.2222222222222222,
+              "span": 0.15196272799365582,
+              "line": 0.15450643776824036
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.2222222222222222,
+              "span": 0.15196272799365582,
+              "line": 0.15450643776824036
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.3333333333333333,
+              "span": 0.4792823156225218,
+              "line": 0.4892703862660944
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.3333333333333333,
+              "span": 0.4792823156225218,
+              "line": 0.4892703862660944
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.3333333333333333,
+              "span": 0.4792823156225218,
+              "line": 0.4892703862660944
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.3333333333333333,
+              "span": 0.4792823156225218,
+              "line": 0.4892703862660944
             }
           },
           {
@@ -2625,8 +1563,8 @@
             "coverage": {
               "file": 0.5,
               "symbol": 0.3333333333333333,
-              "span": 0.0369746233148295,
-              "line": 0.02575107296137339
+              "span": 0.4792823156225218,
+              "line": 0.4892703862660944
             }
           },
           {
@@ -2634,8 +1572,8 @@
             "coverage": {
               "file": 0.5,
               "symbol": 0.3333333333333333,
-              "span": 0.0369746233148295,
-              "line": 0.02575107296137339
+              "span": 0.4792823156225218,
+              "line": 0.4892703862660944
             }
           },
           {
@@ -2643,76 +1581,49 @@
             "coverage": {
               "file": 0.5,
               "symbol": 0.3333333333333333,
-              "span": 0.0369746233148295,
-              "line": 0.02575107296137339
+              "span": 0.4792823156225218,
+              "line": 0.4892703862660944
             }
           },
           {
             "step": 14,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.4444444444444444,
-              "span": 0.05273592386994449,
-              "line": 0.034334763948497854
+              "file": 0.5,
+              "symbol": 0.3333333333333333,
+              "span": 0.4792823156225218,
+              "line": 0.4892703862660944
             }
           },
           {
             "step": 15,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.4444444444444444,
-              "span": 0.05273592386994449,
-              "line": 0.034334763948497854
+              "file": 0.5,
+              "symbol": 0.3333333333333333,
+              "span": 0.4792823156225218,
+              "line": 0.4892703862660944
             }
           },
           {
             "step": 16,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.4444444444444444,
-              "span": 0.05273592386994449,
-              "line": 0.034334763948497854
-            }
-          },
-          {
-            "step": 17,
-            "coverage": {
-              "file": 0.75,
-              "symbol": 0.4444444444444444,
-              "span": 0.05273592386994449,
-              "line": 0.034334763948497854
-            }
-          },
-          {
-            "step": 18,
-            "coverage": {
-              "file": 0.75,
-              "symbol": 0.4444444444444444,
-              "span": 0.05273592386994449,
-              "line": 0.034334763948497854
-            }
-          },
-          {
-            "step": 19,
-            "coverage": {
-              "file": 0.75,
-              "symbol": 0.4444444444444444,
-              "span": 0.05273592386994449,
-              "line": 0.034334763948497854
+              "file": 0.5,
+              "symbol": 0.3333333333333333,
+              "span": 0.4792823156225218,
+              "line": 0.4892703862660944
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.40789473684210525,
-          "symbol": 0.1929824561403509,
-          "span": 0.022491548061271335,
-          "line": 0.014908515925005647
+          "file": 0.484375,
+          "symbol": 0.2847222222222222,
+          "span": 0.3554904341792228,
+          "line": 0.3621244635193133
         },
         "redundancy": {
-          "file": 0.2727272727272727,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.4375,
+          "symbol": 0.1923076923076923,
+          "span": 0.2083074855252275,
+          "line": 0.13382687927107062
         }
       },
       "fixOverlap": {
@@ -2731,35 +1642,35 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/b9d0111098a17cb9d2f1/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/b9d0111098a17cb9d2f1/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/b9d0111098a17cb9d2f1/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/b9d0111098a17cb9d2f1/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/b9d0111098a17cb9d2f1/home/.agents/skills/superpowers/systematic-debugging/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: systematic-debugging\ndescription: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes\n---\n\n# Systematic Debugging\n\n## Overview\n\nRandom fixes waste time and create new bugs. Quick patches mask underlying issues.\n\n**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.\n\n**Violating the letter of this process is violating the spirit of debugging.**\n\n## The Iron Law\n\n```\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST\n```\n\nIf you haven't completed Phase 1, you cannot propose fixes.\n\n## When to Use\n\nUse for ANY technical issue:\n- Test failures\n- Bugs in production\n- Unexpected behavior\n- Performance problems\n- Build failures\n- Integration issues\n\n**Use this ESPECIALLY when:**\n- Under time pressure (emergencies make guessing tempting)\n- \"Just one quick fix\" seems obvious\n- You've already tried multiple fixes\n- Previous fix didn't work\n- You don't fully understand the issue\n\n**Don't skip when:**\n- Issue seems simple (simple bugs have root causes too)\n- You're in a hurry (rushing guarantees rework)\n- Manager wants it fixed NOW (systematic is faster than thrashing)\n\n## The Four Phases\n\nYou MUST complete each phase before proceeding to the next.\n\n### Phase 1: Root Cause Investigation\n\n**BEFORE attempting ANY fix:**\n\n1. **Read Error Messages Carefully**\n   - Don't skip past errors or warnings\n   - They often contain the exact solution\n   - Read stack traces completely\n   - Note line numbers, file paths, error codes\n\n2. **Reproduce Consistently**\n   - Can you trigger it reliably?\n   - What are the exact steps?\n   - Does it happen every time?\n   - If not reproducible \u2192 gather more data, don't guess\n\n3. **Check Recent Changes**\n   - What changed that could cause this?\n   - Git diff, recent commits\n   - New dependencies, config changes\n   - Environmental differences\n\n4. **Gather Evidence in Multi-Component Systems**\n\n   **WHEN system has multiple components (CI \u2192 build \u2192 signing, API \u2192 service \u2192 database):**\n\n   **BEFORE proposing fixes, add diagnostic instrumentation:**\n   ```\n   For EACH component boundary:\n     - Log what data enters component\n     - Log what data exits component\n     - Verify environment/config propagation\n     - Check state at each layer\n\n   Run once to gather evidence showing WHERE it breaks\n   THEN analyze evidence to identify failing component\n   THEN investigate that specific component\n   ```\n\n   **Example (multi-layer system):**\n   ```bash\n   # Layer 1: Workflow\n   echo \"=== Secrets available in workflow: ===\"\n   echo \"IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}\"\n\n   # Layer 2: Build script\n   echo \"=== Env vars in build script: ===\"\n   env | grep IDENTITY || echo \"IDENTITY not in environment\"\n\n   # Layer 3: Signing script\n   echo \"=== Keychain state: ===\"\n   security list-keychains\n   security find-identity -v\n\n   # Layer 4: Actual signing\n   codesign --sign \"$IDENTITY\" --verbose=4 \"$APP\"\n   ```\n\n   **This reveals:** Which layer fails (secrets \u2192 workflow \u2713, workflow \u2192 build \u2717)\n\n5. **Trace Data Flow**\n\n   **WHEN error is deep in call stack:**\n\n   See `root-cause-tracing.md` in this directory for the complete backward tracing technique.\n\n   **Quick version:**\n   - Where does bad value originate?\n   - What called this with bad value?\n   - Keep tracing up until you find the source\n   - Fix at source, not at symptom\n\n### Phase 2: Pattern Analysis\n\n**Find the pattern before fixing:**\n\n1. **Find Working Examples**\n   - Locate similar working code in same codebase\n   - What works that's similar to what's broken?\n\n2. **Compare Against References**\n   - If implementing pattern, read reference implementation COMPLETELY\n   - Don't skim - read every line\n   - Understand the pattern fully before applying\n\n3. **Identify Differences**\n   - What's different between working and broken?\n   - List every difference, however small\n   - Don't assume \"that can't matter\"\n\n4. **Understand Dependencies**\n   - What other components does this need?\n   - \u2026",
           "exitCode": 0
         },
@@ -2955,7 +1866,38 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg-links/conf.py",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg-links/index.rst",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg-links/my_package/__init__.py",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg-links/my_package/index.rst",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg-links/my_package/my_class_1.rst",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/tests/roots/test-ext-inheritance_diagram-svg-links/my_package/my_class_2.rst",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/tests/test_ext_inheritance_diagram.py",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "command_execution",
@@ -2995,7 +1937,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/test_ext_graphviz.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/test_ext_graphviz.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3007,7 +1958,18 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/sphinx/ext/graphviz.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/sphinx/ext/inheritance_diagram.py",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "command_execution",
@@ -3019,7 +1981,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/test_ext_graphviz.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/test_ext_graphviz.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3031,12 +2002,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/sphinx/ext/inheritance_diagram.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/sphinx/ext/inheritance_diagram.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/test_ext_graphviz.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/test_ext_graphviz.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

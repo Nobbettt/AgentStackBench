@@ -37,6 +37,15 @@ export type PatchOverlapPair = {
   unavailableInstances?: number;
 };
 
+export type PooledContextLevel = {
+  recall?: string;
+  precision?: string;
+  f1?: string;
+  intersection?: number;
+  goldSize?: number;
+  predSize?: number;
+};
+
 export type ComparisonInstance = {
   instanceId: string;
   originalInstanceId?: string | null;
@@ -50,6 +59,12 @@ export type ComparisonInstance = {
     hasPrediction?: boolean;
     evaluationStatus?: "valid" | "error" | "missing";
     resolutionStatus?: "resolved" | "unresolved" | "error" | "missing";
+    predictedContextPathDiagnostics?: {
+      missingFinalPaths?: string[];
+      missingTrajectoryPaths?: string[];
+      missingFinalPathCount?: number;
+      missingTrajectoryPathCount?: number;
+    };
   };
   quality: {
     file: {
@@ -80,18 +95,39 @@ export type ComparisonInstance = {
     steps?: number | null;
     linesPerStep?: number | null;
   };
+  evaluatedTrajectory?: {
+    steps?: Array<{
+      step: number;
+      isSkillRead?: boolean;
+      coverage: {
+        file?: number;
+        symbol?: number;
+        span?: number;
+        line?: number;
+      };
+    }>;
+  };
   fixOverlap?: {
     vsGold?: PatchOverlapVsGold;
   };
   resources: {
     durationMs?: number | null;
+    durationStatus?: "available" | "unavailable";
+    durationUnavailableReason?: "missing_duration" | "timed_out" | "exceeds_configured_timeout";
+    rawDurationMs?: number | null;
     totalTokens?: number | null;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    cachedInputTokens?: number | null;
+    nonCachedInputTokens?: number | null;
     toolCalls?: number | null;
     mcpToolCalls?: number | null;
     successfulMcpToolCalls?: number | null;
     commandExecutions?: number | null;
     readToolCalls?: number | null;
     editToolCalls?: number | null;
+    rawTraceEvents?: number | null;
+    rawAgentActions?: number | null;
     costUsd?: number | null;
     retryAttempts?: number;
     retried?: boolean;
@@ -181,9 +217,18 @@ export type ComparisonInstanceDetailVariant = {
   effort?: string;
   status?: string;
   evaluationStatus?: string;
+  predictedContextPathDiagnostics?: {
+    missingFinalPaths?: string[];
+    missingTrajectoryPaths?: string[];
+    missingFinalPathCount?: number;
+    missingTrajectoryPathCount?: number;
+  };
   startedAt?: string;
   completedAt?: string;
-  durationMs?: number;
+  durationMs?: number | null;
+  durationStatus?: "available" | "unavailable";
+  durationUnavailableReason?: "missing_duration" | "timed_out" | "exceeds_configured_timeout";
+  rawDurationMs?: number | null;
   retry?: {
     attempts?: number;
     maxAttempts?: number;
@@ -238,6 +283,7 @@ export type ComparisonInstanceDetailVariant = {
   evaluatedTrajectory?: {
     steps?: Array<{
       step: number;
+      isSkillRead?: boolean;
       coverage: {
         file?: number;
         symbol?: number;
@@ -328,6 +374,7 @@ export type ComparisonCard = {
         contextF1?: string;
         contextRecall?: string;
         contextPrecision?: string;
+        trajectoryGoldFound?: string | null;
         fileF1?: string;
         symbolF1?: string;
         spanF1?: string;
@@ -354,6 +401,26 @@ export type ComparisonCard = {
             f1?: string;
           };
         };
+        pooledContextLevels?: {
+          file?: PooledContextLevel;
+          symbol?: PooledContextLevel;
+          block?: PooledContextLevel;
+          line?: PooledContextLevel;
+        };
+        trajectoryContextLevels?: {
+          file?: {
+            goldFound?: string | null;
+          };
+          symbol?: {
+            goldFound?: string | null;
+          };
+          block?: {
+            goldFound?: string | null;
+          };
+          line?: {
+            goldFound?: string | null;
+          };
+        };
         fixOverlapVsGold?: PatchOverlapSummary;
         fileCoverage?: string;
         spanCoverage?: string;
@@ -365,16 +432,24 @@ export type ComparisonCard = {
         redundancy?: string;
         usageDrop?: string;
         averageDuration?: string;
+        excludedDurationValues?: number;
         averageSteps?: string;
         avgDuration?: string;
         avgLinesPerStep?: string;
         totalTokens?: string;
+        inputTokens?: string;
+        outputTokens?: string;
+        cachedInputTokens?: string;
+        nonCachedInputTokens?: string;
+        cachedInputShare?: string | null;
         toolCalls?: string;
         mcpToolCalls?: string;
         successfulMcpToolCalls?: string;
         commandExecutions?: string;
         readToolCalls?: string;
         editToolCalls?: string;
+        rawTraceEvents?: string;
+        rawAgentActions?: string;
         cost?: string;
       };
       retries?: {
@@ -424,4 +499,22 @@ export type ComparisonData = {
   filterOrder: FilterMode[];
   comparisonCards: ComparisonCard[];
   leaderboardRows: LeaderboardRow[];
+};
+
+export type ComparisonInstanceBundle = "index" | "metrics" | "trajectory";
+
+export type PartialComparisonInstance = Partial<ComparisonInstance> & {
+  instanceId: string;
+  bench?: string;
+  language?: string;
+};
+
+export type ComparisonInstancesPayload = {
+  comparisonId: string;
+  bundle?: ComparisonInstanceBundle;
+  variants: Array<{
+    label: "A" | "B";
+    name?: string;
+    instances: PartialComparisonInstance[];
+  }>;
 };

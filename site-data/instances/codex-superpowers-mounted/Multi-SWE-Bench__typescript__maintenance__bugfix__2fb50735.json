@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-10T01:23:00Z",
       "completedAt": "2026-05-10T01:25:56Z",
       "durationMs": 176075,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 572371,
@@ -25,39 +40,61 @@
         "total_tokens": 579878,
         "cache_read_input_tokens": 497664
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 17,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/generators/utils/parse.ts b/src/generators/utils/parse.ts\nindex dce4ad0a..4e2b247d 100644\n--- a/src/generators/utils/parse.ts\n+++ b/src/generators/utils/parse.ts\n@@ -18,10 +18,14 @@ export interface SitesFixesParserOptions<T> {\n     parseCommandValue: (command: string, value: string) => any;\n }\n \n+function createBlockDelimiterRegex() {\n+    return /^[^\\S\\n]*={2,}[^\\S\\n]*$/gm;\n+}\n+\n export function parseSitesFixesConfig<T extends SiteProps>(text: string, options: SitesFixesParserOptions<T>) {\n     const sites: T[] = [];\n \n-    const blocks = text.replace(/\\r/g, '').split(/^\\s*={2,}\\s*$/gm);\n+    const blocks = text.replace(/\\r/g, '').split(createBlockDelimiterRegex());\n     blocks.forEach((block) => {\n         const lines = block.split('\\n');\n         const commandIndices: number[] = [];\n@@ -143,7 +147,7 @@ export function indexSitesFixesConfig<T extends SiteProps>(text: string): SitePr\n \n     let recordStart = 0;\n     // Delimiter between two blocks\n-    const delimiterRegex = /\\s*={2,}\\s*/gm;\n+    const delimiterRegex = createBlockDelimiterRegex();\n     let delimiter: RegExpMatchArray;\n     let count = 0;\n     while ((delimiter = delimiterRegex.exec(text))) {\ndiff --git a/tests/generators/utils/parse.tests.ts b/tests/generators/utils/parse.tests.ts\nindex 332eb041..c674f70d 100644\n--- a/tests/generators/utils/parse.tests.ts\n+++ b/tests/generators/utils/parse.tests.ts\n@@ -393,3 +393,53 @@ test('Implied wildcards', () => {\n             'directive': 'one'\n         }]);\n });\n+\n+test('Base64 padding within CSS does not split config blocks', () => {\n+    interface TestFix {\n+        url: string[];\n+        css: string;\n+    }\n+\n+    const directiveMap: {[key: string]: keyof TestFix} = {\n+        CSS: 'css',\n+    };\n+\n+    const config = [\n+        'example.com',\n+        '',\n+        'CSS',\n+        '.icon {',\n+        '    background-image: url(\"data:image/svg+xml;base64,PHN2Zy8+==\");',\n+        '}',\n+        '',\n+        '====================',\n+        '',\n+        'other.com',\n+        '',\n+        'CSS',\n+        '.other {',\n+        '    color: red;',\n+        '}',\n+        ''\n+    ].join('\\n');\n+\n+    const options: SitesFixesParserOptions<TestFix> = {\n+        commands: Object.keys(directiveMap),\n+        getCommandPropName: (command) => directiveMap[command],\n+        parseCommandValue: (_, value) => value.trim(),\n+    };\n+    const index = indexSitesFixesConfig<TestFix>(config);\n+\n+    expect(getSitesFixesFor('example.com', config, index, options)).toEqual([\n+        {\n+            url: ['example.com'],\n+            css: '.icon {\\n    background-image: url(\"data:image/svg+xml;base64,PHN2Zy8+==\");\\n}'\n+        }\n+    ]);\n+    expect(getSitesFixesFor('other.com', config, index, options)).toEqual([\n+        {\n+            url: ['other.com'],\n+            css: '.other {\\n    color: red;\\n}'\n+        }\n+    ]);\n+});\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Tightened the sites-fixes block delimiter handling so the parser/indexer now treats only separator lines made of `=` as record boundaries, which prevents Base64 padding like `==` inside CSS data URLs from splitting a block. Added a regression test covering a CSS `data:image/svg+xml;base64,...==` value and confirmed the updated delimiter regex only matches the real separator line.\n\nVerification: `git diff --check` passed. A focused Jest run was attempted with `npm test -- --runInBand --runTestsByPath tests/generators/utils/parse.tests.ts`, but this environment does not have `jest` installed (`sh: 1: jest: not found`), so full repo-native tests could not run here.",
         "notes": "Offline-safe verification completed with a direct Node check of the new delimiter regex (`split blocks 2`, only the real separator matched) and `git diff --check`. Repo-native Jest verification was blocked because `jest` is unavailable in this workspace.",
         "retrievedContextFiles": [
-          "<worktree>/src/generators/utils/parse.ts",
-          "<worktree>/tests/generators/utils/parse.tests.ts"
+          "src/generators/utils/parse.ts",
+          "tests/generators/utils/parse.tests.ts"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/src/generators/utils/parse.ts",
+            "file": "src/generators/utils/parse.ts",
             "start": 15,
             "end": 28
           },
           {
-            "file": "<worktree>/src/generators/utils/parse.ts",
+            "file": "src/generators/utils/parse.ts",
             "start": 148,
             "end": 162
           },
           {
-            "file": "<worktree>/tests/generators/utils/parse.tests.ts",
+            "file": "tests/generators/utils/parse.tests.ts",
             "start": 397,
             "end": 445
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/src/generators/utils/parse.ts",
+            "file": "src/generators/utils/parse.ts",
             "name": "indexSitesFixesConfig"
           },
           {
-            "file": "<worktree>/src/generators/utils/parse.ts",
+            "file": "src/generators/utils/parse.ts",
             "name": "parseSitesFixesConfig"
           }
         ]
@@ -66,856 +103,13 @@
         "predSteps": [
           {
             "files": [
-              "docs/color-schemes-drconf.spec",
-              "src/background/utils/extension-api.ts",
-              "src/background/utils/migration.ts",
-              "src/background/utils/network.ts",
-              "src/background/utils/state-manager.ts",
-              "src/generators/css-filter.ts",
-              "src/generators/utils/format.ts",
-              "src/generators/utils/matrix.ts",
-              "src/generators/utils/parse.ts",
-              "src/inject/dynamic-theme/css-collection.ts",
-              "src/inject/dynamic-theme/css-rules.ts",
-              "src/inject/dynamic-theme/modify-css.ts",
-              "src/inject/dynamic-theme/stylesheet-modifier.ts",
-              "src/inject/dynamic-theme/stylesheet-proxy.ts",
-              "src/inject/utils/dom.ts",
-              "src/inject/utils/watch-color-scheme.ts",
-              "src/ui/controls/utils.ts",
-              "src/ui/popup/theme/utils.ts",
-              "src/ui/popup/utils/issues.ts",
-              "src/ui/popup/utils/markdown.tsx",
-              "src/ui/stylesheet-editor/components/body.tsx",
-              "src/ui/stylesheet-editor/index.html",
-              "src/ui/stylesheet-editor/index.tsx",
-              "src/ui/stylesheet-editor/style.less",
-              "src/ui/utils.ts",
-              "src/utils/array.ts",
-              "src/utils/async-queue.ts",
-              "src/utils/color.ts",
-              "src/utils/colorscheme-parser.ts",
-              "src/utils/debounce.ts",
-              "src/utils/ipv6.ts",
-              "src/utils/links.ts",
-              "src/utils/locales.ts",
-              "src/utils/log.ts",
-              "src/utils/math.ts",
-              "src/utils/media-query.ts",
-              "src/utils/message.ts",
-              "src/utils/mutex.ts",
-              "src/utils/network.ts",
-              "src/utils/platform.ts",
-              "src/utils/promise-barrier.ts",
-              "src/utils/text.ts",
-              "src/utils/throttle.ts",
-              "src/utils/time.ts",
-              "src/utils/uid.ts",
-              "src/utils/url.ts",
-              "tasks/bundle-css.js",
-              "tasks/utils.js",
-              "tests/benchmark-server/index.js",
-              "tests/browser/coverage.js",
-              "tests/browser/dynamic/inline-override.tests.ts",
-              "tests/browser/dynamic/link-override.tests.ts",
-              "tests/browser/dynamic/style-override.tests.ts",
-              "tests/browser/e2e/devtools.tests.ts",
-              "tests/browser/e2e/toggle.tests.ts",
-              "tests/browser/environment.js",
-              "tests/browser/globals.d.ts",
-              "tests/browser/jest.config.chrome.js",
-              "tests/browser/jest.config.firefox.js",
-              "tests/browser/jest.config.js",
-              "tests/browser/jest.config.shared.js",
-              "tests/browser/paths.js",
-              "tests/browser/server.js",
-              "tests/browser/settings/migration.tests.ts",
-              "tests/browser/settings/sitelist.tests.ts",
-              "tests/browser/tsconfig.json",
-              "tests/config/config.tests.ts",
-              "tests/config/jest.config.js",
-              "tests/config/locales.tests.ts",
-              "tests/config/tsconfig.json",
-              "tests/generators/utils/jest.config.js",
-              "tests/generators/utils/parse.tests.ts",
-              "tests/generators/utils/tsconfig.json",
-              "tests/inject/background-stub.ts",
-              "tests/inject/customize.ts",
-              "tests/inject/dynamic/color.tests.ts",
-              "tests/inject/dynamic/fixes.tests.ts",
-              "tests/inject/dynamic/image-analysis.tests.ts",
-              "tests/inject/dynamic/inline-override.tests.ts",
-              "tests/inject/dynamic/link-override.tests.ts",
-              "tests/inject/dynamic/media-query.tests.ts",
-              "tests/inject/dynamic/shadow-dom.tests.ts",
-              "tests/inject/dynamic/style-override.tests.ts",
-              "tests/inject/dynamic/variables.tests.ts",
-              "tests/inject/echo-client.ts",
-              "tests/inject/echo-server.js",
-              "tests/inject/jest.config.js",
-              "tests/inject/karma.conf.js",
-              "tests/inject/polyfills.ts",
-              "tests/inject/run.js",
-              "tests/inject/tsconfig.json",
-              "tests/jest.config.js",
-              "tests/test-utils.ts",
-              "tests/utils/color.tests.ts",
-              "tests/utils/jest.config.js",
-              "tests/utils/math.tests.ts",
-              "tests/utils/promise-barrier.tests.ts",
-              "tests/utils/text.tests.ts",
-              "tests/utils/time.tests.ts",
-              "tests/utils/tsconfig.json",
-              "tests/utils/uid.tests.ts",
-              "tests/utils/url.tests.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "package-lock.json",
-              "src/api/chrome.ts",
-              "src/background/extension.ts",
-              "src/background/messenger.ts",
-              "src/background/tab-manager.ts",
-              "src/config/dynamic-theme-fixes.config",
-              "src/config/fix_inversion.json",
-              "src/config/inversion-fixes.config",
-              "src/config/static-themes.config",
-              "src/definitions.d.ts",
-              "src/generators/svg-filter.ts",
-              "src/inject/dynamic-theme/image.ts",
-              "src/inject/dynamic-theme/network.ts",
-              "src/inject/dynamic-theme/style-manager.ts",
-              "src/inject/index.ts",
-              "src/ui/connect/connector.ts",
-              "src/ui/controls/button/style.less",
-              "src/ui/controls/color-picker/hsb-picker.less",
-              "src/ui/controls/message-box/style.less",
-              "src/ui/controls/select/style.less",
-              "src/ui/controls/tab-panel/style.less",
-              "src/ui/controls/textbox/style.less",
-              "src/ui/devtools/index.tsx",
-              "src/ui/devtools/style.less",
-              "src/ui/icons.less",
-              "src/ui/popup/compatibility.js",
-              "src/ui/popup/components/body.tsx",
-              "src/ui/popup/components/header/style.less",
-              "src/ui/popup/components/loader/style.less",
-              "src/ui/popup/components/news/style.less",
-              "src/ui/popup/index.tsx",
-              "src/ui/popup/main-page/style.less",
-              "src/ui/popup/news-section/style.less",
-              "src/ui/popup/style.less",
-              "src/ui/popup/theme/page/style.less",
-              "src/ui/popup/types.d.ts",
-              "src/ui/stylesheet-editor/index.tsx",
-              "src/ui/theme.less",
-              "src/ui/utils.ts",
-              "src/utils/url.ts",
-              "tasks/bundle-html.js",
-              "tests/browser/environment.js",
-              "tests/browser/globals.d.ts",
-              "tests/inject/background-stub.ts",
-              "tests/inject/dynamic/image-analysis.tests.ts",
-              "tests/inject/dynamic/link-override.tests.ts",
-              "tests/inject/dynamic/style-override.tests.ts",
-              "tests/inject/dynamic/variables.tests.ts",
-              "tests/utils/text.tests.ts",
-              "tests/utils/url.tests.ts"
+              "tests/generators/utils/parse.tests.ts"
             ],
             "spans": {
-              "tasks/bundle-html.js": [
+              "tests/generators/utils/parse.tests.ts": [
                 {
-                  "start": 51,
-                  "end": 51
-                },
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                }
-              ],
-              "package-lock.json": [
-                {
-                  "start": 2622,
-                  "end": 2622
-                },
-                {
-                  "start": 2624,
-                  "end": 2624
-                },
-                {
-                  "start": 2631,
-                  "end": 2631
-                },
-                {
-                  "start": 2633,
-                  "end": 2633
-                },
-                {
-                  "start": 2651,
-                  "end": 2651
-                },
-                {
-                  "start": 2653,
-                  "end": 2653
-                },
-                {
-                  "start": 2863,
-                  "end": 2863
-                },
-                {
-                  "start": 4424,
-                  "end": 4424
-                },
-                {
-                  "start": 4441,
-                  "end": 4441
-                },
-                {
-                  "start": 10791,
-                  "end": 10791
-                },
-                {
-                  "start": 14578,
-                  "end": 14578
-                },
-                {
-                  "start": 14580,
-                  "end": 14580
-                },
-                {
-                  "start": 14584,
-                  "end": 14584
-                },
-                {
-                  "start": 14586,
-                  "end": 14586
-                },
-                {
-                  "start": 14590,
-                  "end": 14590
-                },
-                {
-                  "start": 14592,
-                  "end": 14592
-                },
-                {
-                  "start": 14755,
-                  "end": 14755
-                },
-                {
-                  "start": 16025,
-                  "end": 16025
-                },
-                {
-                  "start": 16039,
-                  "end": 16039
-                },
-                {
-                  "start": 20972,
-                  "end": 20972
-                }
-              ],
-              "src/definitions.d.ts": [
-                {
-                  "start": 42,
-                  "end": 42
-                }
-              ],
-              "src/inject/index.ts": [
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 80,
-                  "end": 80
-                }
-              ],
-              "tests/browser/environment.js": [
-                {
-                  "start": 208,
-                  "end": 208
-                },
-                {
-                  "start": 209,
-                  "end": 209
-                },
-                {
-                  "start": 213,
-                  "end": 213
-                },
-                {
-                  "start": 218,
-                  "end": 218
-                },
-                {
-                  "start": 222,
-                  "end": 222
-                },
-                {
-                  "start": 223,
-                  "end": 223
-                },
-                {
-                  "start": 224,
-                  "end": 224
-                }
-              ],
-              "tests/browser/globals.d.ts": [
-                {
-                  "start": 22,
-                  "end": 22
-                },
-                {
-                  "start": 24,
-                  "end": 24
-                }
-              ],
-              "tests/utils/url.tests.ts": [
-                {
-                  "start": 256,
-                  "end": 256
-                }
-              ],
-              "tests/inject/background-stub.ts": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/utils/text.tests.ts": [
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                }
-              ],
-              "src/config/static-themes.config": [
-                {
-                  "start": 171,
-                  "end": 171
-                }
-              ],
-              "src/config/inversion-fixes.config": [
-                {
-                  "start": 855,
-                  "end": 855
-                }
-              ],
-              "tests/inject/dynamic/variables.tests.ts": [
-                {
-                  "start": 813,
-                  "end": 813
-                },
-                {
-                  "start": 814,
-                  "end": 814
-                },
-                {
-                  "start": 848,
-                  "end": 848
-                },
-                {
-                  "start": 849,
-                  "end": 849
-                },
-                {
-                  "start": 850,
-                  "end": 850
-                },
-                {
-                  "start": 862,
-                  "end": 862
-                },
-                {
-                  "start": 876,
-                  "end": 876
-                }
-              ],
-              "tests/inject/dynamic/style-override.tests.ts": [
-                {
-                  "start": 80,
-                  "end": 80
-                },
-                {
-                  "start": 97,
-                  "end": 97
-                }
-              ],
-              "tests/inject/dynamic/image-analysis.tests.ts": [
-                {
-                  "start": 26,
-                  "end": 26
-                },
-                {
-                  "start": 239,
-                  "end": 239
-                }
-              ],
-              "tests/inject/dynamic/link-override.tests.ts": [
-                {
-                  "start": 48,
-                  "end": 48
-                },
-                {
-                  "start": 120,
-                  "end": 120
-                },
-                {
-                  "start": 137,
-                  "end": 137
-                }
-              ],
-              "src/inject/dynamic-theme/network.ts": [
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 20,
-                  "end": 20
-                }
-              ],
-              "src/config/fix_inversion.json": [
-                {
-                  "start": 286,
-                  "end": 286
-                }
-              ],
-              "src/config/dynamic-theme-fixes.config": [
-                {
-                  "start": 925,
-                  "end": 925
-                },
-                {
-                  "start": 2720,
-                  "end": 2720
-                },
-                {
-                  "start": 2725,
-                  "end": 2725
-                },
-                {
-                  "start": 10525,
-                  "end": 10525
-                },
-                {
-                  "start": 10676,
-                  "end": 10676
-                },
-                {
-                  "start": 11954,
-                  "end": 11954
-                },
-                {
-                  "start": 15683,
-                  "end": 15683
-                }
-              ],
-              "src/utils/url.ts": [
-                {
-                  "start": 52,
-                  "end": 52
-                }
-              ],
-              "src/inject/dynamic-theme/image.ts": [
-                {
-                  "start": 25,
-                  "end": 25
-                },
-                {
-                  "start": 193,
-                  "end": 193
-                }
-              ],
-              "src/inject/dynamic-theme/style-manager.ts": [
-                {
-                  "start": 590,
-                  "end": 590
-                }
-              ],
-              "src/generators/svg-filter.ts": [
-                {
-                  "start": 30,
-                  "end": 30
-                }
-              ],
-              "src/api/chrome.ts": [
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 35,
-                  "end": 35
-                }
-              ],
-              "src/background/tab-manager.ts": [
-                {
-                  "start": 186,
-                  "end": 186
-                },
-                {
-                  "start": 196,
-                  "end": 196
-                }
-              ],
-              "src/ui/icons.less": [
-                {
-                  "start": 2,
-                  "end": 2
-                },
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "src/ui/theme.less": [
-                {
-                  "start": 31,
-                  "end": 31
-                }
-              ],
-              "src/background/messenger.ts": [
-                {
-                  "start": 163,
-                  "end": 163
-                }
-              ],
-              "src/ui/connect/connector.ts": [
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                },
-                {
-                  "start": 73,
-                  "end": 73
-                },
-                {
-                  "start": 77,
-                  "end": 77
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                },
-                {
-                  "start": 85,
-                  "end": 85
-                },
-                {
-                  "start": 89,
-                  "end": 89
-                }
-              ],
-              "src/ui/controls/textbox/style.less": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "src/background/extension.ts": [
-                {
-                  "start": 172,
-                  "end": 172
-                },
-                {
-                  "start": 192,
-                  "end": 192
-                },
-                {
-                  "start": 211,
-                  "end": 211
-                },
-                {
-                  "start": 283,
-                  "end": 283
-                },
-                {
-                  "start": 557,
-                  "end": 557
-                },
-                {
-                  "start": 564,
-                  "end": 564
-                },
-                {
-                  "start": 569,
-                  "end": 569
-                },
-                {
-                  "start": 579,
-                  "end": 579
-                },
-                {
-                  "start": 591,
-                  "end": 591
-                }
-              ],
-              "src/ui/controls/color-picker/hsb-picker.less": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "src/ui/controls/select/style.less": [
-                {
-                  "start": 87,
-                  "end": 87
-                }
-              ],
-              "src/ui/controls/tab-panel/style.less": [
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 36,
-                  "end": 36
-                }
-              ],
-              "src/ui/controls/button/style.less": [
-                {
-                  "start": 15,
-                  "end": 15
-                }
-              ],
-              "src/ui/controls/message-box/style.less": [
-                {
-                  "start": 9,
-                  "end": 9
-                }
-              ],
-              "src/ui/devtools/style.less": [
-                {
-                  "start": 66,
-                  "end": 66
-                }
-              ],
-              "src/ui/devtools/index.tsx": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 29,
-                  "end": 29
-                },
-                {
-                  "start": 46,
-                  "end": 46
-                }
-              ],
-              "src/ui/stylesheet-editor/index.tsx": [
-                {
-                  "start": 7,
-                  "end": 7
-                }
-              ],
-              "src/ui/utils.ts": [
-                {
-                  "start": 47,
-                  "end": 47
-                }
-              ],
-              "src/ui/popup/style.less": [
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 26,
-                  "end": 26
-                }
-              ],
-              "src/ui/popup/compatibility.js": [
-                {
-                  "start": 29,
-                  "end": 29
-                }
-              ],
-              "src/ui/popup/theme/page/style.less": [
-                {
-                  "start": 35,
-                  "end": 35
-                },
-                {
-                  "start": 115,
-                  "end": 115
-                }
-              ],
-              "src/ui/popup/components/news/style.less": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 71,
-                  "end": 71
-                },
-                {
-                  "start": 147,
-                  "end": 147
-                }
-              ],
-              "src/ui/popup/components/loader/style.less": [
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 40,
-                  "end": 40
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 51,
-                  "end": 51
-                }
-              ],
-              "src/ui/popup/components/header/style.less": [
-                {
-                  "start": 127,
-                  "end": 127
-                },
-                {
-                  "start": 141,
-                  "end": 141
-                },
-                {
-                  "start": 142,
-                  "end": 142
-                },
-                {
-                  "start": 158,
-                  "end": 158
-                },
-                {
-                  "start": 184,
-                  "end": 184
-                },
-                {
-                  "start": 185,
-                  "end": 185
-                }
-              ],
-              "src/ui/popup/components/body.tsx": [
-                {
-                  "start": 22,
-                  "end": 22
-                }
-              ],
-              "src/ui/popup/main-page/style.less": [
-                {
-                  "start": 91,
-                  "end": 91
-                }
-              ],
-              "src/ui/popup/types.d.ts": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "src/ui/popup/news-section/style.less": [
-                {
-                  "start": 10,
-                  "end": 10
-                }
-              ],
-              "src/ui/popup/index.tsx": [
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 74,
-                  "end": 74
-                },
-                {
-                  "start": 83,
-                  "end": 83
-                },
-                {
-                  "start": 88,
-                  "end": 88
-                },
-                {
-                  "start": 91,
-                  "end": 91
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -923,708 +117,13 @@
           },
           {
             "files": [
-              "tests/generators/utils/parse.tests.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "src/generators/utils/parse.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/api/chrome.ts",
-              "src/background/extension.ts",
-              "src/background/index.ts",
-              "src/background/messenger.ts",
-              "src/background/newsmaker.ts",
-              "src/background/tab-manager.ts",
-              "src/background/utils/extension-api.ts",
-              "src/background/window-theme.ts",
-              "src/config/dynamic-theme-fixes.config",
-              "src/config/fix_inversion.json",
-              "src/config/inversion-fixes.config",
-              "src/definitions.d.ts",
-              "src/generators/modify-colors.ts",
-              "src/generators/svg-filter.ts",
-              "src/generators/utils/parse.ts",
-              "src/inject/dynamic-theme/css-collection.ts",
-              "src/inject/dynamic-theme/css-rules.ts",
-              "src/inject/dynamic-theme/image.ts",
-              "src/inject/dynamic-theme/index.ts",
-              "src/inject/dynamic-theme/meta-theme-color.ts",
-              "src/inject/dynamic-theme/modify-css.ts",
-              "src/inject/dynamic-theme/style-manager.ts",
-              "src/inject/dynamic-theme/variables.ts",
-              "src/ui/connect/connector.ts",
-              "src/ui/controls/color-dropdown/index.tsx",
-              "src/ui/controls/color-picker/hsb-picker.tsx",
-              "src/ui/controls/color-picker/index.tsx",
-              "src/ui/devtools/index.tsx",
-              "src/ui/icons.less",
-              "src/ui/popup/body/style.less",
-              "src/ui/popup/components/body.tsx",
-              "src/ui/popup/components/filter-settings/style.less",
-              "src/ui/popup/components/header/style.less",
-              "src/ui/popup/components/site-toggle/index.tsx",
-              "src/ui/popup/index.tsx",
-              "src/ui/popup/main-page/help.tsx",
-              "src/ui/popup/manage-settings-page/import-settings.tsx",
-              "src/ui/popup/style.less",
-              "src/ui/shared.less",
-              "src/ui/utils.ts",
-              "src/utils/color.ts",
-              "src/utils/links.ts",
-              "src/utils/network.ts",
-              "src/utils/url.ts"
-            ],
             "spans": {
-              "src/definitions.d.ts": [
-                {
-                  "start": 30,
-                  "end": 30
-                }
-              ],
-              "src/generators/svg-filter.ts": [
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 30,
-                  "end": 30
-                }
-              ],
-              "src/api/chrome.ts": [
-                {
-                  "start": 23,
-                  "end": 23
-                }
-              ],
-              "src/generators/modify-colors.ts": [
-                {
-                  "start": 30,
-                  "end": 30
-                }
-              ],
-              "src/config/fix_inversion.json": [
-                {
-                  "start": 286,
-                  "end": 286
-                }
-              ],
-              "src/utils/color.ts": [
-                {
-                  "start": 111,
-                  "end": 111
-                }
-              ],
-              "src/utils/links.ts": [
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 33,
-                  "end": 33
-                }
-              ],
-              "src/inject/dynamic-theme/index.ts": [
-                {
-                  "start": 119,
-                  "end": 119
-                },
-                {
-                  "start": 120,
-                  "end": 120
-                }
-              ],
-              "src/inject/dynamic-theme/meta-theme-color.ts": [
-                {
-                  "start": 14,
-                  "end": 14
-                }
-              ],
-              "src/inject/dynamic-theme/variables.ts": [
-                {
-                  "start": 384,
-                  "end": 384
-                }
-              ],
-              "src/config/inversion-fixes.config": [
-                {
-                  "start": 855,
-                  "end": 855
-                }
-              ],
-              "src/config/dynamic-theme-fixes.config": [
-                {
-                  "start": 448,
-                  "end": 448
-                },
-                {
-                  "start": 925,
-                  "end": 925
-                },
-                {
-                  "start": 2719,
-                  "end": 2719
-                },
-                {
-                  "start": 2724,
-                  "end": 2724
-                },
-                {
-                  "start": 3064,
-                  "end": 3064
-                },
-                {
-                  "start": 3749,
-                  "end": 3749
-                },
-                {
-                  "start": 4212,
-                  "end": 4212
-                },
-                {
-                  "start": 4215,
-                  "end": 4215
-                },
-                {
-                  "start": 7245,
-                  "end": 7245
-                },
-                {
-                  "start": 8239,
-                  "end": 8239
-                },
-                {
-                  "start": 8242,
-                  "end": 8242
-                },
-                {
-                  "start": 8245,
-                  "end": 8245
-                },
-                {
-                  "start": 8249,
-                  "end": 8249
-                },
-                {
-                  "start": 8252,
-                  "end": 8252
-                },
-                {
-                  "start": 8255,
-                  "end": 8255
-                },
-                {
-                  "start": 8874,
-                  "end": 8874
-                },
-                {
-                  "start": 10525,
-                  "end": 10525
-                },
-                {
-                  "start": 11549,
-                  "end": 11549
-                },
-                {
-                  "start": 11709,
-                  "end": 11709
-                },
-                {
-                  "start": 13584,
-                  "end": 13584
-                },
-                {
-                  "start": 13588,
-                  "end": 13588
-                },
-                {
-                  "start": 13592,
-                  "end": 13592
-                },
-                {
-                  "start": 13596,
-                  "end": 13596
-                },
-                {
-                  "start": 13623,
-                  "end": 13623
-                },
-                {
-                  "start": 13629,
-                  "end": 13629
-                },
-                {
-                  "start": 13637,
-                  "end": 13637
-                },
-                {
-                  "start": 14328,
-                  "end": 14328
-                },
-                {
-                  "start": 14340,
-                  "end": 14340
-                },
-                {
-                  "start": 15683,
-                  "end": 15683
-                }
-              ],
-              "src/inject/dynamic-theme/modify-css.ts": [
-                {
-                  "start": 129,
-                  "end": 129
-                },
-                {
-                  "start": 171,
-                  "end": 171
-                },
-                {
-                  "start": 238,
-                  "end": 238
-                },
-                {
-                  "start": 365,
-                  "end": 365
-                },
-                {
-                  "start": 367,
-                  "end": 367
-                },
-                {
-                  "start": 409,
-                  "end": 409
-                },
-                {
-                  "start": 412,
-                  "end": 412
-                },
-                {
-                  "start": 413,
-                  "end": 413
-                },
-                {
-                  "start": 419,
-                  "end": 419
-                },
-                {
-                  "start": 420,
-                  "end": 420
-                },
-                {
-                  "start": 424,
-                  "end": 424
-                },
-                {
-                  "start": 425,
-                  "end": 425
-                }
-              ],
-              "src/inject/dynamic-theme/image.ts": [
-                {
-                  "start": 29,
-                  "end": 29
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 56,
-                  "end": 56
-                },
-                {
-                  "start": 181,
-                  "end": 181
-                },
-                {
-                  "start": 190,
-                  "end": 190
-                },
-                {
-                  "start": 193,
-                  "end": 193
-                }
-              ],
-              "src/inject/dynamic-theme/css-collection.ts": [
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 14,
-                  "end": 14
-                }
-              ],
-              "src/utils/url.ts": [
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 17,
-                  "end": 17
-                },
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 32,
-                  "end": 32
-                },
-                {
-                  "start": 41,
-                  "end": 41
-                },
-                {
-                  "start": 42,
-                  "end": 42
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 56,
-                  "end": 56
-                },
-                {
-                  "start": 74,
-                  "end": 74
-                }
-              ],
-              "src/inject/dynamic-theme/style-manager.ts": [
-                {
-                  "start": 583,
-                  "end": 583
-                },
-                {
-                  "start": 603,
-                  "end": 603
-                },
-                {
-                  "start": 604,
-                  "end": 604
-                }
-              ],
-              "src/utils/network.ts": [
-                {
-                  "start": 29,
-                  "end": 29
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 39,
-                  "end": 39
-                }
-              ],
-              "src/inject/dynamic-theme/css-rules.ts": [
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 106,
-                  "end": 106
-                }
-              ],
               "src/generators/utils/parse.ts": [
                 {
-                  "start": 62,
-                  "end": 62
-                }
-              ],
-              "src/background/tab-manager.ts": [
-                {
-                  "start": 165,
-                  "end": 165
-                },
-                {
-                  "start": 211,
-                  "end": 211
-                },
-                {
-                  "start": 226,
-                  "end": 226
-                },
-                {
-                  "start": 278,
-                  "end": 278
-                },
-                {
-                  "start": 296,
-                  "end": 296
-                },
-                {
-                  "start": 297,
-                  "end": 297
-                }
-              ],
-              "src/background/index.ts": [
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 80,
-                  "end": 80
-                },
-                {
-                  "start": 84,
-                  "end": 84
-                }
-              ],
-              "src/background/window-theme.ts": [
-                {
-                  "start": 80,
-                  "end": 80
-                }
-              ],
-              "src/background/newsmaker.ts": [
-                {
-                  "start": 78,
-                  "end": 78
-                }
-              ],
-              "src/background/messenger.ts": [
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 122,
-                  "end": 122
-                }
-              ],
-              "src/background/extension.ts": [
-                {
-                  "start": 172,
-                  "end": 172
-                },
-                {
-                  "start": 227,
-                  "end": 227
-                },
-                {
-                  "start": 235,
-                  "end": 235
-                },
-                {
-                  "start": 263,
-                  "end": 263
-                },
-                {
-                  "start": 267,
-                  "end": 267
-                },
-                {
-                  "start": 456,
-                  "end": 456
-                },
-                {
-                  "start": 480,
-                  "end": 480
-                },
-                {
-                  "start": 481,
-                  "end": 481
-                }
-              ],
-              "src/ui/shared.less": [
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 20,
-                  "end": 20
-                }
-              ],
-              "src/ui/utils.ts": [
-                {
-                  "start": 43,
-                  "end": 43
-                }
-              ],
-              "src/ui/icons.less": [
-                {
-                  "start": 2,
-                  "end": 2
-                },
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "src/ui/connect/connector.ts": [
-                {
-                  "start": 80,
-                  "end": 80
-                }
-              ],
-              "src/ui/popup/style.less": [
-                {
-                  "start": 117,
-                  "end": 117
-                }
-              ],
-              "src/background/utils/extension-api.ts": [
-                {
-                  "start": 64,
-                  "end": 64
-                }
-              ],
-              "src/ui/popup/main-page/help.tsx": [
-                {
-                  "start": 10,
-                  "end": 10
-                }
-              ],
-              "src/ui/devtools/index.tsx": [
-                {
-                  "start": 29,
-                  "end": 29
-                }
-              ],
-              "src/ui/popup/components/header/style.less": [
-                {
-                  "start": 15,
-                  "end": 15
-                }
-              ],
-              "src/ui/popup/body/style.less": [
-                {
-                  "start": 28,
-                  "end": 28
-                }
-              ],
-              "src/ui/popup/manage-settings-page/import-settings.tsx": [
-                {
-                  "start": 58,
-                  "end": 58
-                }
-              ],
-              "src/ui/popup/components/body.tsx": [
-                {
-                  "start": 154,
-                  "end": 154
-                }
-              ],
-              "src/ui/popup/components/filter-settings/style.less": [
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 61,
-                  "end": 61
-                }
-              ],
-              "src/ui/popup/components/site-toggle/index.tsx": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "src/ui/popup/index.tsx": [
-                {
-                  "start": 74,
-                  "end": 74
-                }
-              ],
-              "src/ui/controls/color-dropdown/index.tsx": [
-                {
-                  "start": 55,
-                  "end": 55
-                }
-              ],
-              "src/ui/controls/color-picker/hsb-picker.tsx": [
-                {
-                  "start": 125,
-                  "end": 125
-                },
-                {
-                  "start": 137,
-                  "end": 137
-                }
-              ],
-              "src/ui/controls/color-picker/index.tsx": [
-                {
-                  "start": 17,
-                  "end": 17
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -1634,1388 +133,79 @@
             "files": [
               "src/utils/text.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/utils/text.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/generators/utils/parse.tests.ts"
+            ],
+            "spans": {
+              "tests/generators/utils/parse.tests.ts": [
+                {
+                  "start": 220,
+                  "end": 430
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "package.json"
             ],
-            "spans": {},
+            "spans": {
+              "package.json": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/generators/utils/parse.ts"
+            ],
+            "spans": {
+              "src/generators/utils/parse.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/generators/utils/parse.tests.ts"
+            ],
+            "spans": {
+              "tests/generators/utils/parse.tests.ts": [
+                {
+                  "start": 360,
+                  "end": 470
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "<worktree>/src/generators/utils/parse.ts",
-          "<worktree>/tests/generators/utils/parse.tests.ts",
-          "docs/color-schemes-drconf.spec",
-          "package-lock.json",
-          "package.json",
-          "src/api/chrome.ts",
-          "src/background/extension.ts",
-          "src/background/index.ts",
-          "src/background/messenger.ts",
-          "src/background/newsmaker.ts",
-          "src/background/tab-manager.ts",
-          "src/background/utils/extension-api.ts",
-          "src/background/utils/migration.ts",
-          "src/background/utils/network.ts",
-          "src/background/utils/state-manager.ts",
-          "src/background/window-theme.ts",
-          "src/config/dynamic-theme-fixes.config",
-          "src/config/fix_inversion.json",
-          "src/config/inversion-fixes.config",
-          "src/config/static-themes.config",
-          "src/definitions.d.ts",
-          "src/generators/css-filter.ts",
-          "src/generators/modify-colors.ts",
-          "src/generators/svg-filter.ts",
-          "src/generators/utils/format.ts",
-          "src/generators/utils/matrix.ts",
           "src/generators/utils/parse.ts",
-          "src/inject/dynamic-theme/css-collection.ts",
-          "src/inject/dynamic-theme/css-rules.ts",
-          "src/inject/dynamic-theme/image.ts",
-          "src/inject/dynamic-theme/index.ts",
-          "src/inject/dynamic-theme/meta-theme-color.ts",
-          "src/inject/dynamic-theme/modify-css.ts",
-          "src/inject/dynamic-theme/network.ts",
-          "src/inject/dynamic-theme/style-manager.ts",
-          "src/inject/dynamic-theme/stylesheet-modifier.ts",
-          "src/inject/dynamic-theme/stylesheet-proxy.ts",
-          "src/inject/dynamic-theme/variables.ts",
-          "src/inject/index.ts",
-          "src/inject/utils/dom.ts",
-          "src/inject/utils/watch-color-scheme.ts",
-          "src/ui/connect/connector.ts",
-          "src/ui/controls/button/style.less",
-          "src/ui/controls/color-dropdown/index.tsx",
-          "src/ui/controls/color-picker/hsb-picker.less",
-          "src/ui/controls/color-picker/hsb-picker.tsx",
-          "src/ui/controls/color-picker/index.tsx",
-          "src/ui/controls/message-box/style.less",
-          "src/ui/controls/select/style.less",
-          "src/ui/controls/tab-panel/style.less",
-          "src/ui/controls/textbox/style.less",
-          "src/ui/controls/utils.ts",
-          "src/ui/devtools/index.tsx",
-          "src/ui/devtools/style.less",
-          "src/ui/icons.less",
-          "src/ui/popup/body/style.less",
-          "src/ui/popup/compatibility.js",
-          "src/ui/popup/components/body.tsx",
-          "src/ui/popup/components/filter-settings/style.less",
-          "src/ui/popup/components/header/style.less",
-          "src/ui/popup/components/loader/style.less",
-          "src/ui/popup/components/news/style.less",
-          "src/ui/popup/components/site-toggle/index.tsx",
-          "src/ui/popup/index.tsx",
-          "src/ui/popup/main-page/help.tsx",
-          "src/ui/popup/main-page/style.less",
-          "src/ui/popup/manage-settings-page/import-settings.tsx",
-          "src/ui/popup/news-section/style.less",
-          "src/ui/popup/style.less",
-          "src/ui/popup/theme/page/style.less",
-          "src/ui/popup/theme/utils.ts",
-          "src/ui/popup/types.d.ts",
-          "src/ui/popup/utils/issues.ts",
-          "src/ui/popup/utils/markdown.tsx",
-          "src/ui/shared.less",
-          "src/ui/stylesheet-editor/components/body.tsx",
-          "src/ui/stylesheet-editor/index.html",
-          "src/ui/stylesheet-editor/index.tsx",
-          "src/ui/stylesheet-editor/style.less",
-          "src/ui/theme.less",
-          "src/ui/utils.ts",
-          "src/utils/array.ts",
-          "src/utils/async-queue.ts",
-          "src/utils/color.ts",
-          "src/utils/colorscheme-parser.ts",
-          "src/utils/debounce.ts",
-          "src/utils/ipv6.ts",
-          "src/utils/links.ts",
-          "src/utils/locales.ts",
-          "src/utils/log.ts",
-          "src/utils/math.ts",
-          "src/utils/media-query.ts",
-          "src/utils/message.ts",
-          "src/utils/mutex.ts",
-          "src/utils/network.ts",
-          "src/utils/platform.ts",
-          "src/utils/promise-barrier.ts",
-          "src/utils/text.ts",
-          "src/utils/throttle.ts",
-          "src/utils/time.ts",
-          "src/utils/uid.ts",
-          "src/utils/url.ts",
-          "tasks/bundle-css.js",
-          "tasks/bundle-html.js",
-          "tasks/utils.js",
-          "tests/benchmark-server/index.js",
-          "tests/browser/coverage.js",
-          "tests/browser/dynamic/inline-override.tests.ts",
-          "tests/browser/dynamic/link-override.tests.ts",
-          "tests/browser/dynamic/style-override.tests.ts",
-          "tests/browser/e2e/devtools.tests.ts",
-          "tests/browser/e2e/toggle.tests.ts",
-          "tests/browser/environment.js",
-          "tests/browser/globals.d.ts",
-          "tests/browser/jest.config.chrome.js",
-          "tests/browser/jest.config.firefox.js",
-          "tests/browser/jest.config.js",
-          "tests/browser/jest.config.shared.js",
-          "tests/browser/paths.js",
-          "tests/browser/server.js",
-          "tests/browser/settings/migration.tests.ts",
-          "tests/browser/settings/sitelist.tests.ts",
-          "tests/browser/tsconfig.json",
-          "tests/config/config.tests.ts",
-          "tests/config/jest.config.js",
-          "tests/config/locales.tests.ts",
-          "tests/config/tsconfig.json",
-          "tests/generators/utils/jest.config.js",
-          "tests/generators/utils/parse.tests.ts",
-          "tests/generators/utils/tsconfig.json",
-          "tests/inject/background-stub.ts",
-          "tests/inject/customize.ts",
-          "tests/inject/dynamic/color.tests.ts",
-          "tests/inject/dynamic/fixes.tests.ts",
-          "tests/inject/dynamic/image-analysis.tests.ts",
-          "tests/inject/dynamic/inline-override.tests.ts",
-          "tests/inject/dynamic/link-override.tests.ts",
-          "tests/inject/dynamic/media-query.tests.ts",
-          "tests/inject/dynamic/shadow-dom.tests.ts",
-          "tests/inject/dynamic/style-override.tests.ts",
-          "tests/inject/dynamic/variables.tests.ts",
-          "tests/inject/echo-client.ts",
-          "tests/inject/echo-server.js",
-          "tests/inject/jest.config.js",
-          "tests/inject/karma.conf.js",
-          "tests/inject/polyfills.ts",
-          "tests/inject/run.js",
-          "tests/inject/tsconfig.json",
-          "tests/jest.config.js",
-          "tests/test-utils.ts",
-          "tests/utils/color.tests.ts",
-          "tests/utils/jest.config.js",
-          "tests/utils/math.tests.ts",
-          "tests/utils/promise-barrier.tests.ts",
-          "tests/utils/text.tests.ts",
-          "tests/utils/time.tests.ts",
-          "tests/utils/tsconfig.json",
-          "tests/utils/uid.tests.ts",
-          "tests/utils/url.tests.ts"
+          "tests/generators/utils/parse.tests.ts"
         ],
         "predSpans": {
-          "tasks/bundle-html.js": [
-            {
-              "start": 51,
-              "end": 51
-            },
-            {
-              "start": 60,
-              "end": 60
-            },
-            {
-              "start": 69,
-              "end": 69
-            }
-          ],
-          "package-lock.json": [
-            {
-              "start": 2622,
-              "end": 2622
-            },
-            {
-              "start": 2624,
-              "end": 2624
-            },
-            {
-              "start": 2631,
-              "end": 2631
-            },
-            {
-              "start": 2633,
-              "end": 2633
-            },
-            {
-              "start": 2651,
-              "end": 2651
-            },
-            {
-              "start": 2653,
-              "end": 2653
-            },
-            {
-              "start": 2863,
-              "end": 2863
-            },
-            {
-              "start": 4424,
-              "end": 4424
-            },
-            {
-              "start": 4441,
-              "end": 4441
-            },
-            {
-              "start": 10791,
-              "end": 10791
-            },
-            {
-              "start": 14578,
-              "end": 14578
-            },
-            {
-              "start": 14580,
-              "end": 14580
-            },
-            {
-              "start": 14584,
-              "end": 14584
-            },
-            {
-              "start": 14586,
-              "end": 14586
-            },
-            {
-              "start": 14590,
-              "end": 14590
-            },
-            {
-              "start": 14592,
-              "end": 14592
-            },
-            {
-              "start": 14755,
-              "end": 14755
-            },
-            {
-              "start": 16025,
-              "end": 16025
-            },
-            {
-              "start": 16039,
-              "end": 16039
-            },
-            {
-              "start": 20972,
-              "end": 20972
-            }
-          ],
-          "src/definitions.d.ts": [
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 42,
-              "end": 42
-            }
-          ],
-          "src/inject/index.ts": [
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 80,
-              "end": 80
-            }
-          ],
-          "tests/browser/environment.js": [
-            {
-              "start": 208,
-              "end": 208
-            },
-            {
-              "start": 209,
-              "end": 209
-            },
-            {
-              "start": 213,
-              "end": 213
-            },
-            {
-              "start": 218,
-              "end": 218
-            },
-            {
-              "start": 222,
-              "end": 222
-            },
-            {
-              "start": 223,
-              "end": 223
-            },
-            {
-              "start": 224,
-              "end": 224
-            }
-          ],
-          "tests/browser/globals.d.ts": [
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 24,
-              "end": 24
-            }
-          ],
-          "tests/utils/url.tests.ts": [
-            {
-              "start": 256,
-              "end": 256
-            }
-          ],
-          "tests/inject/background-stub.ts": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/utils/text.tests.ts": [
-            {
-              "start": 60,
-              "end": 60
-            },
-            {
-              "start": 63,
-              "end": 63
-            }
-          ],
-          "src/config/static-themes.config": [
-            {
-              "start": 171,
-              "end": 171
-            }
-          ],
-          "src/config/inversion-fixes.config": [
-            {
-              "start": 855,
-              "end": 855
-            }
-          ],
-          "tests/inject/dynamic/variables.tests.ts": [
-            {
-              "start": 813,
-              "end": 813
-            },
-            {
-              "start": 814,
-              "end": 814
-            },
-            {
-              "start": 848,
-              "end": 848
-            },
-            {
-              "start": 849,
-              "end": 849
-            },
-            {
-              "start": 850,
-              "end": 850
-            },
-            {
-              "start": 862,
-              "end": 862
-            },
-            {
-              "start": 876,
-              "end": 876
-            }
-          ],
-          "tests/inject/dynamic/style-override.tests.ts": [
-            {
-              "start": 80,
-              "end": 80
-            },
-            {
-              "start": 97,
-              "end": 97
-            }
-          ],
-          "tests/inject/dynamic/image-analysis.tests.ts": [
-            {
-              "start": 26,
-              "end": 26
-            },
-            {
-              "start": 239,
-              "end": 239
-            }
-          ],
-          "tests/inject/dynamic/link-override.tests.ts": [
-            {
-              "start": 48,
-              "end": 48
-            },
-            {
-              "start": 120,
-              "end": 120
-            },
-            {
-              "start": 137,
-              "end": 137
-            }
-          ],
-          "src/inject/dynamic-theme/network.ts": [
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 20,
-              "end": 20
-            }
-          ],
-          "src/config/fix_inversion.json": [
-            {
-              "start": 286,
-              "end": 286
-            }
-          ],
-          "src/config/dynamic-theme-fixes.config": [
-            {
-              "start": 448,
-              "end": 448
-            },
-            {
-              "start": 925,
-              "end": 925
-            },
-            {
-              "start": 2719,
-              "end": 2719
-            },
-            {
-              "start": 2720,
-              "end": 2720
-            },
-            {
-              "start": 2724,
-              "end": 2724
-            },
-            {
-              "start": 2725,
-              "end": 2725
-            },
-            {
-              "start": 3064,
-              "end": 3064
-            },
-            {
-              "start": 3749,
-              "end": 3749
-            },
-            {
-              "start": 4212,
-              "end": 4212
-            },
-            {
-              "start": 4215,
-              "end": 4215
-            },
-            {
-              "start": 7245,
-              "end": 7245
-            },
-            {
-              "start": 8239,
-              "end": 8239
-            },
-            {
-              "start": 8242,
-              "end": 8242
-            },
-            {
-              "start": 8245,
-              "end": 8245
-            },
-            {
-              "start": 8249,
-              "end": 8249
-            },
-            {
-              "start": 8252,
-              "end": 8252
-            },
-            {
-              "start": 8255,
-              "end": 8255
-            },
-            {
-              "start": 8874,
-              "end": 8874
-            },
-            {
-              "start": 10525,
-              "end": 10525
-            },
-            {
-              "start": 10676,
-              "end": 10676
-            },
-            {
-              "start": 11549,
-              "end": 11549
-            },
-            {
-              "start": 11709,
-              "end": 11709
-            },
-            {
-              "start": 11954,
-              "end": 11954
-            },
-            {
-              "start": 13584,
-              "end": 13584
-            },
-            {
-              "start": 13588,
-              "end": 13588
-            },
-            {
-              "start": 13592,
-              "end": 13592
-            },
-            {
-              "start": 13596,
-              "end": 13596
-            },
-            {
-              "start": 13623,
-              "end": 13623
-            },
-            {
-              "start": 13629,
-              "end": 13629
-            },
-            {
-              "start": 13637,
-              "end": 13637
-            },
-            {
-              "start": 14328,
-              "end": 14328
-            },
-            {
-              "start": 14340,
-              "end": 14340
-            },
-            {
-              "start": 15683,
-              "end": 15683
-            }
-          ],
-          "src/utils/url.ts": [
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 17,
-              "end": 17
-            },
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 32,
-              "end": 32
-            },
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
-              "start": 42,
-              "end": 42
-            },
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 56,
-              "end": 56
-            },
-            {
-              "start": 74,
-              "end": 74
-            }
-          ],
-          "src/inject/dynamic-theme/image.ts": [
-            {
-              "start": 25,
-              "end": 25
-            },
-            {
-              "start": 29,
-              "end": 29
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 56,
-              "end": 56
-            },
-            {
-              "start": 181,
-              "end": 181
-            },
-            {
-              "start": 190,
-              "end": 190
-            },
-            {
-              "start": 193,
-              "end": 193
-            }
-          ],
-          "src/inject/dynamic-theme/style-manager.ts": [
-            {
-              "start": 583,
-              "end": 583
-            },
-            {
-              "start": 590,
-              "end": 590
-            },
-            {
-              "start": 603,
-              "end": 603
-            },
-            {
-              "start": 604,
-              "end": 604
-            }
-          ],
-          "src/generators/svg-filter.ts": [
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 30,
-              "end": 30
-            }
-          ],
-          "src/api/chrome.ts": [
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 35,
-              "end": 35
-            }
-          ],
-          "src/background/tab-manager.ts": [
-            {
-              "start": 165,
-              "end": 165
-            },
-            {
-              "start": 186,
-              "end": 186
-            },
-            {
-              "start": 196,
-              "end": 196
-            },
-            {
-              "start": 211,
-              "end": 211
-            },
-            {
-              "start": 226,
-              "end": 226
-            },
-            {
-              "start": 278,
-              "end": 278
-            },
-            {
-              "start": 296,
-              "end": 296
-            },
-            {
-              "start": 297,
-              "end": 297
-            }
-          ],
-          "src/ui/icons.less": [
-            {
-              "start": 2,
-              "end": 2
-            },
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "src/ui/theme.less": [
-            {
-              "start": 31,
-              "end": 31
-            }
-          ],
-          "src/background/messenger.ts": [
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 122,
-              "end": 122
-            },
-            {
-              "start": 163,
-              "end": 163
-            }
-          ],
-          "src/ui/connect/connector.ts": [
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 60,
-              "end": 60
-            },
-            {
-              "start": 69,
-              "end": 69
-            },
-            {
-              "start": 73,
-              "end": 73
-            },
-            {
-              "start": 77,
-              "end": 77
-            },
-            {
-              "start": 80,
-              "end": 80
-            },
-            {
-              "start": 81,
-              "end": 81
-            },
-            {
-              "start": 85,
-              "end": 85
-            },
-            {
-              "start": 89,
-              "end": 89
-            }
-          ],
-          "src/ui/controls/textbox/style.less": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "src/background/extension.ts": [
-            {
-              "start": 172,
-              "end": 172
-            },
-            {
-              "start": 192,
-              "end": 192
-            },
-            {
-              "start": 211,
-              "end": 211
-            },
-            {
-              "start": 227,
-              "end": 227
-            },
-            {
-              "start": 235,
-              "end": 235
-            },
-            {
-              "start": 263,
-              "end": 263
-            },
-            {
-              "start": 267,
-              "end": 267
-            },
-            {
-              "start": 283,
-              "end": 283
-            },
-            {
-              "start": 456,
-              "end": 456
-            },
-            {
-              "start": 480,
-              "end": 480
-            },
-            {
-              "start": 481,
-              "end": 481
-            },
-            {
-              "start": 557,
-              "end": 557
-            },
-            {
-              "start": 564,
-              "end": 564
-            },
-            {
-              "start": 569,
-              "end": 569
-            },
-            {
-              "start": 579,
-              "end": 579
-            },
-            {
-              "start": 591,
-              "end": 591
-            }
-          ],
-          "src/ui/controls/color-picker/hsb-picker.less": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "src/ui/controls/select/style.less": [
-            {
-              "start": 87,
-              "end": 87
-            }
-          ],
-          "src/ui/controls/tab-panel/style.less": [
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 36,
-              "end": 36
-            }
-          ],
-          "src/ui/controls/button/style.less": [
-            {
-              "start": 15,
-              "end": 15
-            }
-          ],
-          "src/ui/controls/message-box/style.less": [
-            {
-              "start": 9,
-              "end": 9
-            }
-          ],
-          "src/ui/devtools/style.less": [
-            {
-              "start": 66,
-              "end": 66
-            }
-          ],
-          "src/ui/devtools/index.tsx": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 29,
-              "end": 29
-            },
-            {
-              "start": 46,
-              "end": 46
-            }
-          ],
-          "src/ui/stylesheet-editor/index.tsx": [
-            {
-              "start": 7,
-              "end": 7
-            }
-          ],
-          "src/ui/utils.ts": [
-            {
-              "start": 43,
-              "end": 43
-            },
-            {
-              "start": 47,
-              "end": 47
-            }
-          ],
-          "src/ui/popup/style.less": [
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 26,
-              "end": 26
-            },
-            {
-              "start": 117,
-              "end": 117
-            }
-          ],
-          "src/ui/popup/compatibility.js": [
-            {
-              "start": 29,
-              "end": 29
-            }
-          ],
-          "src/ui/popup/theme/page/style.less": [
-            {
-              "start": 35,
-              "end": 35
-            },
-            {
-              "start": 115,
-              "end": 115
-            }
-          ],
-          "src/ui/popup/components/news/style.less": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 71,
-              "end": 71
-            },
-            {
-              "start": 147,
-              "end": 147
-            }
-          ],
-          "src/ui/popup/components/loader/style.less": [
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 40,
-              "end": 40
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 51,
-              "end": 51
-            }
-          ],
-          "src/ui/popup/components/header/style.less": [
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 127,
-              "end": 127
-            },
-            {
-              "start": 141,
-              "end": 141
-            },
-            {
-              "start": 142,
-              "end": 142
-            },
-            {
-              "start": 158,
-              "end": 158
-            },
-            {
-              "start": 184,
-              "end": 184
-            },
-            {
-              "start": 185,
-              "end": 185
-            }
-          ],
-          "src/ui/popup/components/body.tsx": [
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 154,
-              "end": 154
-            }
-          ],
-          "src/ui/popup/main-page/style.less": [
-            {
-              "start": 91,
-              "end": 91
-            }
-          ],
-          "src/ui/popup/types.d.ts": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "src/ui/popup/news-section/style.less": [
-            {
-              "start": 10,
-              "end": 10
-            }
-          ],
-          "src/ui/popup/index.tsx": [
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 74,
-              "end": 74
-            },
-            {
-              "start": 83,
-              "end": 83
-            },
-            {
-              "start": 88,
-              "end": 88
-            },
-            {
-              "start": 91,
-              "end": 91
-            }
-          ],
-          "src/generators/modify-colors.ts": [
-            {
-              "start": 30,
-              "end": 30
-            }
-          ],
-          "src/utils/color.ts": [
-            {
-              "start": 111,
-              "end": 111
-            }
-          ],
-          "src/utils/links.ts": [
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 33,
-              "end": 33
-            }
-          ],
-          "src/inject/dynamic-theme/index.ts": [
-            {
-              "start": 119,
-              "end": 119
-            },
-            {
-              "start": 120,
-              "end": 120
-            }
-          ],
-          "src/inject/dynamic-theme/meta-theme-color.ts": [
-            {
-              "start": 14,
-              "end": 14
-            }
-          ],
-          "src/inject/dynamic-theme/variables.ts": [
-            {
-              "start": 384,
-              "end": 384
-            }
-          ],
-          "src/inject/dynamic-theme/modify-css.ts": [
-            {
-              "start": 129,
-              "end": 129
-            },
-            {
-              "start": 171,
-              "end": 171
-            },
-            {
-              "start": 238,
-              "end": 238
-            },
-            {
-              "start": 365,
-              "end": 365
-            },
-            {
-              "start": 367,
-              "end": 367
-            },
-            {
-              "start": 409,
-              "end": 409
-            },
-            {
-              "start": 412,
-              "end": 412
-            },
-            {
-              "start": 413,
-              "end": 413
-            },
-            {
-              "start": 419,
-              "end": 419
-            },
-            {
-              "start": 420,
-              "end": 420
-            },
-            {
-              "start": 424,
-              "end": 424
-            },
-            {
-              "start": 425,
-              "end": 425
-            }
-          ],
-          "src/inject/dynamic-theme/css-collection.ts": [
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 14,
-              "end": 14
-            }
-          ],
-          "src/utils/network.ts": [
-            {
-              "start": 29,
-              "end": 29
-            },
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 39,
-              "end": 39
-            }
-          ],
-          "src/inject/dynamic-theme/css-rules.ts": [
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 106,
-              "end": 106
-            }
-          ],
           "src/generators/utils/parse.ts": [
-            {
-              "start": 62,
-              "end": 62
-            }
-          ],
-          "src/background/index.ts": [
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 80,
-              "end": 80
-            },
-            {
-              "start": 84,
-              "end": 84
-            }
-          ],
-          "src/background/window-theme.ts": [
-            {
-              "start": 80,
-              "end": 80
-            }
-          ],
-          "src/background/newsmaker.ts": [
-            {
-              "start": 78,
-              "end": 78
-            }
-          ],
-          "src/ui/shared.less": [
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 20,
-              "end": 20
-            }
-          ],
-          "src/background/utils/extension-api.ts": [
-            {
-              "start": 64,
-              "end": 64
-            }
-          ],
-          "src/ui/popup/main-page/help.tsx": [
-            {
-              "start": 10,
-              "end": 10
-            }
-          ],
-          "src/ui/popup/body/style.less": [
-            {
-              "start": 28,
-              "end": 28
-            }
-          ],
-          "src/ui/popup/manage-settings-page/import-settings.tsx": [
-            {
-              "start": 58,
-              "end": 58
-            }
-          ],
-          "src/ui/popup/components/filter-settings/style.less": [
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 61,
-              "end": 61
-            }
-          ],
-          "src/ui/popup/components/site-toggle/index.tsx": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "src/ui/controls/color-dropdown/index.tsx": [
-            {
-              "start": 55,
-              "end": 55
-            }
-          ],
-          "src/ui/controls/color-picker/hsb-picker.tsx": [
-            {
-              "start": 125,
-              "end": 125
-            },
-            {
-              "start": 137,
-              "end": 137
-            }
-          ],
-          "src/ui/controls/color-picker/index.tsx": [
-            {
-              "start": 17,
-              "end": 17
-            }
-          ],
-          "<worktree>/src/generators/utils/parse.ts": [
             {
               "start": 15,
               "end": 28
@@ -3025,7 +215,7 @@
               "end": 162
             }
           ],
-          "<worktree>/tests/generators/utils/parse.tests.ts": [
+          "tests/generators/utils/parse.tests.ts": [
             {
               "start": 397,
               "end": 445
@@ -3033,7 +223,7 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/src/generators/utils/parse.ts": [
+          "src/generators/utils/parse.ts": [
             "indexSitesFixesConfig",
             "parseSitesFixesConfig"
           ]
@@ -3044,7 +234,7 @@
           {
             "step": 1,
             "coverage": {
-              "file": 1.0,
+              "file": 0.0,
               "symbol": 0.0,
               "span": 0.0,
               "line": 0.0
@@ -3054,68 +244,68 @@
             "step": 2,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 3,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 4,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 5,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 1.0,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.8571428571428571,
+          "symbol": 0.8571428571428571,
+          "span": 0.8571428571428571,
+          "line": 0.8571428571428571
         },
         "redundancy": {
-          "file": 0.21499999999999997,
-          "symbol": 0.12380952380952381,
-          "span": 0.14544543708775148,
-          "line": 0.0766550522648084
+          "file": 0.4285714285714286,
+          "symbol": 0.30000000000000004,
+          "span": 0.26708407366669484,
+          "line": 0.2210386151797603
         }
       },
       "fixOverlap": {
@@ -3211,12 +401,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/generators/utils/parse.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/generators/utils/parse.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/generators/utils/parse.tests.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/generators/utils/parse.tests.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",
@@ -3334,9 +542,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-10T01:22:59Z",
       "completedAt": "2026-05-10T01:28:00Z",
       "durationMs": 301498,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1041852,
@@ -3345,39 +568,61 @@
         "total_tokens": 1054912,
         "cache_read_input_tokens": 966912
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 29,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/generators/utils/parse.ts b/src/generators/utils/parse.ts\nindex dce4ad0a..067d41a7 100644\n--- a/src/generators/utils/parse.ts\n+++ b/src/generators/utils/parse.ts\n@@ -143,7 +143,7 @@ export function indexSitesFixesConfig<T extends SiteProps>(text: string): SitePr\n \n     let recordStart = 0;\n     // Delimiter between two blocks\n-    const delimiterRegex = /\\s*={2,}\\s*/gm;\n+    const delimiterRegex = /^\\s*={2,}\\s*$/gm;\n     let delimiter: RegExpMatchArray;\n     let count = 0;\n     while ((delimiter = delimiterRegex.exec(text))) {\ndiff --git a/tests/generators/utils/parse.tests.ts b/tests/generators/utils/parse.tests.ts\nindex 332eb041..340cf08b 100644\n--- a/tests/generators/utils/parse.tests.ts\n+++ b/tests/generators/utils/parse.tests.ts\n@@ -393,3 +393,48 @@ test('Implied wildcards', () => {\n             'directive': 'one'\n         }]);\n });\n+\n+test('Base64 padding inside CSS is not treated as a block delimiter', () => {\n+    interface TestFix {\n+        url: string[];\n+        css: string;\n+    }\n+\n+    const directiveMap: {[key: string]: keyof TestFix} = {\n+        CSS: 'css',\n+    };\n+\n+    const config = [\n+        '*',\n+        '',\n+        'CSS',\n+        'html { color-scheme: dark; }',\n+        '',\n+        '====================',\n+        '',\n+        'example.com',\n+        '',\n+        'CSS',\n+        '.icon {',\n+        '    background-image: url(\"data:image/svg+xml;base64,AQIDBA==\");',\n+        '}',\n+        ''\n+    ].join('\\n');\n+\n+    const options: SitesFixesParserOptions<TestFix> = {\n+        commands: Object.keys(directiveMap),\n+        getCommandPropName: (command) => directiveMap[command],\n+        parseCommandValue: (_, value) => value.trim(),\n+    };\n+    const index = indexSitesFixesConfig<TestFix>(config);\n+\n+    const fixes = getSitesFixesFor('example.com', config, index, options);\n+    expect(fixes).toEqual([\n+        {\n+            'url': ['*'],\n+            'css': 'html { color-scheme: dark; }'\n+        }, {\n+            'url': ['example.com'],\n+            'css': '.icon {\\n    background-image: url(\"data:image/svg+xml;base64,AQIDBA==\");\\n}'\n+        }]);\n+});\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Anchored the config block delimiter in `indexSitesFixesConfig()` so only standalone separator lines are treated as record boundaries. This keeps Base64 padding like `==` inside CSS `url(data:...)` values from truncating indexed fix blocks. I also added a regression test covering a CSS rule with a Base64-padded data URL.\n\nVerification: `node --experimental-strip-types --check src/generators/utils/parse.ts`, `node --experimental-strip-types --check tests/generators/utils/parse.tests.ts`, a targeted local Node regression script exercising the parser logic against the new Base64 case, and `git diff --check` all passed. Repo-native Jest execution was not run because this workspace does not have `node_modules` installed.",
         "notes": "The red-phase bug was confirmed locally by showing the old unanchored delimiter regex matched `==` inside a Base64 CSS data URL. Full Jest verification was limited by missing installed dependencies in this benchmark environment, so verification used syntax checks plus a focused local Node regression script instead.",
         "retrievedContextFiles": [
-          "<worktree>/src/generators/utils/parse.ts",
-          "<worktree>/tests/generators/utils/parse.tests.ts"
+          "src/generators/utils/parse.ts",
+          "tests/generators/utils/parse.tests.ts"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/src/generators/utils/parse.ts",
+            "file": "src/generators/utils/parse.ts",
             "start": 21,
             "end": 25
           },
           {
-            "file": "<worktree>/src/generators/utils/parse.ts",
+            "file": "src/generators/utils/parse.ts",
             "start": 144,
             "end": 154
           },
           {
-            "file": "<worktree>/tests/generators/utils/parse.tests.ts",
+            "file": "tests/generators/utils/parse.tests.ts",
             "start": 397,
             "end": 440
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/src/generators/utils/parse.ts",
+            "file": "src/generators/utils/parse.ts",
             "name": "indexSitesFixesConfig"
           },
           {
-            "file": "<worktree>/src/generators/utils/parse.ts",
+            "file": "src/generators/utils/parse.ts",
             "name": "parseSitesFixesConfig"
           }
         ]
@@ -3386,370 +631,55 @@
         "predSteps": [
           {
             "files": [
-              "src/ui/assets/fonts/LICENSE.txt",
-              "src/ui/assets/fonts/OpenSans-Light.ttf",
-              "src/ui/assets/fonts/OpenSans-Regular.ttf",
-              "src/ui/assets/fonts/OpenSans-SemiBold.ttf",
-              "src/ui/assets/images/darkreader-icon-256x256.png",
-              "src/ui/assets/images/darkreader-type.svg",
-              "src/ui/assets/images/ladybug-32.svg",
-              "src/ui/assets/images/mode-dark-32.svg",
-              "src/ui/assets/images/mode-light-32.svg",
-              "src/ui/controls/checkbox/index.tsx",
-              "src/ui/controls/checkbox/style.less",
-              "src/ui/controls/dropdown/index.tsx",
-              "src/ui/controls/dropdown/style.less",
-              "src/ui/controls/message-box/index.tsx",
-              "src/ui/controls/message-box/style.less",
-              "src/ui/controls/updown/index.tsx",
-              "src/ui/controls/updown/style.less",
-              "src/ui/controls/updown/track.tsx",
-              "src/ui/controls/virtual-scroll/index.tsx",
-              "src/ui/popup/automation-page/index.tsx",
-              "src/ui/popup/automation-page/style.less",
-              "src/ui/popup/body/index.tsx",
-              "src/ui/popup/body/style.less",
-              "src/ui/popup/compatibility.js",
-              "src/ui/popup/control-group/index.tsx",
-              "src/ui/popup/control-group/style.less",
-              "src/ui/popup/index.html",
-              "src/ui/popup/index.tsx",
-              "src/ui/popup/manage-settings-page/export-settings.tsx",
-              "src/ui/popup/manage-settings-page/export-theme.tsx",
-              "src/ui/popup/manage-settings-page/fetch-news.tsx",
-              "src/ui/popup/manage-settings-page/import-settings.tsx",
-              "src/ui/popup/manage-settings-page/index.tsx",
-              "src/ui/popup/manage-settings-page/reset-settings-button.tsx",
-              "src/ui/popup/manage-settings-page/style.less",
-              "src/ui/popup/manage-settings-page/sync-config.tsx",
-              "src/ui/popup/manage-settings-page/sync-settings.tsx",
-              "src/ui/popup/site-list-page/index.tsx",
-              "src/ui/popup/site-list-page/site-list.tsx",
-              "src/ui/popup/site-list-page/style.less",
-              "src/ui/popup/types.d.ts",
-              "src/ui/popup/utils/issues.ts",
-              "src/ui/popup/utils/markdown.tsx",
-              "src/utils/array.ts",
-              "src/utils/async-queue.ts",
-              "src/utils/color.ts",
-              "src/utils/colorscheme-parser.ts",
-              "src/utils/debounce.ts",
-              "src/utils/ipv6.ts",
-              "src/utils/links.ts",
-              "src/utils/locales.ts",
-              "src/utils/log.ts",
-              "src/utils/math.ts",
-              "src/utils/media-query.ts",
-              "src/utils/message.ts",
-              "src/utils/mutex.ts",
-              "src/utils/network.ts",
-              "src/utils/platform.ts",
-              "src/utils/promise-barrier.ts",
-              "src/utils/text.ts",
-              "src/utils/throttle.ts",
-              "src/utils/time.ts",
-              "src/utils/uid.ts",
-              "src/utils/url.ts",
-              "tests/browser/coverage.js",
-              "tests/browser/dynamic/inline-override.tests.ts",
-              "tests/browser/dynamic/link-override.tests.ts",
-              "tests/browser/dynamic/style-override.tests.ts",
-              "tests/browser/e2e/devtools.tests.ts",
-              "tests/browser/e2e/toggle.tests.ts",
-              "tests/browser/environment.js",
-              "tests/browser/globals.d.ts",
-              "tests/browser/jest.config.chrome.js",
-              "tests/browser/jest.config.firefox.js",
-              "tests/browser/jest.config.js",
-              "tests/browser/jest.config.shared.js",
-              "tests/browser/paths.js",
-              "tests/browser/server.js",
-              "tests/browser/settings/migration.tests.ts",
-              "tests/browser/settings/sitelist.tests.ts",
-              "tests/browser/tsconfig.json",
-              "tests/config/config.tests.ts",
-              "tests/config/jest.config.js",
-              "tests/config/locales.tests.ts",
-              "tests/config/tsconfig.json",
-              "tests/inject/background-stub.ts",
-              "tests/inject/customize.ts",
-              "tests/inject/dynamic/color.tests.ts",
-              "tests/inject/dynamic/fixes.tests.ts",
-              "tests/inject/dynamic/image-analysis.tests.ts",
-              "tests/inject/dynamic/inline-override.tests.ts",
-              "tests/inject/dynamic/link-override.tests.ts",
-              "tests/inject/dynamic/media-query.tests.ts",
-              "tests/inject/dynamic/shadow-dom.tests.ts",
-              "tests/inject/dynamic/style-override.tests.ts",
-              "tests/inject/dynamic/variables.tests.ts",
-              "tests/inject/echo-client.ts",
-              "tests/inject/echo-server.js",
-              "tests/inject/jest.config.js",
-              "tests/inject/karma.conf.js",
-              "tests/inject/polyfills.ts",
-              "tests/inject/run.js",
-              "tests/inject/tsconfig.json",
-              "tests/jest.config.js",
-              "tests/test-utils.ts",
-              "tests/utils/color.tests.ts",
-              "tests/utils/jest.config.js",
-              "tests/utils/math.tests.ts",
-              "tests/utils/promise-barrier.tests.ts",
-              "tests/utils/text.tests.ts",
-              "tests/utils/time.tests.ts",
-              "tests/utils/tsconfig.json",
-              "tests/utils/uid.tests.ts",
-              "tests/utils/url.tests.ts"
+              "tests/generators/utils/parse.tests.ts"
             ],
-            "spans": {},
+            "spans": {
+              "tests/generators/utils/parse.tests.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/background/config-manager.ts",
-              "src/config/dynamic-theme-fixes.config",
-              "src/config/static-themes.config",
-              "src/generators/svg-filter.ts",
-              "src/inject/dynamic-theme/image.ts",
-              "src/ui/controls/button/style.less",
-              "src/ui/controls/color-picker/hsb-picker.less",
-              "src/ui/controls/message-box/style.less",
-              "src/ui/controls/select/style.less",
-              "src/ui/controls/tab-panel/style.less",
-              "src/ui/popup/compatibility.js",
-              "src/ui/popup/components/header/style.less",
-              "src/ui/popup/components/loader/style.less",
-              "src/ui/popup/components/news/style.less",
-              "src/ui/popup/theme/page/index.tsx",
-              "src/ui/popup/theme/page/style.less",
-              "tests/config/config.tests.ts",
-              "tests/inject/dynamic/image-analysis.tests.ts",
-              "tests/inject/dynamic/variables.tests.ts",
-              "tests/utils/text.tests.ts"
+              "src/generators/utils/parse.ts"
             ],
             "spans": {
-              "src/ui/popup/compatibility.js": [
+              "src/generators/utils/parse.ts": [
                 {
-                  "start": 29,
-                  "end": 29
+                  "start": 1,
+                  "end": 260
                 }
-              ],
-              "src/ui/popup/theme/page/style.less": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "package.json"
+            ],
+            "spans": {
+              "package.json": [
                 {
-                  "start": 35,
-                  "end": 35
-                },
-                {
-                  "start": 115,
-                  "end": 115
+                  "start": 1,
+                  "end": 240
                 }
-              ],
-              "src/ui/popup/theme/page/index.tsx": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/generators/utils/jest.config.js"
+            ],
+            "spans": {
+              "tests/generators/utils/jest.config.js": [
                 {
-                  "start": 4,
-                  "end": 4
-                }
-              ],
-              "src/ui/popup/components/header/style.less": [
-                {
-                  "start": 127,
-                  "end": 127
-                },
-                {
-                  "start": 141,
-                  "end": 141
-                },
-                {
-                  "start": 142,
-                  "end": 142
-                },
-                {
-                  "start": 158,
-                  "end": 158
-                },
-                {
-                  "start": 184,
-                  "end": 184
-                },
-                {
-                  "start": 185,
-                  "end": 185
-                }
-              ],
-              "src/ui/popup/components/loader/style.less": [
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 40,
-                  "end": 40
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 51,
-                  "end": 51
-                }
-              ],
-              "src/ui/popup/components/news/style.less": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 71,
-                  "end": 71
-                },
-                {
-                  "start": 147,
-                  "end": 147
-                }
-              ],
-              "src/ui/controls/select/style.less": [
-                {
-                  "start": 87,
-                  "end": 87
-                }
-              ],
-              "src/ui/controls/color-picker/hsb-picker.less": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "src/ui/controls/button/style.less": [
-                {
-                  "start": 15,
-                  "end": 15
-                }
-              ],
-              "src/ui/controls/message-box/style.less": [
-                {
-                  "start": 9,
-                  "end": 9
-                }
-              ],
-              "src/ui/controls/tab-panel/style.less": [
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 36,
-                  "end": 36
-                }
-              ],
-              "src/generators/svg-filter.ts": [
-                {
-                  "start": 30,
-                  "end": 30
-                }
-              ],
-              "src/config/static-themes.config": [
-                {
-                  "start": 171,
-                  "end": 171
-                }
-              ],
-              "src/config/dynamic-theme-fixes.config": [
-                {
-                  "start": 925,
-                  "end": 925
-                },
-                {
-                  "start": 2720,
-                  "end": 2720
-                },
-                {
-                  "start": 2725,
-                  "end": 2725
-                },
-                {
-                  "start": 10676,
-                  "end": 10676
-                },
-                {
-                  "start": 11954,
-                  "end": 11954
-                }
-              ],
-              "src/background/config-manager.ts": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 8,
-                  "end": 8
-                }
-              ],
-              "tests/config/config.tests.ts": [
-                {
-                  "start": 9,
-                  "end": 9
-                }
-              ],
-              "tests/utils/text.tests.ts": [
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                }
-              ],
-              "src/inject/dynamic-theme/image.ts": [
-                {
-                  "start": 193,
-                  "end": 193
-                }
-              ],
-              "tests/inject/dynamic/image-analysis.tests.ts": [
-                {
-                  "start": 26,
-                  "end": 26
-                }
-              ],
-              "tests/inject/dynamic/variables.tests.ts": [
-                {
-                  "start": 813,
-                  "end": 813
-                },
-                {
-                  "start": 814,
-                  "end": 814
-                },
-                {
-                  "start": 848,
-                  "end": 848
-                },
-                {
-                  "start": 849,
-                  "end": 849
-                },
-                {
-                  "start": 850,
-                  "end": 850
-                },
-                {
-                  "start": 862,
-                  "end": 862
-                },
-                {
-                  "start": 876,
-                  "end": 876
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -3759,232 +689,11 @@
             "files": [
               "tests/generators/utils/parse.tests.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/generators/utils/parse.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/utils/color.tests.ts",
-              "tests/utils/text.tests.ts"
-            ],
             "spans": {
-              "tests/utils/text.tests.ts": [
+              "tests/generators/utils/parse.tests.ts": [
                 {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                }
-              ],
-              "tests/utils/color.tests.ts": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 18,
-                  "end": 18
-                },
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 22,
-                  "end": 22
-                },
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 24,
-                  "end": 24
-                },
-                {
-                  "start": 25,
-                  "end": 25
-                },
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 29,
-                  "end": 29
-                },
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                },
-                {
-                  "start": 32,
-                  "end": 32
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 35,
-                  "end": 35
-                },
-                {
-                  "start": 36,
-                  "end": 36
-                },
-                {
-                  "start": 37,
-                  "end": 37
-                },
-                {
-                  "start": 39,
-                  "end": 39
-                },
-                {
-                  "start": 40,
-                  "end": 40
-                },
-                {
-                  "start": 41,
-                  "end": 41
-                },
-                {
-                  "start": 42,
-                  "end": 42
-                },
-                {
-                  "start": 43,
-                  "end": 43
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 46,
-                  "end": 46
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 48,
-                  "end": 48
-                },
-                {
-                  "start": 49,
-                  "end": 49
-                },
-                {
-                  "start": 51,
-                  "end": 51
-                },
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 56,
-                  "end": 56
-                },
-                {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 61,
-                  "end": 61
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 64,
-                  "end": 64
-                },
-                {
-                  "start": 65,
-                  "end": 65
+                  "start": 220,
+                  "end": 420
                 }
               ]
             },
@@ -3992,606 +701,81 @@
           },
           {
             "files": [
-              "package.json"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/generators/utils/jest.config.js"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "package-lock.json",
-              "package.json"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "src/utils/text.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/utils/text.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/utils/url.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/utils/url.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/generators/utils/parse.ts"
+            ],
+            "spans": {
+              "src/generators/utils/parse.ts": [
+                {
+                  "start": 138,
+                  "end": 154
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/generators/utils/parse.tests.ts"
+            ],
+            "spans": {
+              "tests/generators/utils/parse.tests.ts": [
+                {
+                  "start": 392,
+                  "end": 442
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/generators/utils/parse.ts"
+            ],
+            "spans": {
+              "src/generators/utils/parse.ts": [
+                {
+                  "start": 10,
+                  "end": 40
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "<worktree>/src/generators/utils/parse.ts",
-          "<worktree>/tests/generators/utils/parse.tests.ts",
-          "package-lock.json",
-          "package.json",
-          "src/background/config-manager.ts",
-          "src/config/dynamic-theme-fixes.config",
-          "src/config/static-themes.config",
-          "src/generators/svg-filter.ts",
           "src/generators/utils/parse.ts",
-          "src/inject/dynamic-theme/image.ts",
-          "src/ui/assets/fonts/LICENSE.txt",
-          "src/ui/assets/fonts/OpenSans-Light.ttf",
-          "src/ui/assets/fonts/OpenSans-Regular.ttf",
-          "src/ui/assets/fonts/OpenSans-SemiBold.ttf",
-          "src/ui/assets/images/darkreader-icon-256x256.png",
-          "src/ui/assets/images/darkreader-type.svg",
-          "src/ui/assets/images/ladybug-32.svg",
-          "src/ui/assets/images/mode-dark-32.svg",
-          "src/ui/assets/images/mode-light-32.svg",
-          "src/ui/controls/button/style.less",
-          "src/ui/controls/checkbox/index.tsx",
-          "src/ui/controls/checkbox/style.less",
-          "src/ui/controls/color-picker/hsb-picker.less",
-          "src/ui/controls/dropdown/index.tsx",
-          "src/ui/controls/dropdown/style.less",
-          "src/ui/controls/message-box/index.tsx",
-          "src/ui/controls/message-box/style.less",
-          "src/ui/controls/select/style.less",
-          "src/ui/controls/tab-panel/style.less",
-          "src/ui/controls/updown/index.tsx",
-          "src/ui/controls/updown/style.less",
-          "src/ui/controls/updown/track.tsx",
-          "src/ui/controls/virtual-scroll/index.tsx",
-          "src/ui/popup/automation-page/index.tsx",
-          "src/ui/popup/automation-page/style.less",
-          "src/ui/popup/body/index.tsx",
-          "src/ui/popup/body/style.less",
-          "src/ui/popup/compatibility.js",
-          "src/ui/popup/components/header/style.less",
-          "src/ui/popup/components/loader/style.less",
-          "src/ui/popup/components/news/style.less",
-          "src/ui/popup/control-group/index.tsx",
-          "src/ui/popup/control-group/style.less",
-          "src/ui/popup/index.html",
-          "src/ui/popup/index.tsx",
-          "src/ui/popup/manage-settings-page/export-settings.tsx",
-          "src/ui/popup/manage-settings-page/export-theme.tsx",
-          "src/ui/popup/manage-settings-page/fetch-news.tsx",
-          "src/ui/popup/manage-settings-page/import-settings.tsx",
-          "src/ui/popup/manage-settings-page/index.tsx",
-          "src/ui/popup/manage-settings-page/reset-settings-button.tsx",
-          "src/ui/popup/manage-settings-page/style.less",
-          "src/ui/popup/manage-settings-page/sync-config.tsx",
-          "src/ui/popup/manage-settings-page/sync-settings.tsx",
-          "src/ui/popup/site-list-page/index.tsx",
-          "src/ui/popup/site-list-page/site-list.tsx",
-          "src/ui/popup/site-list-page/style.less",
-          "src/ui/popup/theme/page/index.tsx",
-          "src/ui/popup/theme/page/style.less",
-          "src/ui/popup/types.d.ts",
-          "src/ui/popup/utils/issues.ts",
-          "src/ui/popup/utils/markdown.tsx",
-          "src/utils/array.ts",
-          "src/utils/async-queue.ts",
-          "src/utils/color.ts",
-          "src/utils/colorscheme-parser.ts",
-          "src/utils/debounce.ts",
-          "src/utils/ipv6.ts",
-          "src/utils/links.ts",
-          "src/utils/locales.ts",
-          "src/utils/log.ts",
-          "src/utils/math.ts",
-          "src/utils/media-query.ts",
-          "src/utils/message.ts",
-          "src/utils/mutex.ts",
-          "src/utils/network.ts",
-          "src/utils/platform.ts",
-          "src/utils/promise-barrier.ts",
-          "src/utils/text.ts",
-          "src/utils/throttle.ts",
-          "src/utils/time.ts",
-          "src/utils/uid.ts",
-          "src/utils/url.ts",
-          "tests/browser/coverage.js",
-          "tests/browser/dynamic/inline-override.tests.ts",
-          "tests/browser/dynamic/link-override.tests.ts",
-          "tests/browser/dynamic/style-override.tests.ts",
-          "tests/browser/e2e/devtools.tests.ts",
-          "tests/browser/e2e/toggle.tests.ts",
-          "tests/browser/environment.js",
-          "tests/browser/globals.d.ts",
-          "tests/browser/jest.config.chrome.js",
-          "tests/browser/jest.config.firefox.js",
-          "tests/browser/jest.config.js",
-          "tests/browser/jest.config.shared.js",
-          "tests/browser/paths.js",
-          "tests/browser/server.js",
-          "tests/browser/settings/migration.tests.ts",
-          "tests/browser/settings/sitelist.tests.ts",
-          "tests/browser/tsconfig.json",
-          "tests/config/config.tests.ts",
-          "tests/config/jest.config.js",
-          "tests/config/locales.tests.ts",
-          "tests/config/tsconfig.json",
-          "tests/generators/utils/jest.config.js",
-          "tests/generators/utils/parse.tests.ts",
-          "tests/inject/background-stub.ts",
-          "tests/inject/customize.ts",
-          "tests/inject/dynamic/color.tests.ts",
-          "tests/inject/dynamic/fixes.tests.ts",
-          "tests/inject/dynamic/image-analysis.tests.ts",
-          "tests/inject/dynamic/inline-override.tests.ts",
-          "tests/inject/dynamic/link-override.tests.ts",
-          "tests/inject/dynamic/media-query.tests.ts",
-          "tests/inject/dynamic/shadow-dom.tests.ts",
-          "tests/inject/dynamic/style-override.tests.ts",
-          "tests/inject/dynamic/variables.tests.ts",
-          "tests/inject/echo-client.ts",
-          "tests/inject/echo-server.js",
-          "tests/inject/jest.config.js",
-          "tests/inject/karma.conf.js",
-          "tests/inject/polyfills.ts",
-          "tests/inject/run.js",
-          "tests/inject/tsconfig.json",
-          "tests/jest.config.js",
-          "tests/test-utils.ts",
-          "tests/utils/color.tests.ts",
-          "tests/utils/jest.config.js",
-          "tests/utils/math.tests.ts",
-          "tests/utils/promise-barrier.tests.ts",
-          "tests/utils/text.tests.ts",
-          "tests/utils/time.tests.ts",
-          "tests/utils/tsconfig.json",
-          "tests/utils/uid.tests.ts",
-          "tests/utils/url.tests.ts"
+          "tests/generators/utils/parse.tests.ts"
         ],
         "predSpans": {
-          "src/ui/popup/compatibility.js": [
-            {
-              "start": 29,
-              "end": 29
-            }
-          ],
-          "src/ui/popup/theme/page/style.less": [
-            {
-              "start": 35,
-              "end": 35
-            },
-            {
-              "start": 115,
-              "end": 115
-            }
-          ],
-          "src/ui/popup/theme/page/index.tsx": [
-            {
-              "start": 4,
-              "end": 4
-            }
-          ],
-          "src/ui/popup/components/header/style.less": [
-            {
-              "start": 127,
-              "end": 127
-            },
-            {
-              "start": 141,
-              "end": 141
-            },
-            {
-              "start": 142,
-              "end": 142
-            },
-            {
-              "start": 158,
-              "end": 158
-            },
-            {
-              "start": 184,
-              "end": 184
-            },
-            {
-              "start": 185,
-              "end": 185
-            }
-          ],
-          "src/ui/popup/components/loader/style.less": [
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 40,
-              "end": 40
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 51,
-              "end": 51
-            }
-          ],
-          "src/ui/popup/components/news/style.less": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 71,
-              "end": 71
-            },
-            {
-              "start": 147,
-              "end": 147
-            }
-          ],
-          "src/ui/controls/select/style.less": [
-            {
-              "start": 87,
-              "end": 87
-            }
-          ],
-          "src/ui/controls/color-picker/hsb-picker.less": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "src/ui/controls/button/style.less": [
-            {
-              "start": 15,
-              "end": 15
-            }
-          ],
-          "src/ui/controls/message-box/style.less": [
-            {
-              "start": 9,
-              "end": 9
-            }
-          ],
-          "src/ui/controls/tab-panel/style.less": [
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 36,
-              "end": 36
-            }
-          ],
-          "src/generators/svg-filter.ts": [
-            {
-              "start": 30,
-              "end": 30
-            }
-          ],
-          "src/config/static-themes.config": [
-            {
-              "start": 171,
-              "end": 171
-            }
-          ],
-          "src/config/dynamic-theme-fixes.config": [
-            {
-              "start": 925,
-              "end": 925
-            },
-            {
-              "start": 2720,
-              "end": 2720
-            },
-            {
-              "start": 2725,
-              "end": 2725
-            },
-            {
-              "start": 10676,
-              "end": 10676
-            },
-            {
-              "start": 11954,
-              "end": 11954
-            }
-          ],
-          "src/background/config-manager.ts": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 8,
-              "end": 8
-            }
-          ],
-          "tests/config/config.tests.ts": [
-            {
-              "start": 9,
-              "end": 9
-            }
-          ],
-          "tests/utils/text.tests.ts": [
-            {
-              "start": 60,
-              "end": 60
-            },
-            {
-              "start": 63,
-              "end": 63
-            }
-          ],
-          "src/inject/dynamic-theme/image.ts": [
-            {
-              "start": 193,
-              "end": 193
-            }
-          ],
-          "tests/inject/dynamic/image-analysis.tests.ts": [
-            {
-              "start": 26,
-              "end": 26
-            }
-          ],
-          "tests/inject/dynamic/variables.tests.ts": [
-            {
-              "start": 813,
-              "end": 813
-            },
-            {
-              "start": 814,
-              "end": 814
-            },
-            {
-              "start": 848,
-              "end": 848
-            },
-            {
-              "start": 849,
-              "end": 849
-            },
-            {
-              "start": 850,
-              "end": 850
-            },
-            {
-              "start": 862,
-              "end": 862
-            },
-            {
-              "start": 876,
-              "end": 876
-            }
-          ],
-          "tests/utils/color.tests.ts": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 18,
-              "end": 18
-            },
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 25,
-              "end": 25
-            },
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 29,
-              "end": 29
-            },
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 32,
-              "end": 32
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 35,
-              "end": 35
-            },
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 37,
-              "end": 37
-            },
-            {
-              "start": 39,
-              "end": 39
-            },
-            {
-              "start": 40,
-              "end": 40
-            },
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
-              "start": 42,
-              "end": 42
-            },
-            {
-              "start": 43,
-              "end": 43
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 46,
-              "end": 46
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 48,
-              "end": 48
-            },
-            {
-              "start": 49,
-              "end": 49
-            },
-            {
-              "start": 51,
-              "end": 51
-            },
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 56,
-              "end": 56
-            },
-            {
-              "start": 58,
-              "end": 58
-            },
-            {
-              "start": 60,
-              "end": 60
-            },
-            {
-              "start": 61,
-              "end": 61
-            },
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 64,
-              "end": 64
-            },
-            {
-              "start": 65,
-              "end": 65
-            }
-          ],
-          "<worktree>/src/generators/utils/parse.ts": [
+          "src/generators/utils/parse.ts": [
             {
               "start": 21,
               "end": 25
@@ -4601,7 +785,7 @@
               "end": 154
             }
           ],
-          "<worktree>/tests/generators/utils/parse.tests.ts": [
+          "tests/generators/utils/parse.tests.ts": [
             {
               "start": 397,
               "end": 440
@@ -4609,7 +793,7 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/src/generators/utils/parse.ts": [
+          "src/generators/utils/parse.ts": [
             "indexSitesFixesConfig",
             "parseSitesFixesConfig"
           ]
@@ -4629,132 +813,96 @@
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
-            }
-          },
-          {
-            "step": 11,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
-            }
-          },
-          {
-            "step": 12,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
-            }
-          },
-          {
-            "step": 13,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
-            }
-          },
-          {
-            "step": 14,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.5,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.9,
+          "symbol": 0.9,
+          "span": 0.9,
+          "line": 0.9
         },
         "redundancy": {
-          "file": 0.07638888888888884,
-          "symbol": 0.0,
-          "span": 0.021320780838986586,
-          "line": 0.020408163265306145
+          "file": 0.4,
+          "symbol": 0.13043478260869568,
+          "span": 0.07109476536791748,
+          "line": 0.06704545454545452
         }
       },
       "fixOverlap": {
@@ -4773,28 +921,28 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/3b8e3ebf625884d2c9e3/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/3b8e3ebf625884d2c9e3/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/3b8e3ebf625884d2c9e3/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/3b8e3ebf625884d2c9e3/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
@@ -4864,7 +1012,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/generators/utils/parse.tests.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/generators/utils/parse.tests.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -4935,7 +1092,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/generators/utils/parse.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/generators/utils/parse.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

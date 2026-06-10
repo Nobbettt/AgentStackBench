@@ -14,9 +14,28 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [
+          "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java"
+        ],
+        "missingTrajectoryPaths": [
+          "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java"
+        ],
+        "missingFinalPathCount": 1,
+        "missingTrajectoryPathCount": 1
+      },
       "startedAt": "2026-05-11T00:19:39Z",
       "completedAt": "2026-05-11T00:22:56Z",
       "durationMs": 197177,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 635938,
@@ -25,34 +44,56 @@
         "total_tokens": 644323,
         "cache_read_input_tokens": 517632
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 22,
+        "readToolCalls": 0,
+        "editToolCalls": 1
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/gson/src/main/java/com/google/gson/internal/$Gson$Types.java b/gson/src/main/java/com/google/gson/internal/$Gson$Types.java\nindex adea605f..c4562b20 100644\n--- a/gson/src/main/java/com/google/gson/internal/$Gson$Types.java\n+++ b/gson/src/main/java/com/google/gson/internal/$Gson$Types.java\n@@ -334,41 +334,49 @@ public final class $Gson$Types {\n   }\n \n   public static Type resolve(Type context, Class<?> contextRawType, Type toResolve) {\n-    return resolve(context, contextRawType, toResolve, new HashSet<TypeVariable>());\n+    return resolve(context, contextRawType, toResolve, new HashMap<TypeVariable, Type>());\n   }\n \n   private static Type resolve(Type context, Class<?> contextRawType, Type toResolve,\n-                              Collection<TypeVariable> visitedTypeVariables) {\n+                              Map<TypeVariable, Type> visitedTypeVariables) {\n     // this implementation is made a little more complicated in an attempt to avoid object-creation\n+    TypeVariable<?> resolving = null;\n     while (true) {\n       if (toResolve instanceof TypeVariable) {\n         TypeVariable<?> typeVariable = (TypeVariable<?>) toResolve;\n-        if (visitedTypeVariables.contains(typeVariable)) {\n+        Type previouslyResolved = visitedTypeVariables.get(typeVariable);\n+        if (previouslyResolved != null) {\n           // cannot reduce due to infinite recursion\n-          return toResolve;\n-        } else {\n-          visitedTypeVariables.add(typeVariable);\n+          return previouslyResolved == Void.TYPE ? toResolve : previouslyResolved;\n+        }\n+\n+        // Insert a placeholder to mark the fact that we are in the process of resolving this type\n+        visitedTypeVariables.put(typeVariable, Void.TYPE);\n+        if (resolving == null) {\n+          resolving = typeVariable;\n         }\n         toResolve = resolveTypeVariable(context, contextRawType, typeVariable);\n         if (toResolve == typeVariable) {\n-          return toResolve;\n+          break;\n         }\n \n       } else if (toResolve instanceof Class && ((Class<?>) toResolve).isArray()) {\n         Class<?> original = (Class<?>) toResolve;\n         Type componentType = original.getComponentType();\n         Type newComponentType = resolve(context, contextRawType, componentType, visitedTypeVariables);\n-        return componentType == newComponentType\n+        toResolve = componentType == newComponentType\n             ? original\n             : arrayOf(newComponentType);\n+        break;\n \n       } else if (toResolve instanceof GenericArrayType) {\n         GenericArrayType original = (GenericArrayType) toResolve;\n         Type componentType = original.getGenericComponentType();\n         Type newComponentType = resolve(context, contextRawType, componentType, visitedTypeVariables);\n-        return componentType == newComponentType\n+        toResolve = componentType == newComponentType\n             ? original\n             : arrayOf(newComponentType);\n+        break;\n \n       } else if (toResolve instanceof ParameterizedType) {\n         ParameterizedType original = (ParameterizedType) toResolve;\n@@ -388,9 +396,10 @@ public final class $Gson$Types {\n           }\n         }\n \n-        return changed\n+        toResolve = changed\n             ? newParameterizedTypeWithOwner(newOwnerType, original.getRawType(), args)\n             : original;\n+        break;\n \n       } else if (toResolve instanceof WildcardType) {\n         WildcardType original = (WildcardType) toResolve;\n@@ -400,20 +409,29 @@ public final class $Gson$Types {\n         if (originalLowerBound.length == 1) {\n           Type lowerBound = resolve(context, contextRawType, originalLowerBound[0], visitedTypeVariables);\n           if (lowerBound != originalLowerBound[0]) {\n-            return supertypeOf(lowerBound);\n+            toResolve = supertypeOf(lowerBound);\n+            break;\n           }\n         } else if (originalUpperBound.length == 1) {\n           Type upperBound = resolve(context, contextRawType, originalUpperBound[0], visitedTypeVariables);\n           if (upperBound != originalUpperBound[0]) {\n-            return subtypeOf(upperBound);\n+            toResolve = subtypeOf(upperBound);\n+            break;\n           }\n         }\n-        return original;\n+        toResolve = original;\n+        break;\n \n       } else {\n-        return toResolve;\n+        break;\n       }\n     }\n+\n+    // ensure that any in-process resolution gets updated with the final result\n+    if (resolving != null) {\n+      visitedTypeVariables.put(resolving, toResolve);\n+    }\n+    return toResolve;\n   }\n \n   static Type resolveTypeVariable(Type context, Class<?> contextRawType, TypeVariable<?> unknown) {\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Updated [`$Gson$Types.resolve`](<worktree>/gson/src/main/java/com/google/gson/internal/$Gson$Types.java:336) to track type-variable resolution with a `Map<TypeVariable, Type>` instead of a visited set. That preserves recursion protection with a `Void.TYPE` placeholder, but now reuses the final resolved type for subsequent references to the same type variable, which fixes the reused-type-variable case from #1390. I also added [`ReusedTypeVariablesFullyResolveTest`](<worktree>/gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java:36), covering a repeated generic variable that must deserialize as `Set<TestEnum>` rather than falling back to `String` elements.\n\nVerification was limited by the benchmark environment: `./gradlew :gson:test --tests com.google.gson.functional.ReusedTypeVariablesFullyResolveTest --tests com.google.gson.internal.bind.RecursiveTypesResolveTest` could not run because no local JDK is installed (`JAVA_HOME` unset and no `java` binary on `PATH`). Static diff review completed successfully.",
         "notes": "Attempted focused Gradle verification, but the environment has no usable Java installation: Gradle exited with `JAVA_HOME is not set and no 'java' command could be found in your PATH.` I also confirmed there is no local `java`/`javac` in common installation paths, so no stronger offline-safe execution was available.",
         "retrievedContextFiles": [
-          "<worktree>/gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
-          "<worktree>/gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java"
+          "gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
+          "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
+            "file": "gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
             "start": 336,
             "end": 434
           },
           {
-            "file": "<worktree>/gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java",
+            "file": "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java",
             "start": 31,
             "end": 75
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
+            "file": "gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
             "name": "$Gson$Types.resolve"
           },
           {
-            "file": "<worktree>/gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java",
+            "file": "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java",
             "name": "ReusedTypeVariablesFullyResolveTest.testGenericsPreservation"
           }
         ]
@@ -61,742 +102,129 @@
         "predSteps": [
           {
             "files": [
-              "CHANGELOG.md",
-              "GsonDesignDocument.md",
-              "LICENSE",
-              "README.md",
-              "ReleaseProcess.md",
-              "UserGuide.md",
-              "build.gradle",
-              "codegen/pom.xml",
-              "codegen/src/main/java/com/google/gson/codegen/CodeGen.java",
-              "codegen/src/main/java/com/google/gson/codegen/GeneratedTypeAdapter.java",
-              "codegen/src/main/java/com/google/gson/codegen/GeneratedTypeAdapterProcessor.java",
-              "codegen/src/main/java/com/google/gson/codegen/JavaWriter.java",
-              "codegen/src/main/resources/META-INF/services/javax.annotation.processing.Processor",
-              "codegen/src/test/java/com/google/gson/codegen/functional/CodeGenFunctionalTest.java",
-              "codegen/src/test/java/com/google/gson/codegen/functional/Order.java",
-              "examples/android-proguard-example/AndroidManifest.xml",
-              "examples/android-proguard-example/default.properties",
-              "examples/android-proguard-example/proguard.cfg",
-              "examples/android-proguard-example/res/drawable/icon.png",
-              "examples/android-proguard-example/res/layout/main.xml",
-              "examples/android-proguard-example/res/values/strings.xml",
-              "examples/android-proguard-example/src/com/google/gson/examples/android/GsonProguardExampleActivity.java",
-              "examples/android-proguard-example/src/com/google/gson/examples/android/model/Cart.java",
-              "examples/android-proguard-example/src/com/google/gson/examples/android/model/LineItem.java",
-              "extras/pom.xml",
-              "extras/src/main/java/com/google/gson/extras/examples/rawcollections/RawCollectionsExample.java",
-              "extras/src/main/java/com/google/gson/graph/GraphAdapterBuilder.java",
-              "extras/src/main/java/com/google/gson/interceptors/Intercept.java",
-              "extras/src/main/java/com/google/gson/interceptors/InterceptorFactory.java",
-              "extras/src/main/java/com/google/gson/interceptors/JsonPostDeserializer.java",
-              "extras/src/main/java/com/google/gson/typeadapters/PostConstructAdapterFactory.java",
-              "extras/src/main/java/com/google/gson/typeadapters/RuntimeTypeAdapterFactory.java",
-              "extras/src/main/java/com/google/gson/typeadapters/UtcDateTypeAdapter.java",
-              "extras/src/test/java/com/google/gson/graph/GraphAdapterBuilderTest.java",
-              "extras/src/test/java/com/google/gson/interceptors/InterceptorTest.java",
-              "extras/src/test/java/com/google/gson/typeadapters/PostConstructAdapterFactoryTest.java",
-              "extras/src/test/java/com/google/gson/typeadapters/RuntimeTypeAdapterFactoryTest.java",
-              "extras/src/test/java/com/google/gson/typeadapters/UtcDateTypeAdapterTest.java",
-              "gradle/wrapper/gradle-wrapper.jar",
-              "gradle/wrapper/gradle-wrapper.properties",
-              "gradlew.bat",
-              "gson/LICENSE",
-              "gson/README",
-              "gson/assembly-descriptor.xml",
-              "gson/bnd.bnd",
-              "gson/build.gradle",
-              "gson/docs/javadocs/allclasses-frame.html",
-              "gson/docs/javadocs/allclasses-noframe.html",
-              "gson/docs/javadocs/com/google/gson/ExclusionStrategy.html",
-              "gson/docs/javadocs/com/google/gson/FieldAttributes.html",
-              "gson/docs/javadocs/com/google/gson/FieldNamingPolicy.html",
-              "gson/docs/javadocs/com/google/gson/FieldNamingStrategy.html",
-              "gson/docs/javadocs/com/google/gson/Gson.html",
-              "gson/docs/javadocs/com/google/gson/GsonBuilder.html",
-              "gson/docs/javadocs/com/google/gson/InstanceCreator.html",
-              "gson/docs/javadocs/com/google/gson/JsonArray.html",
-              "gson/docs/javadocs/com/google/gson/JsonDeserializationContext.html",
-              "gson/docs/javadocs/com/google/gson/JsonDeserializer.html",
-              "gson/docs/javadocs/com/google/gson/JsonElement.html",
-              "gson/docs/javadocs/com/google/gson/JsonIOException.html",
-              "gson/docs/javadocs/com/google/gson/JsonNull.html",
-              "gson/docs/javadocs/com/google/gson/JsonObject.html",
-              "gson/docs/javadocs/com/google/gson/JsonParseException.html",
-              "gson/docs/javadocs/com/google/gson/JsonParser.html",
-              "gson/docs/javadocs/com/google/gson/JsonPrimitive.html",
-              "gson/docs/javadocs/com/google/gson/JsonSerializationContext.html",
-              "gson/docs/javadocs/com/google/gson/JsonSerializer.html",
-              "gson/docs/javadocs/com/google/gson/JsonStreamParser.html",
-              "gson/docs/javadocs/com/google/gson/JsonSyntaxException.html",
-              "gson/docs/javadocs/com/google/gson/LongSerializationPolicy.html",
-              "gson/docs/javadocs/com/google/gson/TypeAdapter.html",
-              "gson/docs/javadocs/com/google/gson/TypeAdapterFactory.html",
-              "gson/docs/javadocs/com/google/gson/annotations/Expose.html",
-              "gson/docs/javadocs/com/google/gson/annotations/JsonAdapter.html",
-              "gson/docs/javadocs/com/google/gson/annotations/SerializedName.html",
-              "gson/docs/javadocs/com/google/gson/annotations/Since.html",
-              "gson/docs/javadocs/com/google/gson/annotations/Until.html",
-              "gson/docs/javadocs/com/google/gson/annotations/class-use/Expose.html",
-              "gson/docs/javadocs/com/google/gson/annotations/class-use/JsonAdapter.html",
-              "gson/docs/javadocs/com/google/gson/annotations/class-use/SerializedName.html",
-              "gson/docs/javadocs/com/google/gson/annotations/class-use/Since.html",
-              "gson/docs/javadocs/com/google/gson/annotations/class-use/Until.html",
-              "gson/docs/javadocs/com/google/gson/annotations/package-frame.html",
-              "gson/docs/javadocs/com/google/gson/annotations/package-summary.html",
-              "gson/docs/javadocs/com/google/gson/annotations/package-tree.html",
-              "gson/docs/javadocs/com/google/gson/annotations/package-use.html",
-              "gson/docs/javadocs/com/google/gson/class-use/ExclusionStrategy.html",
-              "gson/docs/javadocs/com/google/gson/class-use/FieldAttributes.html",
-              "gson/docs/javadocs/com/google/gson/class-use/FieldNamingPolicy.html",
-              "gson/docs/javadocs/com/google/gson/class-use/FieldNamingStrategy.html",
-              "gson/docs/javadocs/com/google/gson/class-use/Gson.html",
-              "gson/docs/javadocs/com/google/gson/class-use/GsonBuilder.html",
-              "gson/docs/javadocs/com/google/gson/class-use/InstanceCreator.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonArray.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonDeserializationContext.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonDeserializer.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonElement.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonIOException.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonNull.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonObject.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonParseException.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonParser.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonPrimitive.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonSerializationContext.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonSerializer.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonStreamParser.html",
-              "gson/docs/javadocs/com/google/gson/class-use/JsonSyntaxException.html",
-              "gson/docs/javadocs/com/google/gson/class-use/LongSerializationPolicy.html",
-              "gson/docs/javadocs/com/google/gson/class-use/TypeAdapter.html",
-              "gson/docs/javadocs/com/google/gson/class-use/TypeAdapterFactory.html",
-              "gson/docs/javadocs/com/google/gson/package-frame.html",
-              "gson/docs/javadocs/com/google/gson/package-summary.html",
-              "gson/docs/javadocs/com/google/gson/package-tree.html",
-              "gson/docs/javadocs/com/google/gson/package-use.html",
-              "gson/docs/javadocs/com/google/gson/reflect/TypeToken.html",
-              "gson/docs/javadocs/com/google/gson/reflect/class-use/TypeToken.html",
-              "gson/docs/javadocs/com/google/gson/reflect/package-frame.html",
-              "gson/docs/javadocs/com/google/gson/reflect/package-summary.html",
-              "gson/docs/javadocs/com/google/gson/reflect/package-tree.html",
-              "gson/docs/javadocs/com/google/gson/reflect/package-use.html",
-              "gson/docs/javadocs/com/google/gson/stream/JsonReader.html",
-              "gson/docs/javadocs/com/google/gson/stream/JsonToken.html",
-              "gson/docs/javadocs/com/google/gson/stream/JsonWriter.html",
-              "gson/docs/javadocs/com/google/gson/stream/MalformedJsonException.html",
-              "gson/docs/javadocs/com/google/gson/stream/class-use/JsonReader.html",
-              "gson/docs/javadocs/com/google/gson/stream/class-use/JsonToken.html",
-              "gson/docs/javadocs/com/google/gson/stream/class-use/JsonWriter.html",
-              "gson/docs/javadocs/com/google/gson/stream/class-use/MalformedJsonException.html",
-              "gson/docs/javadocs/com/google/gson/stream/package-frame.html",
-              "gson/docs/javadocs/com/google/gson/stream/package-summary.html",
-              "gson/docs/javadocs/com/google/gson/stream/package-tree.html",
-              "gson/docs/javadocs/com/google/gson/stream/package-use.html",
-              "gson/docs/javadocs/constant-values.html",
-              "gson/docs/javadocs/deprecated-list.html",
-              "gson/docs/javadocs/help-doc.html",
-              "gson/docs/javadocs/index-all.html",
-              "gson/docs/javadocs/index.html",
-              "gson/docs/javadocs/overview-frame.html",
-              "gson/docs/javadocs/overview-summary.html",
-              "gson/docs/javadocs/overview-tree.html",
-              "gson/docs/javadocs/resources/inherit.gif",
-              "gson/docs/javadocs/script.js",
-              "gson/docs/javadocs/serialized-form.html",
-              "gson/docs/javadocs/stylesheet.css",
-              "gson/pom.xml",
-              "gson/src/main/java-templates/com/google/gson/internal/GsonBuildConfig.java",
-              "gson/src/main/java/com.google.gson/module-info.java",
-              "gson/src/main/java/com/google/gson/DefaultDateTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/ExclusionStrategy.java",
-              "gson/src/main/java/com/google/gson/FieldAttributes.java",
-              "gson/src/main/java/com/google/gson/FieldNamingPolicy.java",
-              "gson/src/main/java/com/google/gson/FieldNamingStrategy.java",
-              "gson/src/main/java/com/google/gson/Gson.java",
-              "gson/src/main/java/com/google/gson/GsonBuilder.java",
-              "gson/src/main/java/com/google/gson/InstanceCreator.java",
-              "gson/src/main/java/com/google/gson/JsonArray.java",
-              "gson/src/main/java/com/google/gson/JsonDeserializationContext.java",
-              "gson/src/main/java/com/google/gson/JsonDeserializer.java",
-              "gson/src/main/java/com/google/gson/JsonElement.java",
-              "gson/src/main/java/com/google/gson/JsonIOException.java",
-              "gson/src/main/java/com/google/gson/JsonNull.java",
-              "gson/src/main/java/com/google/gson/JsonObject.java",
-              "gson/src/main/java/com/google/gson/JsonParseException.java",
-              "gson/src/main/java/com/google/gson/JsonParser.java",
-              "gson/src/main/java/com/google/gson/JsonPrimitive.java",
-              "gson/src/main/java/com/google/gson/JsonSerializationContext.java",
-              "gson/src/main/java/com/google/gson/JsonSerializer.java",
-              "gson/src/main/java/com/google/gson/JsonStreamParser.java",
-              "gson/src/main/java/com/google/gson/JsonSyntaxException.java",
-              "gson/src/main/java/com/google/gson/LongSerializationPolicy.java",
-              "gson/src/main/java/com/google/gson/TypeAdapter.java",
-              "gson/src/main/java/com/google/gson/TypeAdapterFactory.java",
-              "gson/src/main/java/com/google/gson/annotations/Expose.java",
-              "gson/src/main/java/com/google/gson/annotations/JsonAdapter.java",
-              "gson/src/main/java/com/google/gson/annotations/SerializedName.java",
-              "gson/src/main/java/com/google/gson/annotations/Since.java",
-              "gson/src/main/java/com/google/gson/annotations/Until.java",
-              "gson/src/main/java/com/google/gson/annotations/package-info.java",
-              "gson/src/main/java/com/google/gson/internal/$Gson$Preconditions.java",
-              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
-              "gson/src/main/java/com/google/gson/internal/ConstructorConstructor.java",
-              "gson/src/main/java/com/google/gson/internal/Excluder.java",
-              "gson/src/main/java/com/google/gson/internal/JavaVersion.java",
-              "gson/src/main/java/com/google/gson/internal/JsonReaderInternalAccess.java",
-              "gson/src/main/java/com/google/gson/internal/LazilyParsedNumber.java",
-              "gson/src/main/java/com/google/gson/internal/LinkedHashTreeMap.java",
-              "gson/src/main/java/com/google/gson/internal/LinkedTreeMap.java",
-              "gson/src/main/java/com/google/gson/internal/ObjectConstructor.java",
-              "gson/src/main/java/com/google/gson/internal/PreJava9DateFormatProvider.java",
-              "gson/src/main/java/com/google/gson/internal/Primitives.java",
-              "gson/src/main/java/com/google/gson/internal/Streams.java",
-              "gson/src/main/java/com/google/gson/internal/UnsafeAllocator.java",
-              "gson/src/main/java/com/google/gson/internal/bind/ArrayTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/CollectionTypeAdapterFactory.java",
-              "gson/src/main/java/com/google/gson/internal/bind/DateTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/JsonAdapterAnnotationTypeAdapterFactory.java",
-              "gson/src/main/java/com/google/gson/internal/bind/JsonTreeReader.java",
-              "gson/src/main/java/com/google/gson/internal/bind/JsonTreeWriter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/MapTypeAdapterFactory.java",
-              "gson/src/main/java/com/google/gson/internal/bind/ObjectTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/ReflectiveTypeAdapterFactory.java",
-              "gson/src/main/java/com/google/gson/internal/bind/SqlDateTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/TimeTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/TreeTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/TypeAdapterRuntimeTypeWrapper.java",
-              "gson/src/main/java/com/google/gson/internal/bind/TypeAdapters.java",
-              "gson/src/main/java/com/google/gson/internal/bind/util/ISO8601Utils.java",
-              "gson/src/main/java/com/google/gson/internal/package-info.java",
-              "gson/src/main/java/com/google/gson/internal/reflect/PreJava9ReflectionAccessor.java",
-              "gson/src/main/java/com/google/gson/internal/reflect/ReflectionAccessor.java",
-              "gson/src/main/java/com/google/gson/internal/reflect/UnsafeReflectionAccessor.java",
-              "gson/src/main/java/com/google/gson/package-info.java",
-              "gson/src/main/java/com/google/gson/reflect/TypeToken.java",
-              "gson/src/main/java/com/google/gson/reflect/package-info.java",
-              "gson/src/main/java/com/google/gson/stream/JsonReader.java",
-              "gson/src/main/java/com/google/gson/stream/JsonScope.java",
-              "gson/src/main/java/com/google/gson/stream/JsonToken.java",
-              "gson/src/main/java/com/google/gson/stream/JsonWriter.java",
-              "gson/src/main/java/com/google/gson/stream/MalformedJsonException.java",
-              "gson/src/test/java/com/google/gson/CommentsTest.java",
-              "gson/src/test/java/com/google/gson/DefaultDateTypeAdapterTest.java",
-              "gson/src/test/java/com/google/gson/DefaultInetAddressTypeAdapterTest.java",
-              "gson/src/test/java/com/google/gson/DefaultMapJsonSerializerTest.java",
-              "gson/src/test/java/com/google/gson/ExposeAnnotationExclusionStrategyTest.java",
-              "gson/src/test/java/com/google/gson/FieldAttributesTest.java",
-              "gson/src/test/java/com/google/gson/GenericArrayTypeTest.java",
-              "gson/src/test/java/com/google/gson/GsonBuilderTest.java",
-              "gson/src/test/java/com/google/gson/GsonTest.java",
-              "gson/src/test/java/com/google/gson/GsonTypeAdapterTest.java",
-              "gson/src/test/java/com/google/gson/InnerClassExclusionStrategyTest.java",
-              "gson/src/test/java/com/google/gson/JavaSerializationTest.java",
-              "gson/src/test/java/com/google/gson/JsonArrayTest.java",
-              "gson/src/test/java/com/google/gson/JsonNullTest.java",
-              "gson/src/test/java/com/google/gson/JsonObjectTest.java",
-              "gson/src/test/java/com/google/gson/JsonParserTest.java",
-              "gson/src/test/java/com/google/gson/JsonPrimitiveTest.java",
-              "gson/src/test/java/com/google/gson/JsonStreamParserTest.java",
-              "gson/src/test/java/com/google/gson/LongSerializationPolicyTest.java",
-              "gson/src/test/java/com/google/gson/MixedStreamTest.java",
-              "gson/src/test/java/com/google/gson/MockExclusionStrategy.java",
-              "gson/src/test/java/com/google/gson/ObjectTypeAdapterTest.java",
-              "gson/src/test/java/com/google/gson/OverrideCoreTypeAdaptersTest.java",
-              "gson/src/test/java/com/google/gson/ParameterizedTypeFixtures.java",
-              "gson/src/test/java/com/google/gson/ParameterizedTypeTest.java",
-              "gson/src/test/java/com/google/gson/PrimitiveTypeAdapter.java",
-              "gson/src/test/java/com/google/gson/VersionExclusionStrategyTest.java",
-              "gson/src/test/java/com/google/gson/common/MoreAsserts.java",
-              "gson/src/test/java/com/google/gson/common/TestTypes.java",
-              "gson/src/test/java/com/google/gson/functional/ArrayTest.java",
-              "gson/src/test/java/com/google/gson/functional/CircularReferenceTest.java",
-              "gson/src/test/java/com/google/gson/functional/CollectionTest.java",
-              "gson/src/test/java/com/google/gson/functional/ConcurrencyTest.java",
-              "gson/src/test/java/com/google/gson/functional/CustomDeserializerTest.java",
-              "gson/src/test/java/com/google/gson/functional/CustomSerializerTest.java",
-              "gson/src/test/java/com/google/gson/functional/CustomTypeAdaptersTest.java",
-              "gson/src/test/java/com/google/gson/functional/DefaultTypeAdaptersTest.java",
-              "gson/src/test/java/com/google/gson/functional/DelegateTypeAdapterTest.java",
-              "gson/src/test/java/com/google/gson/functional/EnumTest.java",
-              "gson/src/test/java/com/google/gson/functional/EscapingTest.java",
-              "gson/src/test/java/com/google/gson/functional/ExclusionStrategyFunctionalTest.java",
-              "gson/src/test/java/com/google/gson/functional/ExposeFieldsTest.java",
-              "gson/src/test/java/com/google/gson/functional/FieldExclusionTest.java",
-              "gson/src/test/java/com/google/gson/functional/FieldNamingTest.java",
-              "gson/src/test/java/com/google/gson/functional/GsonVersionDiagnosticsTest.java",
-              "gson/src/test/java/com/google/gson/functional/InheritanceTest.java",
-              "gson/src/test/java/com/google/gson/functional/InstanceCreatorTest.java",
-              "gson/src/test/java/com/google/gson/functional/InterfaceTest.java",
-              "gson/src/test/java/com/google/gson/functional/InternationalizationTest.java",
-              "gson/src/test/java/com/google/gson/functional/JavaUtilConcurrentAtomicTest.java",
-              "gson/src/test/java/com/google/gson/functional/JavaUtilTest.java",
-              "gson/src/test/java/com/google/gson/functional/JsonAdapterAnnotationOnClassesTest.java",
-              "gson/src/test/java/com/google/gson/functional/JsonAdapterAnnotationOnFieldsTest.java",
-              "gson/src/test/java/com/google/gson/functional/JsonAdapterSerializerDeserializerTest.java",
-              "gson/src/test/java/com/google/gson/functional/JsonArrayTest.java",
-              "gson/src/test/java/com/google/gson/functional/JsonParserTest.java",
-              "gson/src/test/java/com/google/gson/functional/JsonTreeTest.java",
-              "gson/src/test/java/com/google/gson/functional/LeniencyTest.java",
-              "gson/src/test/java/com/google/gson/functional/MapAsArrayTypeAdapterTest.java",
-              "gson/src/test/java/com/google/gson/functional/MapTest.java",
-              "gson/src/test/java/com/google/gson/functional/MoreSpecificTypeSerializationTest.java",
-              "gson/src/test/java/com/google/gson/functional/NamingPolicyTest.java",
-              "gson/src/test/java/com/google/gson/functional/NullObjectAndFieldTest.java",
-              "gson/src/test/java/com/google/gson/functional/ObjectTest.java",
-              "gson/src/test/java/com/google/gson/functional/ParameterizedTypesTest.java",
-              "gson/src/test/java/com/google/gson/functional/PrettyPrintingTest.java",
-              "gson/src/test/java/com/google/gson/functional/PrimitiveCharacterTest.java",
-              "gson/src/test/java/com/google/gson/functional/PrimitiveTest.java",
-              "gson/src/test/java/com/google/gson/functional/PrintFormattingTest.java",
-              "gson/src/test/java/com/google/gson/functional/RawSerializationTest.java",
-              "gson/src/test/java/com/google/gson/functional/ReadersWritersTest.java",
-              "gson/src/test/java/com/google/gson/functional/RuntimeTypeAdapterFactoryFunctionalTest.java",
-              "gson/src/test/java/com/google/gson/functional/SecurityTest.java",
-              "gson/src/test/java/com/google/gson/functional/SerializedNameTest.java",
-              "gson/src/test/java/com/google/gson/functional/StreamingTypeAdaptersTest.java",
-              "gson/src/test/java/com/google/gson/functional/StringTest.java",
-              "gson/src/test/java/com/google/gson/functional/ThrowableFunctionalTest.java",
-              "gson/src/test/java/com/google/gson/functional/TreeTypeAdaptersTest.java",
-              "gson/src/test/java/com/google/gson/functional/TypeAdapterPrecedenceTest.java",
-              "gson/src/test/java/com/google/gson/functional/TypeHierarchyAdapterTest.java",
-              "gson/src/test/java/com/google/gson/functional/TypeVariableTest.java",
-              "gson/src/test/java/com/google/gson/functional/UncategorizedTest.java",
-              "gson/src/test/java/com/google/gson/functional/VersioningTest.java",
-              "gson/src/test/java/com/google/gson/internal/GsonBuildConfigTest.java",
-              "gson/src/test/java/com/google/gson/internal/GsonTypesTest.java",
-              "gson/src/test/java/com/google/gson/internal/JavaVersionTest.java",
-              "gson/src/test/java/com/google/gson/internal/LazilyParsedNumberTest.java",
-              "gson/src/test/java/com/google/gson/internal/LinkedHashTreeMapTest.java",
-              "gson/src/test/java/com/google/gson/internal/LinkedTreeMapTest.java",
-              "gson/src/test/java/com/google/gson/internal/UnsafeAllocatorInstantiationTest.java",
-              "gson/src/test/java/com/google/gson/internal/bind/JsonElementReaderTest.java",
-              "gson/src/test/java/com/google/gson/internal/bind/JsonTreeReaderTest.java",
-              "gson/src/test/java/com/google/gson/internal/bind/JsonTreeWriterTest.java",
-              "gson/src/test/java/com/google/gson/internal/bind/RecursiveTypesResolveTest.java",
-              "gson/src/test/java/com/google/gson/internal/reflect/UnsafeReflectionAccessorTest.java",
-              "gson/src/test/java/com/google/gson/metrics/PerformanceTest.java",
-              "gson/src/test/java/com/google/gson/reflect/TypeTokenTest.java",
-              "gson/src/test/java/com/google/gson/regression/JsonAdapterNullSafeTest.java",
-              "gson/src/test/java/com/google/gson/stream/JsonReaderPathTest.java",
-              "gson/src/test/java/com/google/gson/stream/JsonReaderTest.java",
-              "gson/src/test/java/com/google/gson/stream/JsonWriterTest.java",
-              "lib/gson-cleanup-styles.xml",
-              "lib/gson-formatting-styles.xml",
-              "metrics/pom.xml",
-              "metrics/src/main/java/com/google/gson/metrics/BagOfPrimitives.java",
-              "metrics/src/main/java/com/google/gson/metrics/BagOfPrimitivesDeserializationBenchmark.java",
-              "metrics/src/main/java/com/google/gson/metrics/CollectionsDeserializationBenchmark.java",
-              "metrics/src/main/java/com/google/gson/metrics/ParseBenchmark.java",
-              "metrics/src/main/java/com/google/gson/metrics/ParseBenchmarkData.zip",
-              "metrics/src/main/java/com/google/gson/metrics/SerializationBenchmark.java",
-              "pom.xml",
-              "proto/pom.xml",
-              "proto/src/main/java/com/google/gson/protobuf/ProtoTypeAdapter.java",
-              "proto/src/main/protobuf/annotations.proto",
-              "proto/src/main/protobuf/bag.proto",
-              "proto/src/test/java/com/google/gson/protobuf/functional/ProtosWithAnnotationsTest.java",
-              "proto/src/test/java/com/google/gson/protobuf/functional/ProtosWithComplexAndRepeatedFieldsTest.java",
-              "proto/src/test/java/com/google/gson/protobuf/functional/ProtosWithPrimitiveTypesTest.java",
-              "settings.gradle"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "gson/src/main/java/com/google/gson/internal/$Gson$Types.java"
             ],
-            "spans": {},
+            "spans": {
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java": [
+                {
+                  "start": 320,
+                  "end": 470
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "gson/src/test/java/com/google/gson/internal/GsonTypesTest.java"
             ],
-            "spans": {},
+            "spans": {
+              "gson/src/test/java/com/google/gson/internal/GsonTypesTest.java": [
+                {
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "gson/src/test/java/com/google/gson/internal/bind/RecursiveTypesResolveTest.java"
             ],
-            "spans": {},
+            "spans": {
+              "gson/src/test/java/com/google/gson/internal/bind/RecursiveTypesResolveTest.java": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "gson/build.gradle"
             ],
-            "spans": {},
+            "spans": {
+              "gson/build.gradle": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java"
+            ],
+            "spans": {
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java": [
+                {
+                  "start": 1,
+                  "end": 80
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "gson/pom.xml"
             ],
-            "spans": {},
+            "spans": {
+              "gson/pom.xml": [
+                {
+                  "start": 1,
+                  "end": 160
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java"
             ],
-            "spans": {},
+            "spans": {
+              "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java": [
+                {
+                  "start": 1,
+                  "end": 75
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java"
+            ],
+            "spans": {
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java": [
+                {
+                  "start": 336,
+                  "end": 450
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "<worktree>/gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
-          "<worktree>/gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java",
-          "CHANGELOG.md",
-          "GsonDesignDocument.md",
-          "LICENSE",
-          "README.md",
-          "ReleaseProcess.md",
-          "UserGuide.md",
-          "build.gradle",
-          "codegen/pom.xml",
-          "codegen/src/main/java/com/google/gson/codegen/CodeGen.java",
-          "codegen/src/main/java/com/google/gson/codegen/GeneratedTypeAdapter.java",
-          "codegen/src/main/java/com/google/gson/codegen/GeneratedTypeAdapterProcessor.java",
-          "codegen/src/main/java/com/google/gson/codegen/JavaWriter.java",
-          "codegen/src/main/resources/META-INF/services/javax.annotation.processing.Processor",
-          "codegen/src/test/java/com/google/gson/codegen/functional/CodeGenFunctionalTest.java",
-          "codegen/src/test/java/com/google/gson/codegen/functional/Order.java",
-          "examples/android-proguard-example/AndroidManifest.xml",
-          "examples/android-proguard-example/default.properties",
-          "examples/android-proguard-example/proguard.cfg",
-          "examples/android-proguard-example/res/drawable/icon.png",
-          "examples/android-proguard-example/res/layout/main.xml",
-          "examples/android-proguard-example/res/values/strings.xml",
-          "examples/android-proguard-example/src/com/google/gson/examples/android/GsonProguardExampleActivity.java",
-          "examples/android-proguard-example/src/com/google/gson/examples/android/model/Cart.java",
-          "examples/android-proguard-example/src/com/google/gson/examples/android/model/LineItem.java",
-          "extras/pom.xml",
-          "extras/src/main/java/com/google/gson/extras/examples/rawcollections/RawCollectionsExample.java",
-          "extras/src/main/java/com/google/gson/graph/GraphAdapterBuilder.java",
-          "extras/src/main/java/com/google/gson/interceptors/Intercept.java",
-          "extras/src/main/java/com/google/gson/interceptors/InterceptorFactory.java",
-          "extras/src/main/java/com/google/gson/interceptors/JsonPostDeserializer.java",
-          "extras/src/main/java/com/google/gson/typeadapters/PostConstructAdapterFactory.java",
-          "extras/src/main/java/com/google/gson/typeadapters/RuntimeTypeAdapterFactory.java",
-          "extras/src/main/java/com/google/gson/typeadapters/UtcDateTypeAdapter.java",
-          "extras/src/test/java/com/google/gson/graph/GraphAdapterBuilderTest.java",
-          "extras/src/test/java/com/google/gson/interceptors/InterceptorTest.java",
-          "extras/src/test/java/com/google/gson/typeadapters/PostConstructAdapterFactoryTest.java",
-          "extras/src/test/java/com/google/gson/typeadapters/RuntimeTypeAdapterFactoryTest.java",
-          "extras/src/test/java/com/google/gson/typeadapters/UtcDateTypeAdapterTest.java",
-          "gradle/wrapper/gradle-wrapper.jar",
-          "gradle/wrapper/gradle-wrapper.properties",
-          "gradlew.bat",
-          "gson/LICENSE",
-          "gson/README",
-          "gson/assembly-descriptor.xml",
-          "gson/bnd.bnd",
-          "gson/build.gradle",
-          "gson/docs/javadocs/allclasses-frame.html",
-          "gson/docs/javadocs/allclasses-noframe.html",
-          "gson/docs/javadocs/com/google/gson/ExclusionStrategy.html",
-          "gson/docs/javadocs/com/google/gson/FieldAttributes.html",
-          "gson/docs/javadocs/com/google/gson/FieldNamingPolicy.html",
-          "gson/docs/javadocs/com/google/gson/FieldNamingStrategy.html",
-          "gson/docs/javadocs/com/google/gson/Gson.html",
-          "gson/docs/javadocs/com/google/gson/GsonBuilder.html",
-          "gson/docs/javadocs/com/google/gson/InstanceCreator.html",
-          "gson/docs/javadocs/com/google/gson/JsonArray.html",
-          "gson/docs/javadocs/com/google/gson/JsonDeserializationContext.html",
-          "gson/docs/javadocs/com/google/gson/JsonDeserializer.html",
-          "gson/docs/javadocs/com/google/gson/JsonElement.html",
-          "gson/docs/javadocs/com/google/gson/JsonIOException.html",
-          "gson/docs/javadocs/com/google/gson/JsonNull.html",
-          "gson/docs/javadocs/com/google/gson/JsonObject.html",
-          "gson/docs/javadocs/com/google/gson/JsonParseException.html",
-          "gson/docs/javadocs/com/google/gson/JsonParser.html",
-          "gson/docs/javadocs/com/google/gson/JsonPrimitive.html",
-          "gson/docs/javadocs/com/google/gson/JsonSerializationContext.html",
-          "gson/docs/javadocs/com/google/gson/JsonSerializer.html",
-          "gson/docs/javadocs/com/google/gson/JsonStreamParser.html",
-          "gson/docs/javadocs/com/google/gson/JsonSyntaxException.html",
-          "gson/docs/javadocs/com/google/gson/LongSerializationPolicy.html",
-          "gson/docs/javadocs/com/google/gson/TypeAdapter.html",
-          "gson/docs/javadocs/com/google/gson/TypeAdapterFactory.html",
-          "gson/docs/javadocs/com/google/gson/annotations/Expose.html",
-          "gson/docs/javadocs/com/google/gson/annotations/JsonAdapter.html",
-          "gson/docs/javadocs/com/google/gson/annotations/SerializedName.html",
-          "gson/docs/javadocs/com/google/gson/annotations/Since.html",
-          "gson/docs/javadocs/com/google/gson/annotations/Until.html",
-          "gson/docs/javadocs/com/google/gson/annotations/class-use/Expose.html",
-          "gson/docs/javadocs/com/google/gson/annotations/class-use/JsonAdapter.html",
-          "gson/docs/javadocs/com/google/gson/annotations/class-use/SerializedName.html",
-          "gson/docs/javadocs/com/google/gson/annotations/class-use/Since.html",
-          "gson/docs/javadocs/com/google/gson/annotations/class-use/Until.html",
-          "gson/docs/javadocs/com/google/gson/annotations/package-frame.html",
-          "gson/docs/javadocs/com/google/gson/annotations/package-summary.html",
-          "gson/docs/javadocs/com/google/gson/annotations/package-tree.html",
-          "gson/docs/javadocs/com/google/gson/annotations/package-use.html",
-          "gson/docs/javadocs/com/google/gson/class-use/ExclusionStrategy.html",
-          "gson/docs/javadocs/com/google/gson/class-use/FieldAttributes.html",
-          "gson/docs/javadocs/com/google/gson/class-use/FieldNamingPolicy.html",
-          "gson/docs/javadocs/com/google/gson/class-use/FieldNamingStrategy.html",
-          "gson/docs/javadocs/com/google/gson/class-use/Gson.html",
-          "gson/docs/javadocs/com/google/gson/class-use/GsonBuilder.html",
-          "gson/docs/javadocs/com/google/gson/class-use/InstanceCreator.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonArray.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonDeserializationContext.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonDeserializer.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonElement.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonIOException.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonNull.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonObject.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonParseException.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonParser.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonPrimitive.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonSerializationContext.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonSerializer.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonStreamParser.html",
-          "gson/docs/javadocs/com/google/gson/class-use/JsonSyntaxException.html",
-          "gson/docs/javadocs/com/google/gson/class-use/LongSerializationPolicy.html",
-          "gson/docs/javadocs/com/google/gson/class-use/TypeAdapter.html",
-          "gson/docs/javadocs/com/google/gson/class-use/TypeAdapterFactory.html",
-          "gson/docs/javadocs/com/google/gson/package-frame.html",
-          "gson/docs/javadocs/com/google/gson/package-summary.html",
-          "gson/docs/javadocs/com/google/gson/package-tree.html",
-          "gson/docs/javadocs/com/google/gson/package-use.html",
-          "gson/docs/javadocs/com/google/gson/reflect/TypeToken.html",
-          "gson/docs/javadocs/com/google/gson/reflect/class-use/TypeToken.html",
-          "gson/docs/javadocs/com/google/gson/reflect/package-frame.html",
-          "gson/docs/javadocs/com/google/gson/reflect/package-summary.html",
-          "gson/docs/javadocs/com/google/gson/reflect/package-tree.html",
-          "gson/docs/javadocs/com/google/gson/reflect/package-use.html",
-          "gson/docs/javadocs/com/google/gson/stream/JsonReader.html",
-          "gson/docs/javadocs/com/google/gson/stream/JsonToken.html",
-          "gson/docs/javadocs/com/google/gson/stream/JsonWriter.html",
-          "gson/docs/javadocs/com/google/gson/stream/MalformedJsonException.html",
-          "gson/docs/javadocs/com/google/gson/stream/class-use/JsonReader.html",
-          "gson/docs/javadocs/com/google/gson/stream/class-use/JsonToken.html",
-          "gson/docs/javadocs/com/google/gson/stream/class-use/JsonWriter.html",
-          "gson/docs/javadocs/com/google/gson/stream/class-use/MalformedJsonException.html",
-          "gson/docs/javadocs/com/google/gson/stream/package-frame.html",
-          "gson/docs/javadocs/com/google/gson/stream/package-summary.html",
-          "gson/docs/javadocs/com/google/gson/stream/package-tree.html",
-          "gson/docs/javadocs/com/google/gson/stream/package-use.html",
-          "gson/docs/javadocs/constant-values.html",
-          "gson/docs/javadocs/deprecated-list.html",
-          "gson/docs/javadocs/help-doc.html",
-          "gson/docs/javadocs/index-all.html",
-          "gson/docs/javadocs/index.html",
-          "gson/docs/javadocs/overview-frame.html",
-          "gson/docs/javadocs/overview-summary.html",
-          "gson/docs/javadocs/overview-tree.html",
-          "gson/docs/javadocs/resources/inherit.gif",
-          "gson/docs/javadocs/script.js",
-          "gson/docs/javadocs/serialized-form.html",
-          "gson/docs/javadocs/stylesheet.css",
-          "gson/pom.xml",
-          "gson/src/main/java-templates/com/google/gson/internal/GsonBuildConfig.java",
-          "gson/src/main/java/com.google.gson/module-info.java",
-          "gson/src/main/java/com/google/gson/DefaultDateTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/ExclusionStrategy.java",
-          "gson/src/main/java/com/google/gson/FieldAttributes.java",
-          "gson/src/main/java/com/google/gson/FieldNamingPolicy.java",
-          "gson/src/main/java/com/google/gson/FieldNamingStrategy.java",
-          "gson/src/main/java/com/google/gson/Gson.java",
-          "gson/src/main/java/com/google/gson/GsonBuilder.java",
-          "gson/src/main/java/com/google/gson/InstanceCreator.java",
-          "gson/src/main/java/com/google/gson/JsonArray.java",
-          "gson/src/main/java/com/google/gson/JsonDeserializationContext.java",
-          "gson/src/main/java/com/google/gson/JsonDeserializer.java",
-          "gson/src/main/java/com/google/gson/JsonElement.java",
-          "gson/src/main/java/com/google/gson/JsonIOException.java",
-          "gson/src/main/java/com/google/gson/JsonNull.java",
-          "gson/src/main/java/com/google/gson/JsonObject.java",
-          "gson/src/main/java/com/google/gson/JsonParseException.java",
-          "gson/src/main/java/com/google/gson/JsonParser.java",
-          "gson/src/main/java/com/google/gson/JsonPrimitive.java",
-          "gson/src/main/java/com/google/gson/JsonSerializationContext.java",
-          "gson/src/main/java/com/google/gson/JsonSerializer.java",
-          "gson/src/main/java/com/google/gson/JsonStreamParser.java",
-          "gson/src/main/java/com/google/gson/JsonSyntaxException.java",
-          "gson/src/main/java/com/google/gson/LongSerializationPolicy.java",
-          "gson/src/main/java/com/google/gson/TypeAdapter.java",
-          "gson/src/main/java/com/google/gson/TypeAdapterFactory.java",
-          "gson/src/main/java/com/google/gson/annotations/Expose.java",
-          "gson/src/main/java/com/google/gson/annotations/JsonAdapter.java",
-          "gson/src/main/java/com/google/gson/annotations/SerializedName.java",
-          "gson/src/main/java/com/google/gson/annotations/Since.java",
-          "gson/src/main/java/com/google/gson/annotations/Until.java",
-          "gson/src/main/java/com/google/gson/annotations/package-info.java",
-          "gson/src/main/java/com/google/gson/internal/$Gson$Preconditions.java",
           "gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
-          "gson/src/main/java/com/google/gson/internal/ConstructorConstructor.java",
-          "gson/src/main/java/com/google/gson/internal/Excluder.java",
-          "gson/src/main/java/com/google/gson/internal/JavaVersion.java",
-          "gson/src/main/java/com/google/gson/internal/JsonReaderInternalAccess.java",
-          "gson/src/main/java/com/google/gson/internal/LazilyParsedNumber.java",
-          "gson/src/main/java/com/google/gson/internal/LinkedHashTreeMap.java",
-          "gson/src/main/java/com/google/gson/internal/LinkedTreeMap.java",
-          "gson/src/main/java/com/google/gson/internal/ObjectConstructor.java",
-          "gson/src/main/java/com/google/gson/internal/PreJava9DateFormatProvider.java",
-          "gson/src/main/java/com/google/gson/internal/Primitives.java",
-          "gson/src/main/java/com/google/gson/internal/Streams.java",
-          "gson/src/main/java/com/google/gson/internal/UnsafeAllocator.java",
-          "gson/src/main/java/com/google/gson/internal/bind/ArrayTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/CollectionTypeAdapterFactory.java",
-          "gson/src/main/java/com/google/gson/internal/bind/DateTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/JsonAdapterAnnotationTypeAdapterFactory.java",
-          "gson/src/main/java/com/google/gson/internal/bind/JsonTreeReader.java",
-          "gson/src/main/java/com/google/gson/internal/bind/JsonTreeWriter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/MapTypeAdapterFactory.java",
-          "gson/src/main/java/com/google/gson/internal/bind/ObjectTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/ReflectiveTypeAdapterFactory.java",
-          "gson/src/main/java/com/google/gson/internal/bind/SqlDateTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/TimeTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/TreeTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/TypeAdapterRuntimeTypeWrapper.java",
-          "gson/src/main/java/com/google/gson/internal/bind/TypeAdapters.java",
-          "gson/src/main/java/com/google/gson/internal/bind/util/ISO8601Utils.java",
-          "gson/src/main/java/com/google/gson/internal/package-info.java",
-          "gson/src/main/java/com/google/gson/internal/reflect/PreJava9ReflectionAccessor.java",
-          "gson/src/main/java/com/google/gson/internal/reflect/ReflectionAccessor.java",
-          "gson/src/main/java/com/google/gson/internal/reflect/UnsafeReflectionAccessor.java",
-          "gson/src/main/java/com/google/gson/package-info.java",
-          "gson/src/main/java/com/google/gson/reflect/TypeToken.java",
-          "gson/src/main/java/com/google/gson/reflect/package-info.java",
-          "gson/src/main/java/com/google/gson/stream/JsonReader.java",
-          "gson/src/main/java/com/google/gson/stream/JsonScope.java",
-          "gson/src/main/java/com/google/gson/stream/JsonToken.java",
-          "gson/src/main/java/com/google/gson/stream/JsonWriter.java",
-          "gson/src/main/java/com/google/gson/stream/MalformedJsonException.java",
-          "gson/src/test/java/com/google/gson/CommentsTest.java",
-          "gson/src/test/java/com/google/gson/DefaultDateTypeAdapterTest.java",
-          "gson/src/test/java/com/google/gson/DefaultInetAddressTypeAdapterTest.java",
-          "gson/src/test/java/com/google/gson/DefaultMapJsonSerializerTest.java",
-          "gson/src/test/java/com/google/gson/ExposeAnnotationExclusionStrategyTest.java",
-          "gson/src/test/java/com/google/gson/FieldAttributesTest.java",
-          "gson/src/test/java/com/google/gson/GenericArrayTypeTest.java",
-          "gson/src/test/java/com/google/gson/GsonBuilderTest.java",
-          "gson/src/test/java/com/google/gson/GsonTest.java",
-          "gson/src/test/java/com/google/gson/GsonTypeAdapterTest.java",
-          "gson/src/test/java/com/google/gson/InnerClassExclusionStrategyTest.java",
-          "gson/src/test/java/com/google/gson/JavaSerializationTest.java",
-          "gson/src/test/java/com/google/gson/JsonArrayTest.java",
-          "gson/src/test/java/com/google/gson/JsonNullTest.java",
-          "gson/src/test/java/com/google/gson/JsonObjectTest.java",
-          "gson/src/test/java/com/google/gson/JsonParserTest.java",
-          "gson/src/test/java/com/google/gson/JsonPrimitiveTest.java",
-          "gson/src/test/java/com/google/gson/JsonStreamParserTest.java",
-          "gson/src/test/java/com/google/gson/LongSerializationPolicyTest.java",
-          "gson/src/test/java/com/google/gson/MixedStreamTest.java",
-          "gson/src/test/java/com/google/gson/MockExclusionStrategy.java",
-          "gson/src/test/java/com/google/gson/ObjectTypeAdapterTest.java",
-          "gson/src/test/java/com/google/gson/OverrideCoreTypeAdaptersTest.java",
-          "gson/src/test/java/com/google/gson/ParameterizedTypeFixtures.java",
-          "gson/src/test/java/com/google/gson/ParameterizedTypeTest.java",
-          "gson/src/test/java/com/google/gson/PrimitiveTypeAdapter.java",
-          "gson/src/test/java/com/google/gson/VersionExclusionStrategyTest.java",
-          "gson/src/test/java/com/google/gson/common/MoreAsserts.java",
-          "gson/src/test/java/com/google/gson/common/TestTypes.java",
-          "gson/src/test/java/com/google/gson/functional/ArrayTest.java",
-          "gson/src/test/java/com/google/gson/functional/CircularReferenceTest.java",
-          "gson/src/test/java/com/google/gson/functional/CollectionTest.java",
-          "gson/src/test/java/com/google/gson/functional/ConcurrencyTest.java",
-          "gson/src/test/java/com/google/gson/functional/CustomDeserializerTest.java",
-          "gson/src/test/java/com/google/gson/functional/CustomSerializerTest.java",
-          "gson/src/test/java/com/google/gson/functional/CustomTypeAdaptersTest.java",
-          "gson/src/test/java/com/google/gson/functional/DefaultTypeAdaptersTest.java",
-          "gson/src/test/java/com/google/gson/functional/DelegateTypeAdapterTest.java",
-          "gson/src/test/java/com/google/gson/functional/EnumTest.java",
-          "gson/src/test/java/com/google/gson/functional/EscapingTest.java",
-          "gson/src/test/java/com/google/gson/functional/ExclusionStrategyFunctionalTest.java",
-          "gson/src/test/java/com/google/gson/functional/ExposeFieldsTest.java",
-          "gson/src/test/java/com/google/gson/functional/FieldExclusionTest.java",
-          "gson/src/test/java/com/google/gson/functional/FieldNamingTest.java",
-          "gson/src/test/java/com/google/gson/functional/GsonVersionDiagnosticsTest.java",
-          "gson/src/test/java/com/google/gson/functional/InheritanceTest.java",
-          "gson/src/test/java/com/google/gson/functional/InstanceCreatorTest.java",
-          "gson/src/test/java/com/google/gson/functional/InterfaceTest.java",
-          "gson/src/test/java/com/google/gson/functional/InternationalizationTest.java",
-          "gson/src/test/java/com/google/gson/functional/JavaUtilConcurrentAtomicTest.java",
-          "gson/src/test/java/com/google/gson/functional/JavaUtilTest.java",
-          "gson/src/test/java/com/google/gson/functional/JsonAdapterAnnotationOnClassesTest.java",
-          "gson/src/test/java/com/google/gson/functional/JsonAdapterAnnotationOnFieldsTest.java",
-          "gson/src/test/java/com/google/gson/functional/JsonAdapterSerializerDeserializerTest.java",
-          "gson/src/test/java/com/google/gson/functional/JsonArrayTest.java",
-          "gson/src/test/java/com/google/gson/functional/JsonParserTest.java",
-          "gson/src/test/java/com/google/gson/functional/JsonTreeTest.java",
-          "gson/src/test/java/com/google/gson/functional/LeniencyTest.java",
-          "gson/src/test/java/com/google/gson/functional/MapAsArrayTypeAdapterTest.java",
-          "gson/src/test/java/com/google/gson/functional/MapTest.java",
-          "gson/src/test/java/com/google/gson/functional/MoreSpecificTypeSerializationTest.java",
-          "gson/src/test/java/com/google/gson/functional/NamingPolicyTest.java",
-          "gson/src/test/java/com/google/gson/functional/NullObjectAndFieldTest.java",
-          "gson/src/test/java/com/google/gson/functional/ObjectTest.java",
-          "gson/src/test/java/com/google/gson/functional/ParameterizedTypesTest.java",
-          "gson/src/test/java/com/google/gson/functional/PrettyPrintingTest.java",
-          "gson/src/test/java/com/google/gson/functional/PrimitiveCharacterTest.java",
-          "gson/src/test/java/com/google/gson/functional/PrimitiveTest.java",
-          "gson/src/test/java/com/google/gson/functional/PrintFormattingTest.java",
-          "gson/src/test/java/com/google/gson/functional/RawSerializationTest.java",
-          "gson/src/test/java/com/google/gson/functional/ReadersWritersTest.java",
-          "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java",
-          "gson/src/test/java/com/google/gson/functional/RuntimeTypeAdapterFactoryFunctionalTest.java",
-          "gson/src/test/java/com/google/gson/functional/SecurityTest.java",
-          "gson/src/test/java/com/google/gson/functional/SerializedNameTest.java",
-          "gson/src/test/java/com/google/gson/functional/StreamingTypeAdaptersTest.java",
-          "gson/src/test/java/com/google/gson/functional/StringTest.java",
-          "gson/src/test/java/com/google/gson/functional/ThrowableFunctionalTest.java",
-          "gson/src/test/java/com/google/gson/functional/TreeTypeAdaptersTest.java",
-          "gson/src/test/java/com/google/gson/functional/TypeAdapterPrecedenceTest.java",
-          "gson/src/test/java/com/google/gson/functional/TypeHierarchyAdapterTest.java",
-          "gson/src/test/java/com/google/gson/functional/TypeVariableTest.java",
-          "gson/src/test/java/com/google/gson/functional/UncategorizedTest.java",
-          "gson/src/test/java/com/google/gson/functional/VersioningTest.java",
-          "gson/src/test/java/com/google/gson/internal/GsonBuildConfigTest.java",
-          "gson/src/test/java/com/google/gson/internal/GsonTypesTest.java",
-          "gson/src/test/java/com/google/gson/internal/JavaVersionTest.java",
-          "gson/src/test/java/com/google/gson/internal/LazilyParsedNumberTest.java",
-          "gson/src/test/java/com/google/gson/internal/LinkedHashTreeMapTest.java",
-          "gson/src/test/java/com/google/gson/internal/LinkedTreeMapTest.java",
-          "gson/src/test/java/com/google/gson/internal/UnsafeAllocatorInstantiationTest.java",
-          "gson/src/test/java/com/google/gson/internal/bind/JsonElementReaderTest.java",
-          "gson/src/test/java/com/google/gson/internal/bind/JsonTreeReaderTest.java",
-          "gson/src/test/java/com/google/gson/internal/bind/JsonTreeWriterTest.java",
-          "gson/src/test/java/com/google/gson/internal/bind/RecursiveTypesResolveTest.java",
-          "gson/src/test/java/com/google/gson/internal/reflect/UnsafeReflectionAccessorTest.java",
-          "gson/src/test/java/com/google/gson/metrics/PerformanceTest.java",
-          "gson/src/test/java/com/google/gson/reflect/TypeTokenTest.java",
-          "gson/src/test/java/com/google/gson/regression/JsonAdapterNullSafeTest.java",
-          "gson/src/test/java/com/google/gson/stream/JsonReaderPathTest.java",
-          "gson/src/test/java/com/google/gson/stream/JsonReaderTest.java",
-          "gson/src/test/java/com/google/gson/stream/JsonWriterTest.java",
-          "lib/gson-cleanup-styles.xml",
-          "lib/gson-formatting-styles.xml",
-          "metrics/pom.xml",
-          "metrics/src/main/java/com/google/gson/metrics/BagOfPrimitives.java",
-          "metrics/src/main/java/com/google/gson/metrics/BagOfPrimitivesDeserializationBenchmark.java",
-          "metrics/src/main/java/com/google/gson/metrics/CollectionsDeserializationBenchmark.java",
-          "metrics/src/main/java/com/google/gson/metrics/ParseBenchmark.java",
-          "metrics/src/main/java/com/google/gson/metrics/ParseBenchmarkData.zip",
-          "metrics/src/main/java/com/google/gson/metrics/SerializationBenchmark.java",
-          "pom.xml",
-          "proto/pom.xml",
-          "proto/src/main/java/com/google/gson/protobuf/ProtoTypeAdapter.java",
-          "proto/src/main/protobuf/annotations.proto",
-          "proto/src/main/protobuf/bag.proto",
-          "proto/src/test/java/com/google/gson/protobuf/functional/ProtosWithAnnotationsTest.java",
-          "proto/src/test/java/com/google/gson/protobuf/functional/ProtosWithComplexAndRepeatedFieldsTest.java",
-          "proto/src/test/java/com/google/gson/protobuf/functional/ProtosWithPrimitiveTypesTest.java",
-          "settings.gradle"
+          "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java"
         ],
         "predSpans": {
-          "<worktree>/gson/src/main/java/com/google/gson/internal/$Gson$Types.java": [
+          "gson/src/main/java/com/google/gson/internal/$Gson$Types.java": [
             {
               "start": 336,
               "end": 434
             }
           ],
-          "<worktree>/gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java": [
+          "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java": [
             {
               "start": 31,
               "end": 75
@@ -804,10 +232,10 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/gson/src/main/java/com/google/gson/internal/$Gson$Types.java": [
+          "gson/src/main/java/com/google/gson/internal/$Gson$Types.java": [
             "$Gson$Types.resolve"
           ],
-          "<worktree>/gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java": [
+          "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java": [
             "ReusedTypeVariablesFullyResolveTest.testGenericsPreservation"
           ]
         }
@@ -817,78 +245,87 @@
           {
             "step": 1,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.19444444444444445,
+              "span": 0.2609746473315577,
+              "line": 0.2332155477031802
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.19444444444444445,
+              "span": 0.2609746473315577,
+              "line": 0.2332155477031802
             }
           },
           {
             "step": 3,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.5833333333333334,
+              "span": 0.43306698234191576,
+              "line": 0.4363957597173145
             }
           },
           {
             "step": 4,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.5833333333333334,
+              "span": 0.43306698234191576,
+              "line": 0.4363957597173145
             }
           },
           {
             "step": 5,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.6944444444444444,
+              "span": 0.5694978790569202,
+              "line": 0.5777385159010601
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.6944444444444444,
+              "span": 0.5694978790569202,
+              "line": 0.5777385159010601
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.6944444444444444,
+              "span": 0.5694978790569202,
+              "line": 0.5777385159010601
+            }
+          },
+          {
+            "step": 8,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.6944444444444444,
+              "span": 0.5694978790569202,
+              "line": 0.5777385159010601
             }
           }
         ],
         "aucCoverage": {
-          "file": 1.0,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.875,
+          "symbol": 0.5416666666666666,
+          "span": 0.45825934694682846,
+          "line": 0.45627208480565373
         },
         "redundancy": {
-          "file": 0.014577259475218707,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.25,
+          "symbol": 0.16279069767441856,
+          "span": 0.20770714638194787,
+          "line": 0.10589318600368325
         }
       },
       "fixOverlap": {
@@ -1018,7 +455,18 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java",
+                "kind": "add"
+              }
+            ]
+          }
         },
         {
           "kind": "command_execution",
@@ -1157,9 +605,29 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [
+          "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java"
+        ],
+        "missingTrajectoryPaths": [
+          "gradle.properties",
+          "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java"
+        ],
+        "missingFinalPathCount": 1,
+        "missingTrajectoryPathCount": 2
+      },
       "startedAt": "2026-05-11T00:19:38Z",
       "completedAt": "2026-05-11T00:23:17Z",
       "durationMs": 218460,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 960610,
@@ -1168,6 +636,28 @@
         "total_tokens": 970013,
         "cache_read_input_tokens": 859136
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 29,
+        "readToolCalls": 0,
+        "editToolCalls": 3
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/gson/src/main/java/com/google/gson/internal/$Gson$Types.java b/gson/src/main/java/com/google/gson/internal/$Gson$Types.java\nindex adea605f..d449b398 100644\n--- a/gson/src/main/java/com/google/gson/internal/$Gson$Types.java\n+++ b/gson/src/main/java/com/google/gson/internal/$Gson$Types.java\n@@ -334,52 +334,59 @@ public final class $Gson$Types {\n   }\n \n   public static Type resolve(Type context, Class<?> contextRawType, Type toResolve) {\n-    return resolve(context, contextRawType, toResolve, new HashSet<TypeVariable>());\n+    return resolve(context, contextRawType, toResolve, new HashMap<TypeVariable<?>, Type>());\n   }\n \n   private static Type resolve(Type context, Class<?> contextRawType, Type toResolve,\n-                              Collection<TypeVariable> visitedTypeVariables) {\n+                              Map<TypeVariable<?>, Type> visitedTypeVariables) {\n     // this implementation is made a little more complicated in an attempt to avoid object-creation\n+    TypeVariable<?> resolving = null;\n     while (true) {\n       if (toResolve instanceof TypeVariable) {\n         TypeVariable<?> typeVariable = (TypeVariable<?>) toResolve;\n-        if (visitedTypeVariables.contains(typeVariable)) {\n-          // cannot reduce due to infinite recursion\n-          return toResolve;\n+        if (visitedTypeVariables.containsKey(typeVariable)) {\n+          Type previouslyResolved = visitedTypeVariables.get(typeVariable);\n+          return previouslyResolved == Void.TYPE ? toResolve : previouslyResolved;\n         } else {\n-          visitedTypeVariables.add(typeVariable);\n+          // Insert a placeholder to mark the fact that we are in the process of resolving this type\n+          visitedTypeVariables.put(typeVariable, Void.TYPE);\n+          if (resolving == null) {\n+            resolving = typeVariable;\n+          }\n         }\n         toResolve = resolveTypeVariable(context, contextRawType, typeVariable);\n         if (toResolve == typeVariable) {\n-          return toResolve;\n+          break;\n         }\n \n       } else if (toResolve instanceof Class && ((Class<?>) toResolve).isArray()) {\n         Class<?> original = (Class<?>) toResolve;\n         Type componentType = original.getComponentType();\n         Type newComponentType = resolve(context, contextRawType, componentType, visitedTypeVariables);\n-        return componentType == newComponentType\n+        toResolve = equal(componentType, newComponentType)\n             ? original\n             : arrayOf(newComponentType);\n+        break;\n \n       } else if (toResolve instanceof GenericArrayType) {\n         GenericArrayType original = (GenericArrayType) toResolve;\n         Type componentType = original.getGenericComponentType();\n         Type newComponentType = resolve(context, contextRawType, componentType, visitedTypeVariables);\n-        return componentType == newComponentType\n+        toResolve = equal(componentType, newComponentType)\n             ? original\n             : arrayOf(newComponentType);\n+        break;\n \n       } else if (toResolve instanceof ParameterizedType) {\n         ParameterizedType original = (ParameterizedType) toResolve;\n         Type ownerType = original.getOwnerType();\n         Type newOwnerType = resolve(context, contextRawType, ownerType, visitedTypeVariables);\n-        boolean changed = newOwnerType != ownerType;\n+        boolean changed = !equal(newOwnerType, ownerType);\n \n         Type[] args = original.getActualTypeArguments();\n         for (int t = 0, length = args.length; t < length; t++) {\n           Type resolvedTypeArgument = resolve(context, contextRawType, args[t], visitedTypeVariables);\n-          if (resolvedTypeArgument != args[t]) {\n+          if (!equal(resolvedTypeArgument, args[t])) {\n             if (!changed) {\n               args = args.clone();\n               changed = true;\n@@ -388,9 +395,10 @@ public final class $Gson$Types {\n           }\n         }\n \n-        return changed\n+        toResolve = changed\n             ? newParameterizedTypeWithOwner(newOwnerType, original.getRawType(), args)\n             : original;\n+        break;\n \n       } else if (toResolve instanceof WildcardType) {\n         WildcardType original = (WildcardType) toResolve;\n@@ -400,20 +408,28 @@ public final class $Gson$Types {\n         if (originalLowerBound.length == 1) {\n           Type lowerBound = resolve(context, contextRawType, originalLowerBound[0], visitedTypeVariables);\n           if (lowerBound != originalLowerBound[0]) {\n-            return supertypeOf(lowerBound);\n+            toResolve = supertypeOf(lowerBound);\n+            break;\n           }\n         } else if (originalUpperBound.length == 1) {\n           Type upperBound = resolve(context, contextRawType, originalUpperBound[0], visitedTypeVariables);\n           if (upperBound != originalUpperBound[0]) {\n-            return subtypeOf(upperBound);\n+            toResolve = subtypeOf(upperBound);\n+            break;\n           }\n         }\n-        return original;\n+        toResolve = original;\n+        break;\n \n       } else {\n-        return toResolve;\n+        break;\n       }\n     }\n+    // ensure that any in-process resolution gets updated with the final result\n+    if (resolving != null) {\n+      visitedTypeVariables.put(resolving, toResolve);\n+    }\n+    return toResolve;\n   }\n \n   static Type resolveTypeVariable(Type context, Class<?> contextRawType, TypeVariable<?> unknown) {\n",
       "finalOutput": {
         "status": "completed",
@@ -1210,393 +700,13 @@
         "predSteps": [
           {
             "files": [
-              "gson/src/main/java-templates/com/google/gson/internal/GsonBuildConfig.java",
-              "gson/src/main/java/com.google.gson/module-info.java",
-              "gson/src/main/java/com/google/gson/DefaultDateTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/ExclusionStrategy.java",
-              "gson/src/main/java/com/google/gson/FieldAttributes.java",
-              "gson/src/main/java/com/google/gson/FieldNamingPolicy.java",
-              "gson/src/main/java/com/google/gson/FieldNamingStrategy.java",
-              "gson/src/main/java/com/google/gson/Gson.java",
-              "gson/src/main/java/com/google/gson/GsonBuilder.java",
-              "gson/src/main/java/com/google/gson/InstanceCreator.java",
-              "gson/src/main/java/com/google/gson/JsonArray.java",
-              "gson/src/main/java/com/google/gson/JsonDeserializationContext.java",
-              "gson/src/main/java/com/google/gson/JsonDeserializer.java",
-              "gson/src/main/java/com/google/gson/JsonElement.java",
-              "gson/src/main/java/com/google/gson/JsonIOException.java",
-              "gson/src/main/java/com/google/gson/JsonNull.java",
-              "gson/src/main/java/com/google/gson/JsonObject.java",
-              "gson/src/main/java/com/google/gson/JsonParseException.java",
-              "gson/src/main/java/com/google/gson/JsonParser.java",
-              "gson/src/main/java/com/google/gson/JsonPrimitive.java",
-              "gson/src/main/java/com/google/gson/JsonSerializationContext.java",
-              "gson/src/main/java/com/google/gson/JsonSerializer.java",
-              "gson/src/main/java/com/google/gson/JsonStreamParser.java",
-              "gson/src/main/java/com/google/gson/JsonSyntaxException.java",
-              "gson/src/main/java/com/google/gson/LongSerializationPolicy.java",
-              "gson/src/main/java/com/google/gson/TypeAdapter.java",
-              "gson/src/main/java/com/google/gson/TypeAdapterFactory.java",
-              "gson/src/main/java/com/google/gson/annotations/Expose.java",
-              "gson/src/main/java/com/google/gson/annotations/JsonAdapter.java",
-              "gson/src/main/java/com/google/gson/annotations/SerializedName.java",
-              "gson/src/main/java/com/google/gson/annotations/Since.java",
-              "gson/src/main/java/com/google/gson/annotations/Until.java",
-              "gson/src/main/java/com/google/gson/annotations/package-info.java",
-              "gson/src/main/java/com/google/gson/internal/$Gson$Preconditions.java",
-              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
-              "gson/src/main/java/com/google/gson/internal/ConstructorConstructor.java",
-              "gson/src/main/java/com/google/gson/internal/Excluder.java",
-              "gson/src/main/java/com/google/gson/internal/JavaVersion.java",
-              "gson/src/main/java/com/google/gson/internal/JsonReaderInternalAccess.java",
-              "gson/src/main/java/com/google/gson/internal/LazilyParsedNumber.java",
-              "gson/src/main/java/com/google/gson/internal/LinkedHashTreeMap.java",
-              "gson/src/main/java/com/google/gson/internal/LinkedTreeMap.java",
-              "gson/src/main/java/com/google/gson/internal/ObjectConstructor.java",
-              "gson/src/main/java/com/google/gson/internal/PreJava9DateFormatProvider.java",
-              "gson/src/main/java/com/google/gson/internal/Primitives.java",
-              "gson/src/main/java/com/google/gson/internal/Streams.java",
-              "gson/src/main/java/com/google/gson/internal/UnsafeAllocator.java",
-              "gson/src/main/java/com/google/gson/internal/bind/ArrayTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/CollectionTypeAdapterFactory.java",
-              "gson/src/main/java/com/google/gson/internal/bind/DateTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/JsonAdapterAnnotationTypeAdapterFactory.java",
-              "gson/src/main/java/com/google/gson/internal/bind/JsonTreeReader.java",
-              "gson/src/main/java/com/google/gson/internal/bind/JsonTreeWriter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/MapTypeAdapterFactory.java",
-              "gson/src/main/java/com/google/gson/internal/bind/ObjectTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/ReflectiveTypeAdapterFactory.java",
-              "gson/src/main/java/com/google/gson/internal/bind/SqlDateTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/TimeTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/TreeTypeAdapter.java",
-              "gson/src/main/java/com/google/gson/internal/bind/TypeAdapterRuntimeTypeWrapper.java",
-              "gson/src/main/java/com/google/gson/internal/bind/TypeAdapters.java",
-              "gson/src/main/java/com/google/gson/internal/bind/util/ISO8601Utils.java",
-              "gson/src/main/java/com/google/gson/internal/package-info.java",
-              "gson/src/main/java/com/google/gson/internal/reflect/PreJava9ReflectionAccessor.java",
-              "gson/src/main/java/com/google/gson/internal/reflect/ReflectionAccessor.java",
-              "gson/src/main/java/com/google/gson/internal/reflect/UnsafeReflectionAccessor.java",
-              "gson/src/main/java/com/google/gson/package-info.java",
-              "gson/src/main/java/com/google/gson/reflect/TypeToken.java",
-              "gson/src/main/java/com/google/gson/reflect/package-info.java",
-              "gson/src/main/java/com/google/gson/stream/JsonReader.java",
-              "gson/src/main/java/com/google/gson/stream/JsonScope.java",
-              "gson/src/main/java/com/google/gson/stream/JsonToken.java",
-              "gson/src/main/java/com/google/gson/stream/JsonWriter.java",
-              "gson/src/main/java/com/google/gson/stream/MalformedJsonException.java",
-              "gson/src/test/java/com/google/gson/CommentsTest.java",
-              "gson/src/test/java/com/google/gson/DefaultDateTypeAdapterTest.java",
-              "gson/src/test/java/com/google/gson/DefaultInetAddressTypeAdapterTest.java",
-              "gson/src/test/java/com/google/gson/DefaultMapJsonSerializerTest.java",
-              "gson/src/test/java/com/google/gson/ExposeAnnotationExclusionStrategyTest.java",
-              "gson/src/test/java/com/google/gson/FieldAttributesTest.java",
-              "gson/src/test/java/com/google/gson/GenericArrayTypeTest.java",
-              "gson/src/test/java/com/google/gson/GsonBuilderTest.java",
-              "gson/src/test/java/com/google/gson/GsonTest.java",
-              "gson/src/test/java/com/google/gson/GsonTypeAdapterTest.java",
-              "gson/src/test/java/com/google/gson/InnerClassExclusionStrategyTest.java",
-              "gson/src/test/java/com/google/gson/JavaSerializationTest.java",
-              "gson/src/test/java/com/google/gson/JsonArrayTest.java",
-              "gson/src/test/java/com/google/gson/JsonNullTest.java",
-              "gson/src/test/java/com/google/gson/JsonObjectTest.java",
-              "gson/src/test/java/com/google/gson/JsonParserTest.java",
-              "gson/src/test/java/com/google/gson/JsonPrimitiveTest.java",
-              "gson/src/test/java/com/google/gson/JsonStreamParserTest.java",
-              "gson/src/test/java/com/google/gson/LongSerializationPolicyTest.java",
-              "gson/src/test/java/com/google/gson/MixedStreamTest.java",
-              "gson/src/test/java/com/google/gson/MockExclusionStrategy.java",
-              "gson/src/test/java/com/google/gson/ObjectTypeAdapterTest.java",
-              "gson/src/test/java/com/google/gson/OverrideCoreTypeAdaptersTest.java",
-              "gson/src/test/java/com/google/gson/ParameterizedTypeFixtures.java",
-              "gson/src/test/java/com/google/gson/ParameterizedTypeTest.java",
-              "gson/src/test/java/com/google/gson/PrimitiveTypeAdapter.java",
-              "gson/src/test/java/com/google/gson/VersionExclusionStrategyTest.java",
-              "gson/src/test/java/com/google/gson/common/MoreAsserts.java",
-              "gson/src/test/java/com/google/gson/common/TestTypes.java",
-              "gson/src/test/java/com/google/gson/functional/ArrayTest.java",
-              "gson/src/test/java/com/google/gson/functional/CircularReferenceTest.java",
-              "gson/src/test/java/com/google/gson/functional/CollectionTest.java",
-              "gson/src/test/java/com/google/gson/functional/ConcurrencyTest.java",
-              "gson/src/test/java/com/google/gson/functional/CustomDeserializerTest.java",
-              "gson/src/test/java/com/google/gson/functional/CustomSerializerTest.java",
-              "gson/src/test/java/com/google/gson/functional/CustomTypeAdaptersTest.java",
-              "gson/src/test/java/com/google/gson/functional/DefaultTypeAdaptersTest.java",
-              "gson/src/test/java/com/google/gson/functional/DelegateTypeAdapterTest.java",
-              "gson/src/test/java/com/google/gson/functional/EnumTest.java",
-              "gson/src/test/java/com/google/gson/functional/EscapingTest.java",
-              "gson/src/test/java/com/google/gson/functional/ExclusionStrategyFunctionalTest.java",
-              "gson/src/test/java/com/google/gson/functional/ExposeFieldsTest.java",
-              "gson/src/test/java/com/google/gson/functional/FieldExclusionTest.java",
-              "gson/src/test/java/com/google/gson/functional/FieldNamingTest.java",
-              "gson/src/test/java/com/google/gson/functional/GsonVersionDiagnosticsTest.java",
-              "gson/src/test/java/com/google/gson/functional/InheritanceTest.java",
-              "gson/src/test/java/com/google/gson/functional/InstanceCreatorTest.java",
-              "gson/src/test/java/com/google/gson/functional/InterfaceTest.java",
-              "gson/src/test/java/com/google/gson/functional/InternationalizationTest.java",
-              "gson/src/test/java/com/google/gson/functional/JavaUtilConcurrentAtomicTest.java",
-              "gson/src/test/java/com/google/gson/functional/JavaUtilTest.java",
-              "gson/src/test/java/com/google/gson/functional/JsonAdapterAnnotationOnClassesTest.java",
-              "gson/src/test/java/com/google/gson/functional/JsonAdapterAnnotationOnFieldsTest.java",
-              "gson/src/test/java/com/google/gson/functional/JsonAdapterSerializerDeserializerTest.java",
-              "gson/src/test/java/com/google/gson/functional/JsonArrayTest.java",
-              "gson/src/test/java/com/google/gson/functional/JsonParserTest.java",
-              "gson/src/test/java/com/google/gson/functional/JsonTreeTest.java",
-              "gson/src/test/java/com/google/gson/functional/LeniencyTest.java",
-              "gson/src/test/java/com/google/gson/functional/MapAsArrayTypeAdapterTest.java",
-              "gson/src/test/java/com/google/gson/functional/MapTest.java",
-              "gson/src/test/java/com/google/gson/functional/MoreSpecificTypeSerializationTest.java",
-              "gson/src/test/java/com/google/gson/functional/NamingPolicyTest.java",
-              "gson/src/test/java/com/google/gson/functional/NullObjectAndFieldTest.java",
-              "gson/src/test/java/com/google/gson/functional/ObjectTest.java",
-              "gson/src/test/java/com/google/gson/functional/ParameterizedTypesTest.java",
-              "gson/src/test/java/com/google/gson/functional/PrettyPrintingTest.java",
-              "gson/src/test/java/com/google/gson/functional/PrimitiveCharacterTest.java",
-              "gson/src/test/java/com/google/gson/functional/PrimitiveTest.java",
-              "gson/src/test/java/com/google/gson/functional/PrintFormattingTest.java",
-              "gson/src/test/java/com/google/gson/functional/RawSerializationTest.java",
-              "gson/src/test/java/com/google/gson/functional/ReadersWritersTest.java",
-              "gson/src/test/java/com/google/gson/functional/RuntimeTypeAdapterFactoryFunctionalTest.java",
-              "gson/src/test/java/com/google/gson/functional/SecurityTest.java",
-              "gson/src/test/java/com/google/gson/functional/SerializedNameTest.java",
-              "gson/src/test/java/com/google/gson/functional/StreamingTypeAdaptersTest.java",
-              "gson/src/test/java/com/google/gson/functional/StringTest.java",
-              "gson/src/test/java/com/google/gson/functional/ThrowableFunctionalTest.java",
-              "gson/src/test/java/com/google/gson/functional/TreeTypeAdaptersTest.java",
-              "gson/src/test/java/com/google/gson/functional/TypeAdapterPrecedenceTest.java",
-              "gson/src/test/java/com/google/gson/functional/TypeHierarchyAdapterTest.java",
-              "gson/src/test/java/com/google/gson/functional/TypeVariableTest.java",
-              "gson/src/test/java/com/google/gson/functional/UncategorizedTest.java",
-              "gson/src/test/java/com/google/gson/functional/VersioningTest.java",
-              "gson/src/test/java/com/google/gson/internal/GsonBuildConfigTest.java",
-              "gson/src/test/java/com/google/gson/internal/GsonTypesTest.java",
-              "gson/src/test/java/com/google/gson/internal/JavaVersionTest.java",
-              "gson/src/test/java/com/google/gson/internal/LazilyParsedNumberTest.java",
-              "gson/src/test/java/com/google/gson/internal/LinkedHashTreeMapTest.java",
-              "gson/src/test/java/com/google/gson/internal/LinkedTreeMapTest.java",
-              "gson/src/test/java/com/google/gson/internal/UnsafeAllocatorInstantiationTest.java",
-              "gson/src/test/java/com/google/gson/internal/bind/JsonElementReaderTest.java",
-              "gson/src/test/java/com/google/gson/internal/bind/JsonTreeReaderTest.java",
-              "gson/src/test/java/com/google/gson/internal/bind/JsonTreeWriterTest.java",
-              "gson/src/test/java/com/google/gson/internal/bind/RecursiveTypesResolveTest.java",
-              "gson/src/test/java/com/google/gson/internal/reflect/UnsafeReflectionAccessorTest.java",
-              "gson/src/test/java/com/google/gson/metrics/PerformanceTest.java",
-              "gson/src/test/java/com/google/gson/reflect/TypeTokenTest.java",
-              "gson/src/test/java/com/google/gson/regression/JsonAdapterNullSafeTest.java",
-              "gson/src/test/java/com/google/gson/stream/JsonReaderPathTest.java",
-              "gson/src/test/java/com/google/gson/stream/JsonReaderTest.java",
-              "gson/src/test/java/com/google/gson/stream/JsonWriterTest.java"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "gson/src/test/java/com/google/gson/internal/bind/RecursiveTypesResolveTest.java"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "settings.gradle"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "gson/src/test/java/com/google/gson/functional/TypeVariableTest.java"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "gson/src/test/java/com/google/gson/internal/GsonTypesTest.java"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "gson/src/test/java/com/google/gson/functional/MapAsArrayTypeAdapterTest.java",
-              "gson/src/test/java/com/google/gson/functional/ParameterizedTypesTest.java",
-              "gson/src/test/java/com/google/gson/functional/TreeTypeAdaptersTest.java",
-              "gson/src/test/java/com/google/gson/functional/TypeVariableTest.java",
               "gson/src/test/java/com/google/gson/internal/bind/RecursiveTypesResolveTest.java"
             ],
             "spans": {
-              "gson/src/test/java/com/google/gson/functional/MapAsArrayTypeAdapterTest.java": [
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 108,
-                  "end": 108
-                }
-              ],
-              "gson/src/test/java/com/google/gson/functional/ParameterizedTypesTest.java": [
-                {
-                  "start": 169,
-                  "end": 169
-                },
-                {
-                  "start": 170,
-                  "end": 170
-                },
-                {
-                  "start": 171,
-                  "end": 171
-                },
-                {
-                  "start": 186,
-                  "end": 186
-                },
-                {
-                  "start": 187,
-                  "end": 187
-                },
-                {
-                  "start": 188,
-                  "end": 188
-                },
-                {
-                  "start": 190,
-                  "end": 190
-                },
-                {
-                  "start": 196,
-                  "end": 196
-                },
-                {
-                  "start": 197,
-                  "end": 197
-                },
-                {
-                  "start": 198,
-                  "end": 198
-                },
-                {
-                  "start": 200,
-                  "end": 200
-                },
-                {
-                  "start": 208,
-                  "end": 208
-                },
-                {
-                  "start": 209,
-                  "end": 209
-                },
-                {
-                  "start": 210,
-                  "end": 210
-                },
-                {
-                  "start": 212,
-                  "end": 212
-                },
-                {
-                  "start": 222,
-                  "end": 222
-                },
-                {
-                  "start": 223,
-                  "end": 223
-                },
-                {
-                  "start": 224,
-                  "end": 224
-                },
-                {
-                  "start": 226,
-                  "end": 226
-                },
-                {
-                  "start": 238,
-                  "end": 238
-                },
-                {
-                  "start": 239,
-                  "end": 239
-                },
-                {
-                  "start": 240,
-                  "end": 240
-                },
-                {
-                  "start": 252,
-                  "end": 252
-                },
-                {
-                  "start": 253,
-                  "end": 253
-                },
-                {
-                  "start": 254,
-                  "end": 254
-                },
-                {
-                  "start": 256,
-                  "end": 256
-                },
-                {
-                  "start": 266,
-                  "end": 266
-                },
-                {
-                  "start": 276,
-                  "end": 276
-                },
-                {
-                  "start": 280,
-                  "end": 280
-                }
-              ],
-              "gson/src/test/java/com/google/gson/functional/TypeVariableTest.java": [
-                {
-                  "start": 36,
-                  "end": 36
-                },
-                {
-                  "start": 38,
-                  "end": 38
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 64,
-                  "end": 64
-                }
-              ],
-              "gson/src/test/java/com/google/gson/functional/TreeTypeAdaptersTest.java": [
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 105,
-                  "end": 105
-                }
-              ],
               "gson/src/test/java/com/google/gson/internal/bind/RecursiveTypesResolveTest.java": [
                 {
-                  "start": 102,
-                  "end": 102
-                },
-                {
-                  "start": 107,
-                  "end": 107
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -1604,370 +714,179 @@
           },
           {
             "files": [
+              "build.gradle",
+              "settings.gradle"
+            ],
+            "spans": {
+              "build.gradle": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ],
+              "settings.gradle": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java"
+            ],
+            "spans": {
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java": [
+                {
+                  "start": 320,
+                  "end": 460
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "gson/src/test/java/com/google/gson/functional/TypeVariableTest.java"
+            ],
+            "spans": {
+              "gson/src/test/java/com/google/gson/functional/TypeVariableTest.java": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "gson/src/test/java/com/google/gson/internal/GsonTypesTest.java"
+            ],
+            "spans": {
+              "gson/src/test/java/com/google/gson/internal/GsonTypesTest.java": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "gradle.properties",
               "gson/build.gradle"
             ],
-            "spans": {},
+            "spans": {
+              "gradle.properties": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ],
+              "gson/build.gradle": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java"
+            ],
+            "spans": {
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java": [
+                {
+                  "start": 120,
+                  "end": 230
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java"
+            ],
+            "spans": {
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java": [
+                {
+                  "start": 1,
+                  "end": 80
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java"
+            ],
+            "spans": {
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java": [
+                {
+                  "start": 336,
+                  "end": 430
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java"
             ],
-            "spans": {},
+            "spans": {
+              "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java"
+            ],
+            "spans": {
+              "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java": [
+                {
+                  "start": 1,
+                  "end": 52
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java"
+            ],
+            "spans": {
+              "gson/src/main/java/com/google/gson/internal/$Gson$Types.java": [
+                {
+                  "start": 428,
+                  "end": 436
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "gson/build.gradle",
-          "gson/src/main/java-templates/com/google/gson/internal/GsonBuildConfig.java",
-          "gson/src/main/java/com.google.gson/module-info.java",
-          "gson/src/main/java/com/google/gson/DefaultDateTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/ExclusionStrategy.java",
-          "gson/src/main/java/com/google/gson/FieldAttributes.java",
-          "gson/src/main/java/com/google/gson/FieldNamingPolicy.java",
-          "gson/src/main/java/com/google/gson/FieldNamingStrategy.java",
-          "gson/src/main/java/com/google/gson/Gson.java",
-          "gson/src/main/java/com/google/gson/GsonBuilder.java",
-          "gson/src/main/java/com/google/gson/InstanceCreator.java",
-          "gson/src/main/java/com/google/gson/JsonArray.java",
-          "gson/src/main/java/com/google/gson/JsonDeserializationContext.java",
-          "gson/src/main/java/com/google/gson/JsonDeserializer.java",
-          "gson/src/main/java/com/google/gson/JsonElement.java",
-          "gson/src/main/java/com/google/gson/JsonIOException.java",
-          "gson/src/main/java/com/google/gson/JsonNull.java",
-          "gson/src/main/java/com/google/gson/JsonObject.java",
-          "gson/src/main/java/com/google/gson/JsonParseException.java",
-          "gson/src/main/java/com/google/gson/JsonParser.java",
-          "gson/src/main/java/com/google/gson/JsonPrimitive.java",
-          "gson/src/main/java/com/google/gson/JsonSerializationContext.java",
-          "gson/src/main/java/com/google/gson/JsonSerializer.java",
-          "gson/src/main/java/com/google/gson/JsonStreamParser.java",
-          "gson/src/main/java/com/google/gson/JsonSyntaxException.java",
-          "gson/src/main/java/com/google/gson/LongSerializationPolicy.java",
-          "gson/src/main/java/com/google/gson/TypeAdapter.java",
-          "gson/src/main/java/com/google/gson/TypeAdapterFactory.java",
-          "gson/src/main/java/com/google/gson/annotations/Expose.java",
-          "gson/src/main/java/com/google/gson/annotations/JsonAdapter.java",
-          "gson/src/main/java/com/google/gson/annotations/SerializedName.java",
-          "gson/src/main/java/com/google/gson/annotations/Since.java",
-          "gson/src/main/java/com/google/gson/annotations/Until.java",
-          "gson/src/main/java/com/google/gson/annotations/package-info.java",
-          "gson/src/main/java/com/google/gson/internal/$Gson$Preconditions.java",
           "gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
-          "gson/src/main/java/com/google/gson/internal/ConstructorConstructor.java",
-          "gson/src/main/java/com/google/gson/internal/Excluder.java",
-          "gson/src/main/java/com/google/gson/internal/JavaVersion.java",
-          "gson/src/main/java/com/google/gson/internal/JsonReaderInternalAccess.java",
-          "gson/src/main/java/com/google/gson/internal/LazilyParsedNumber.java",
-          "gson/src/main/java/com/google/gson/internal/LinkedHashTreeMap.java",
-          "gson/src/main/java/com/google/gson/internal/LinkedTreeMap.java",
-          "gson/src/main/java/com/google/gson/internal/ObjectConstructor.java",
-          "gson/src/main/java/com/google/gson/internal/PreJava9DateFormatProvider.java",
-          "gson/src/main/java/com/google/gson/internal/Primitives.java",
-          "gson/src/main/java/com/google/gson/internal/Streams.java",
-          "gson/src/main/java/com/google/gson/internal/UnsafeAllocator.java",
-          "gson/src/main/java/com/google/gson/internal/bind/ArrayTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/CollectionTypeAdapterFactory.java",
-          "gson/src/main/java/com/google/gson/internal/bind/DateTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/JsonAdapterAnnotationTypeAdapterFactory.java",
-          "gson/src/main/java/com/google/gson/internal/bind/JsonTreeReader.java",
-          "gson/src/main/java/com/google/gson/internal/bind/JsonTreeWriter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/MapTypeAdapterFactory.java",
-          "gson/src/main/java/com/google/gson/internal/bind/ObjectTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/ReflectiveTypeAdapterFactory.java",
-          "gson/src/main/java/com/google/gson/internal/bind/SqlDateTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/TimeTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/TreeTypeAdapter.java",
-          "gson/src/main/java/com/google/gson/internal/bind/TypeAdapterRuntimeTypeWrapper.java",
-          "gson/src/main/java/com/google/gson/internal/bind/TypeAdapters.java",
-          "gson/src/main/java/com/google/gson/internal/bind/util/ISO8601Utils.java",
-          "gson/src/main/java/com/google/gson/internal/package-info.java",
-          "gson/src/main/java/com/google/gson/internal/reflect/PreJava9ReflectionAccessor.java",
-          "gson/src/main/java/com/google/gson/internal/reflect/ReflectionAccessor.java",
-          "gson/src/main/java/com/google/gson/internal/reflect/UnsafeReflectionAccessor.java",
-          "gson/src/main/java/com/google/gson/package-info.java",
-          "gson/src/main/java/com/google/gson/reflect/TypeToken.java",
-          "gson/src/main/java/com/google/gson/reflect/package-info.java",
-          "gson/src/main/java/com/google/gson/stream/JsonReader.java",
-          "gson/src/main/java/com/google/gson/stream/JsonScope.java",
-          "gson/src/main/java/com/google/gson/stream/JsonToken.java",
-          "gson/src/main/java/com/google/gson/stream/JsonWriter.java",
-          "gson/src/main/java/com/google/gson/stream/MalformedJsonException.java",
-          "gson/src/test/java/com/google/gson/CommentsTest.java",
-          "gson/src/test/java/com/google/gson/DefaultDateTypeAdapterTest.java",
-          "gson/src/test/java/com/google/gson/DefaultInetAddressTypeAdapterTest.java",
-          "gson/src/test/java/com/google/gson/DefaultMapJsonSerializerTest.java",
-          "gson/src/test/java/com/google/gson/ExposeAnnotationExclusionStrategyTest.java",
-          "gson/src/test/java/com/google/gson/FieldAttributesTest.java",
-          "gson/src/test/java/com/google/gson/GenericArrayTypeTest.java",
-          "gson/src/test/java/com/google/gson/GsonBuilderTest.java",
-          "gson/src/test/java/com/google/gson/GsonTest.java",
-          "gson/src/test/java/com/google/gson/GsonTypeAdapterTest.java",
-          "gson/src/test/java/com/google/gson/InnerClassExclusionStrategyTest.java",
-          "gson/src/test/java/com/google/gson/JavaSerializationTest.java",
-          "gson/src/test/java/com/google/gson/JsonArrayTest.java",
-          "gson/src/test/java/com/google/gson/JsonNullTest.java",
-          "gson/src/test/java/com/google/gson/JsonObjectTest.java",
-          "gson/src/test/java/com/google/gson/JsonParserTest.java",
-          "gson/src/test/java/com/google/gson/JsonPrimitiveTest.java",
-          "gson/src/test/java/com/google/gson/JsonStreamParserTest.java",
-          "gson/src/test/java/com/google/gson/LongSerializationPolicyTest.java",
-          "gson/src/test/java/com/google/gson/MixedStreamTest.java",
-          "gson/src/test/java/com/google/gson/MockExclusionStrategy.java",
-          "gson/src/test/java/com/google/gson/ObjectTypeAdapterTest.java",
-          "gson/src/test/java/com/google/gson/OverrideCoreTypeAdaptersTest.java",
-          "gson/src/test/java/com/google/gson/ParameterizedTypeFixtures.java",
-          "gson/src/test/java/com/google/gson/ParameterizedTypeTest.java",
-          "gson/src/test/java/com/google/gson/PrimitiveTypeAdapter.java",
-          "gson/src/test/java/com/google/gson/VersionExclusionStrategyTest.java",
-          "gson/src/test/java/com/google/gson/common/MoreAsserts.java",
-          "gson/src/test/java/com/google/gson/common/TestTypes.java",
-          "gson/src/test/java/com/google/gson/functional/ArrayTest.java",
-          "gson/src/test/java/com/google/gson/functional/CircularReferenceTest.java",
-          "gson/src/test/java/com/google/gson/functional/CollectionTest.java",
-          "gson/src/test/java/com/google/gson/functional/ConcurrencyTest.java",
-          "gson/src/test/java/com/google/gson/functional/CustomDeserializerTest.java",
-          "gson/src/test/java/com/google/gson/functional/CustomSerializerTest.java",
-          "gson/src/test/java/com/google/gson/functional/CustomTypeAdaptersTest.java",
-          "gson/src/test/java/com/google/gson/functional/DefaultTypeAdaptersTest.java",
-          "gson/src/test/java/com/google/gson/functional/DelegateTypeAdapterTest.java",
-          "gson/src/test/java/com/google/gson/functional/EnumTest.java",
-          "gson/src/test/java/com/google/gson/functional/EscapingTest.java",
-          "gson/src/test/java/com/google/gson/functional/ExclusionStrategyFunctionalTest.java",
-          "gson/src/test/java/com/google/gson/functional/ExposeFieldsTest.java",
-          "gson/src/test/java/com/google/gson/functional/FieldExclusionTest.java",
-          "gson/src/test/java/com/google/gson/functional/FieldNamingTest.java",
-          "gson/src/test/java/com/google/gson/functional/GsonVersionDiagnosticsTest.java",
-          "gson/src/test/java/com/google/gson/functional/InheritanceTest.java",
-          "gson/src/test/java/com/google/gson/functional/InstanceCreatorTest.java",
-          "gson/src/test/java/com/google/gson/functional/InterfaceTest.java",
-          "gson/src/test/java/com/google/gson/functional/InternationalizationTest.java",
-          "gson/src/test/java/com/google/gson/functional/JavaUtilConcurrentAtomicTest.java",
-          "gson/src/test/java/com/google/gson/functional/JavaUtilTest.java",
-          "gson/src/test/java/com/google/gson/functional/JsonAdapterAnnotationOnClassesTest.java",
-          "gson/src/test/java/com/google/gson/functional/JsonAdapterAnnotationOnFieldsTest.java",
-          "gson/src/test/java/com/google/gson/functional/JsonAdapterSerializerDeserializerTest.java",
-          "gson/src/test/java/com/google/gson/functional/JsonArrayTest.java",
-          "gson/src/test/java/com/google/gson/functional/JsonParserTest.java",
-          "gson/src/test/java/com/google/gson/functional/JsonTreeTest.java",
-          "gson/src/test/java/com/google/gson/functional/LeniencyTest.java",
-          "gson/src/test/java/com/google/gson/functional/MapAsArrayTypeAdapterTest.java",
-          "gson/src/test/java/com/google/gson/functional/MapTest.java",
-          "gson/src/test/java/com/google/gson/functional/MoreSpecificTypeSerializationTest.java",
-          "gson/src/test/java/com/google/gson/functional/NamingPolicyTest.java",
-          "gson/src/test/java/com/google/gson/functional/NullObjectAndFieldTest.java",
-          "gson/src/test/java/com/google/gson/functional/ObjectTest.java",
-          "gson/src/test/java/com/google/gson/functional/ParameterizedTypesTest.java",
-          "gson/src/test/java/com/google/gson/functional/PrettyPrintingTest.java",
-          "gson/src/test/java/com/google/gson/functional/PrimitiveCharacterTest.java",
-          "gson/src/test/java/com/google/gson/functional/PrimitiveTest.java",
-          "gson/src/test/java/com/google/gson/functional/PrintFormattingTest.java",
-          "gson/src/test/java/com/google/gson/functional/RawSerializationTest.java",
-          "gson/src/test/java/com/google/gson/functional/ReadersWritersTest.java",
           "gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java",
-          "gson/src/test/java/com/google/gson/functional/RuntimeTypeAdapterFactoryFunctionalTest.java",
-          "gson/src/test/java/com/google/gson/functional/SecurityTest.java",
-          "gson/src/test/java/com/google/gson/functional/SerializedNameTest.java",
-          "gson/src/test/java/com/google/gson/functional/StreamingTypeAdaptersTest.java",
-          "gson/src/test/java/com/google/gson/functional/StringTest.java",
-          "gson/src/test/java/com/google/gson/functional/ThrowableFunctionalTest.java",
-          "gson/src/test/java/com/google/gson/functional/TreeTypeAdaptersTest.java",
-          "gson/src/test/java/com/google/gson/functional/TypeAdapterPrecedenceTest.java",
-          "gson/src/test/java/com/google/gson/functional/TypeHierarchyAdapterTest.java",
-          "gson/src/test/java/com/google/gson/functional/TypeVariableTest.java",
-          "gson/src/test/java/com/google/gson/functional/UncategorizedTest.java",
-          "gson/src/test/java/com/google/gson/functional/VersioningTest.java",
-          "gson/src/test/java/com/google/gson/internal/GsonBuildConfigTest.java",
-          "gson/src/test/java/com/google/gson/internal/GsonTypesTest.java",
-          "gson/src/test/java/com/google/gson/internal/JavaVersionTest.java",
-          "gson/src/test/java/com/google/gson/internal/LazilyParsedNumberTest.java",
-          "gson/src/test/java/com/google/gson/internal/LinkedHashTreeMapTest.java",
-          "gson/src/test/java/com/google/gson/internal/LinkedTreeMapTest.java",
-          "gson/src/test/java/com/google/gson/internal/UnsafeAllocatorInstantiationTest.java",
-          "gson/src/test/java/com/google/gson/internal/bind/JsonElementReaderTest.java",
-          "gson/src/test/java/com/google/gson/internal/bind/JsonTreeReaderTest.java",
-          "gson/src/test/java/com/google/gson/internal/bind/JsonTreeWriterTest.java",
-          "gson/src/test/java/com/google/gson/internal/bind/RecursiveTypesResolveTest.java",
-          "gson/src/test/java/com/google/gson/internal/reflect/UnsafeReflectionAccessorTest.java",
-          "gson/src/test/java/com/google/gson/metrics/PerformanceTest.java",
-          "gson/src/test/java/com/google/gson/reflect/TypeTokenTest.java",
-          "gson/src/test/java/com/google/gson/regression/JsonAdapterNullSafeTest.java",
-          "gson/src/test/java/com/google/gson/stream/JsonReaderPathTest.java",
-          "gson/src/test/java/com/google/gson/stream/JsonReaderTest.java",
-          "gson/src/test/java/com/google/gson/stream/JsonWriterTest.java",
-          "settings.gradle"
+          "gson/src/test/java/com/google/gson/internal/bind/RecursiveTypesResolveTest.java"
         ],
         "predSpans": {
-          "gson/src/test/java/com/google/gson/functional/MapAsArrayTypeAdapterTest.java": [
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 108,
-              "end": 108
-            }
-          ],
-          "gson/src/test/java/com/google/gson/functional/ParameterizedTypesTest.java": [
-            {
-              "start": 169,
-              "end": 169
-            },
-            {
-              "start": 170,
-              "end": 170
-            },
-            {
-              "start": 171,
-              "end": 171
-            },
-            {
-              "start": 186,
-              "end": 186
-            },
-            {
-              "start": 187,
-              "end": 187
-            },
-            {
-              "start": 188,
-              "end": 188
-            },
-            {
-              "start": 190,
-              "end": 190
-            },
-            {
-              "start": 196,
-              "end": 196
-            },
-            {
-              "start": 197,
-              "end": 197
-            },
-            {
-              "start": 198,
-              "end": 198
-            },
-            {
-              "start": 200,
-              "end": 200
-            },
-            {
-              "start": 208,
-              "end": 208
-            },
-            {
-              "start": 209,
-              "end": 209
-            },
-            {
-              "start": 210,
-              "end": 210
-            },
-            {
-              "start": 212,
-              "end": 212
-            },
-            {
-              "start": 222,
-              "end": 222
-            },
-            {
-              "start": 223,
-              "end": 223
-            },
-            {
-              "start": 224,
-              "end": 224
-            },
-            {
-              "start": 226,
-              "end": 226
-            },
-            {
-              "start": 238,
-              "end": 238
-            },
-            {
-              "start": 239,
-              "end": 239
-            },
-            {
-              "start": 240,
-              "end": 240
-            },
-            {
-              "start": 252,
-              "end": 252
-            },
-            {
-              "start": 253,
-              "end": 253
-            },
-            {
-              "start": 254,
-              "end": 254
-            },
-            {
-              "start": 256,
-              "end": 256
-            },
-            {
-              "start": 266,
-              "end": 266
-            },
-            {
-              "start": 276,
-              "end": 276
-            },
-            {
-              "start": 280,
-              "end": 280
-            }
-          ],
-          "gson/src/test/java/com/google/gson/functional/TypeVariableTest.java": [
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 38,
-              "end": 38
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 64,
-              "end": 64
-            }
-          ],
-          "gson/src/test/java/com/google/gson/functional/TreeTypeAdaptersTest.java": [
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 105,
-              "end": 105
-            }
-          ],
-          "gson/src/test/java/com/google/gson/internal/bind/RecursiveTypesResolveTest.java": [
-            {
-              "start": 1,
-              "end": 109
-            },
-            {
-              "start": 102,
-              "end": 102
-            },
-            {
-              "start": 107,
-              "end": 107
-            }
-          ],
           "gson/src/main/java/com/google/gson/internal/$Gson$Types.java": [
             {
               "start": 336,
@@ -1978,6 +897,12 @@
             {
               "start": 1,
               "end": 52
+            }
+          ],
+          "gson/src/test/java/com/google/gson/internal/bind/RecursiveTypesResolveTest.java": [
+            {
+              "start": 1,
+              "end": 109
             }
           ]
         },
@@ -1995,141 +920,123 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.3888888888888889,
+              "span": 0.1720923350103581,
+              "line": 0.20318021201413428
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.3888888888888889,
+              "span": 0.1720923350103581,
+              "line": 0.20318021201413428
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.5833333333333334,
+              "span": 0.43306698234191576,
+              "line": 0.4363957597173145
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.5833333333333334,
+              "span": 0.43306698234191576,
+              "line": 0.4363957597173145
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.5833333333333334,
+              "span": 0.43306698234191576,
+              "line": 0.4363957597173145
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.5833333333333334,
+              "span": 0.43306698234191576,
+              "line": 0.4363957597173145
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.75,
+              "span": 0.6162079510703364,
+              "line": 0.6325088339222615
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.8611111111111112,
+              "span": 0.7526388477853408,
+              "line": 0.773851590106007
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.8611111111111112,
+              "span": 0.7526388477853408,
+              "line": 0.773851590106007
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.8611111111111112,
+              "span": 0.7526388477853408,
+              "line": 0.773851590106007
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.8611111111111112,
+              "span": 0.7526388477853408,
+              "line": 0.773851590106007
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.08333333333333333,
-              "span": 0.0069547203314590115,
-              "line": 0.0035335689045936395
-            }
-          },
-          {
-            "step": 13,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.08333333333333333,
-              "span": 0.0069547203314590115,
-              "line": 0.0035335689045936395
-            }
-          },
-          {
-            "step": 14,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.08333333333333333,
-              "span": 0.0069547203314590115,
-              "line": 0.0035335689045936395
+              "symbol": 0.8611111111111112,
+              "span": 0.7526388477853408,
+              "line": 0.773851590106007
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.6428571428571429,
-          "symbol": 0.017857142857142856,
-          "span": 0.0014902972138840739,
-          "line": 0.0007571933366986369
+          "file": 0.9166666666666666,
+          "symbol": 0.6805555555555557,
+          "span": 0.5379878991154516,
+          "line": 0.5544758539458186
         },
         "redundancy": {
-          "file": 0.048387096774193505,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.3571428571428571,
+          "symbol": 0.13235294117647056,
+          "span": 0.16358602110304576,
+          "line": 0.05664488017429192
         }
       },
       "fixOverlap": {
@@ -2148,35 +1055,35 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,200p' <contextbench-root>/.cache/agent-runtimes/codex/1596b6f86af266864bed/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,200p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/1596b6f86af266864bed/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/1596b6f86af266864bed/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/1596b6f86af266864bed/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/1596b6f86af266864bed/home/.agents/skills/superpowers/systematic-debugging/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: systematic-debugging\ndescription: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes\n---\n\n# Systematic Debugging\n\n## Overview\n\nRandom fixes waste time and create new bugs. Quick patches mask underlying issues.\n\n**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.\n\n**Violating the letter of this process is violating the spirit of debugging.**\n\n## The Iron Law\n\n```\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST\n```\n\nIf you haven't completed Phase 1, you cannot propose fixes.\n\n## When to Use\n\nUse for ANY technical issue:\n- Test failures\n- Bugs in production\n- Unexpected behavior\n- Performance problems\n- Build failures\n- Integration issues\n\n**Use this ESPECIALLY when:**\n- Under time pressure (emergencies make guessing tempting)\n- \"Just one quick fix\" seems obvious\n- You've already tried multiple fixes\n- Previous fix didn't work\n- You don't fully understand the issue\n\n**Don't skip when:**\n- Issue seems simple (simple bugs have root causes too)\n- You're in a hurry (rushing guarantees rework)\n- Manager wants it fixed NOW (systematic is faster than thrashing)\n\n## The Four Phases\n\nYou MUST complete each phase before proceeding to the next.\n\n### Phase 1: Root Cause Investigation\n\n**BEFORE attempting ANY fix:**\n\n1. **Read Error Messages Carefully**\n   - Don't skip past errors or warnings\n   - They often contain the exact solution\n   - Read stack traces completely\n   - Note line numbers, file paths, error codes\n\n2. **Reproduce Consistently**\n   - Can you trigger it reliably?\n   - What are the exact steps?\n   - Does it happen every time?\n   - If not reproducible \u2192 gather more data, don't guess\n\n3. **Check Recent Changes**\n   - What changed that could cause this?\n   - Git diff, recent commits\n   - New dependencies, config changes\n   - Environmental differences\n\n4. **Gather Evidence in Multi-Component Systems**\n\n   **WHEN system has multiple components (CI \u2192 build \u2192 signing, API \u2192 service \u2192 database):**\n\n   **BEFORE proposing fixes, add diagnostic instrumentation:**\n   ```\n   For EACH component boundary:\n     - Log what data enters component\n     - Log what data exits component\n     - Verify environment/config propagation\n     - Check state at each layer\n\n   Run once to gather evidence showing WHERE it breaks\n   THEN analyze evidence to identify failing component\n   THEN investigate that specific component\n   ```\n\n   **Example (multi-layer system):**\n   ```bash\n   # Layer 1: Workflow\n   echo \"=== Secrets available in workflow: ===\"\n   echo \"IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}\"\n\n   # Layer 2: Build script\n   echo \"=== Env vars in build script: ===\"\n   env | grep IDENTITY || echo \"IDENTITY not in environment\"\n\n   # Layer 3: Signing script\n   echo \"=== Keychain state: ===\"\n   security list-keychains\n   security find-identity -v\n\n   # Layer 4: Actual signing\n   codesign --sign \"$IDENTITY\" --verbose=4 \"$APP\"\n   ```\n\n   **This reveals:** Which layer fails (secrets \u2192 workflow \u2713, workflow \u2192 build \u2717)\n\n5. **Trace Data Flow**\n\n   **WHEN error is deep in call stack:**\n\n   See `root-cause-tracing.md` in this directory for the complete backward tracing technique.\n\n   **Quick version:**\n   - Where does bad value originate?\n   - What called this with bad value?\n   - Keep tracing up until you find the source\n   - Fix at source, not at symptom\n\n### Phase 2: Pattern Analysis\n\n**Find the pattern before fixing:**\n\n1. **Find Working Examples**\n   - Locate similar working code in same codebase\n   - What works that's similar to what's broken?\n\n2. **Compare Against References**\n   - If implementing pattern, read reference implementation COMPLETELY\n   - Don't skim - read every line\n   - Understand the pattern fully before applying\n\n3. **Identify Differences**\n   - What's different between working and broken?\n   - List every difference, however small\n   - Don't assume \"that can't matter\"\n\n4. **Understand Dependencies**\n   - What other components does this need?\n   - \u2026",
           "exitCode": 0
         },
@@ -2253,7 +1160,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java",
+                "kind": "add"
+              }
+            ],
+            "path": "<worktree>/gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java",
+            "kind": "add"
+          }
         },
         {
           "kind": "command_execution",
@@ -2313,7 +1229,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/gson/src/main/java/com/google/gson/internal/$Gson$Types.java",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2339,7 +1264,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/gson/src/test/java/com/google/gson/functional/ReusedTypeVariablesFullyResolveTest.java",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

@@ -14,9 +14,30 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [
+          "test/runtime/samples/component-slot-svg-namespace/Icon.svelte",
+          "test/runtime/samples/component-slot-svg-namespace/_config.js",
+          "test/runtime/samples/component-slot-svg-namespace/main.svelte"
+        ],
+        "missingTrajectoryPaths": [
+          "test/runtime/samples/component-slot-svg-namespace/_config.js"
+        ],
+        "missingFinalPathCount": 3,
+        "missingTrajectoryPathCount": 1
+      },
       "startedAt": "2026-05-11T15:50:25Z",
       "completedAt": "2026-05-11T16:05:50Z",
       "durationMs": 925081,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 4071192,
@@ -25,6 +46,28 @@
         "total_tokens": 4109166,
         "cache_read_input_tokens": 3750912
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 72,
+        "readToolCalls": 0,
+        "editToolCalls": 8
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/compiler/compile/nodes/Element.ts b/src/compiler/compile/nodes/Element.ts\nindex 62bc62059..ee8b5294c 100644\n--- a/src/compiler/compile/nodes/Element.ts\n+++ b/src/compiler/compile/nodes/Element.ts\n@@ -79,6 +79,12 @@ function get_namespace(parent: Element, element: Element, explicit_namespace: st\n \tconst parent_element = parent.find_nearest(/^Element/);\n \n \tif (!parent_element) {\n+\t\tif (!explicit_namespace && parent.find_nearest(/^InlineComponent/)) {\n+\t\t\treturn svg.test(element.name)\n+\t\t\t\t? namespaces.svg\n+\t\t\t\t: namespaces.inherit;\n+\t\t}\n+\n \t\treturn explicit_namespace || (svg.test(element.name)\n \t\t\t? namespaces.svg\n \t\t\t: null);\ndiff --git a/src/compiler/compile/render_dom/Block.ts b/src/compiler/compile/render_dom/Block.ts\nindex 59beae1a3..9f8caccd9 100644\n--- a/src/compiler/compile/render_dom/Block.ts\n+++ b/src/compiler/compile/render_dom/Block.ts\n@@ -60,6 +60,7 @@ export default class Block {\n \n \thas_update_method = false;\n \tautofocus: string;\n+\thas_inherit_namespace: boolean;\n \n \tconstructor(options: BlockOptions) {\n \t\tthis.parent = options.parent;\n@@ -102,6 +103,7 @@ export default class Block {\n \n \t\tthis.aliases = new Map().set('ctx', this.get_unique_name('ctx'));\n \t\tif (this.key) this.aliases.set('key', this.get_unique_name('key'));\n+\t\tthis.has_inherit_namespace = false;\n \t}\n \n \tassign_variable_names() {\n@@ -410,7 +412,7 @@ export default class Block {\n \n \t\treturn deindent`\n \t\t\t${this.comment && `// ${escape(this.comment, { only_escape_at_symbol: true })}`}\n-\t\t\tfunction ${this.name}(${this.key ? `${local_key}, ` : ''}ctx) {\n+\t\t\tfunction ${this.name}(${this.key ? `${local_key}, ` : ''}ctx${this.has_inherit_namespace ? `, ${this.alias('namespace')}` : ''}) {\n \t\t\t\t${this.get_contents(local_key)}\n \t\t\t}\n \t\t`;\ndiff --git a/src/compiler/compile/render_dom/wrappers/Element/index.ts b/src/compiler/compile/render_dom/wrappers/Element/index.ts\nindex 7480c31cc..83e20dfd9 100644\n--- a/src/compiler/compile/render_dom/wrappers/Element/index.ts\n+++ b/src/compiler/compile/render_dom/wrappers/Element/index.ts\n@@ -168,6 +168,7 @@ export default class ElementWrapper extends Wrapper {\n \t\t\t\t\t\t\tscope: this.node.scope,\n \t\t\t\t\t\t\tfn\n \t\t\t\t\t\t});\n+\t\t\t\t\t\tchild_block.has_inherit_namespace = true;\n \t\t\t\t\t\tthis.renderer.blocks.push(child_block);\n \t\t\t\t\t}\n \n@@ -375,6 +376,10 @@ export default class ElementWrapper extends Wrapper {\n \tget_render_statement() {\n \t\tconst { name, namespace } = this.node;\n \n+\t\tif (namespace === namespaces.inherit) {\n+\t\t\treturn `@element(\"${name}\", #namespace)`;\n+\t\t}\n+\n \t\tif (namespace === 'http://www.w3.org/2000/svg') {\n \t\t\treturn `@svg_element(\"${name}\")`;\n \t\t}\n@@ -392,13 +397,21 @@ export default class ElementWrapper extends Wrapper {\n \t\t\t.map((attr) => `${quote_name_if_necessary(attr.name)}: true`)\n \t\t\t.join(', ');\n \n-\t\tconst name = this.node.namespace\n-\t\t\t? this.node.name\n-\t\t\t: this.node.name.toUpperCase();\n+\t\tconst name = this.node.namespace === namespaces.inherit\n+\t\t\t? `#namespace ? \"${this.node.name}\" : \"${this.node.name.toUpperCase()}\"`\n+\t\t\t: this.node.namespace\n+\t\t\t\t? `\"${this.node.name}\"`\n+\t\t\t\t: `\"${this.node.name.toUpperCase()}\"`;\n+\n+\t\tconst namespace = this.node.namespace === namespaces.inherit\n+\t\t\t? '#namespace'\n+\t\t\t: this.node.namespace\n+\t\t\t\t? `\"${this.node.namespace}\"`\n+\t\t\t\t: 'null';\n \n-\t\treturn `@claim_element(${nodes}, \"${name}\", ${attributes\n+\t\treturn `@claim_element(${nodes}, ${name}, ${attributes\n \t\t\t? `{ ${attributes} }`\n-\t\t\t: `{}`}, ${this.node.namespace === namespaces.svg ? true : false})`;\n+\t\t\t: `{}`}, ${namespace})`;\n \t}\n \n \tadd_bindings(block: Block) {\ndiff --git a/src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts b/src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts\nindex fb3a4186d..af952df46 100644\n--- a/src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts\n+++ b/src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts\n@@ -4,6 +4,7 @@ import Block from '../../Block';\n import InlineComponent from '../../../nodes/InlineComponent';\n import FragmentWrapper from '../Fragment';\n import { quote_name_if_necessary, quote_prop_if_necessary, sanitize } from '../../../../utils/names';\n+import { namespaces } from '../../../../utils/namespaces';\n import { stringify_props } from '../../../utils/stringify_props';\n import add_to_set from '../../../utils/add_to_set';\n import deindent from '../../../utils/deindent';\n@@ -82,6 +83,7 @@ export default class InlineComponentWrapper extends Wrapper {\n \t\t\t\tscope: this.node.scope,\n \t\t\t\tfn\n \t\t\t});\n+\t\t\tdefault_slot.has_inherit_namespace = true;\n \t\t\tthis.fragment = new FragmentWrapper(renderer, default_slot, node.children, this, strip_whitespace, next_sibling);\n \n \t\t\tconst dependencies: Set<string> = new Set();\n@@ -120,9 +122,10 @@ export default class InlineComponentWrapper extends Wrapper {\n \t\tconst uses_spread = !!this.node.attributes.find(a => a.is_spread);\n \n \t\tconst slot_props = Array.from(this.slots).map(([name, slot]) => `${quote_name_if_necessary(name)}: [${slot.block.name}${slot.fn ? `, ${slot.fn}` : ''}]`);\n+\t\tconst slot_namespace = this.get_slot_namespace(block);\n \n \t\tconst initial_props = slot_props.length > 0\n-\t\t\t? [`$$slots: ${stringify_props(slot_props)}`, `$$scope: { ctx }`]\n+\t\t\t? [`$$slots: ${stringify_props(slot_props)}`, `$$scope: { ctx, namespace: ${slot_namespace} }`]\n \t\t\t: [];\n \n \t\tconst attribute_object = uses_spread\n@@ -242,7 +245,7 @@ export default class InlineComponentWrapper extends Wrapper {\n \t\t}\n \n \t\tif (non_let_dependencies.length > 0) {\n-\t\t\tupdates.push(`if (${non_let_dependencies.map(n => `changed.${n}`).join(' || ')}) ${name_changes}.$$scope = { changed, ctx };`);\n+\t\t\tupdates.push(`if (${non_let_dependencies.map(n => `changed.${n}`).join(' || ')}) ${name_changes}.$$scope = { changed, ctx, namespace: ${slot_namespace} };`);\n \t\t}\n \n \t\tconst munged_bindings = this.node.bindings.map(binding => {\n@@ -473,4 +476,16 @@ export default class InlineComponentWrapper extends Wrapper {\n \t\t\t);\n \t\t}\n \t}\n+\n+\tget_slot_namespace(block: Block) {\n+\t\tconst parent_element = this.node.find_nearest(/^Element/);\n+\t\tconst namespace = parent_element\n+\t\t\t? parent_element.namespace\n+\t\t\t: this.renderer.component.namespace;\n+\n+\t\tif (namespace === namespaces.inherit) return '#namespace';\n+\t\tif (namespace) return `\"${namespace}\"`;\n+\t\tif (block.has_inherit_namespace) return '#namespace';\n+\t\treturn '(ctx.$$scope && ctx.$$scope.namespace) || null';\n+\t}\n }\ndiff --git a/src/compiler/compile/render_dom/wrappers/Slot.ts b/src/compiler/compile/render_dom/wrappers/Slot.ts\nindex 3585d2735..4743e5ec7 100644\n--- a/src/compiler/compile/render_dom/wrappers/Slot.ts\n+++ b/src/compiler/compile/render_dom/wrappers/Slot.ts\n@@ -5,6 +5,7 @@ import Slot from '../../nodes/Slot';\n import FragmentWrapper from './Fragment';\n import deindent from '../../utils/deindent';\n import { sanitize, quote_prop_if_necessary } from '../../../utils/names';\n+import { namespaces } from '../../../utils/namespaces';\n import add_to_set from '../../utils/add_to_set';\n import get_slot_data from '../../utils/get_slot_data';\n import { stringify_props } from '../../utils/stringify_props';\n@@ -57,6 +58,7 @@ export default class SlotWrapper extends Wrapper {\n \t\tconst { renderer } = this;\n \n \t\tconst { slot_name } = this.node;\n+\t\tconst slot_namespace = this.get_slot_namespace(block);\n \n \t\tlet get_slot_changes;\n \t\tlet get_slot_context;\n@@ -110,7 +112,7 @@ export default class SlotWrapper extends Wrapper {\n \n \t\tblock.builders.init.add_block(deindent`\n \t\t\tconst ${slot_definition} = ctx.$$slots${quote_prop_if_necessary(slot_name)};\n-\t\t\tconst ${slot} = @create_slot(${slot_definition}, ctx, ${get_slot_context});\n+\t\t\tconst ${slot} = @create_slot(${slot_definition}, ctx, ${get_slot_context}, ${slot_namespace});\n \t\t`);\n \n \t\tconst mount_before = block.builders.mount.toString();\n@@ -184,4 +186,16 @@ export default class SlotWrapper extends Wrapper {\n \t\t\t`if (${slot}) ${slot}.d(detaching);`\n \t\t);\n \t}\n+\n+\tget_slot_namespace(block: Block) {\n+\t\tconst parent_element = this.node.find_nearest(/^Element/);\n+\t\tconst namespace = parent_element\n+\t\t\t? parent_element.namespace\n+\t\t\t: this.renderer.component.namespace;\n+\n+\t\tif (namespace === namespaces.inherit) return '#namespace';\n+\t\tif (namespace) return `\"${namespace}\"`;\n+\t\tif (block.has_inherit_namespace) return '#namespace';\n+\t\treturn '(ctx.$$scope && ctx.$$scope.namespace) || null';\n+\t}\n }\ndiff --git a/src/compiler/utils/namespaces.ts b/src/compiler/utils/namespaces.ts\nindex 3bde3ee30..b93c27790 100644\n--- a/src/compiler/utils/namespaces.ts\n+++ b/src/compiler/utils/namespaces.ts\n@@ -1,6 +1,7 @@\n export const html = 'http://www.w3.org/1999/xhtml';\n export const mathml = 'http://www.w3.org/1998/Math/MathML';\n export const svg = 'http://www.w3.org/2000/svg';\n+export const inherit = 'inherit';\n export const xlink = 'http://www.w3.org/1999/xlink';\n export const xml = 'http://www.w3.org/XML/1998/namespace';\n export const xmlns = 'http://www.w3.org/2000/xmlns';\n@@ -20,4 +21,4 @@ export const valid_namespaces = [\n \txmlns,\n ];\n \n-export const namespaces: Record<string, string> = { html, mathml, svg, xlink, xml, xmlns };\n+export const namespaces: Record<string, string> = { html, mathml, svg, inherit, xlink, xml, xmlns };\ndiff --git a/src/runtime/internal/dom.ts b/src/runtime/internal/dom.ts\nindex 25c804ff3..82d28cebc 100644\n--- a/src/runtime/internal/dom.ts\n+++ b/src/runtime/internal/dom.ts\n@@ -16,8 +16,12 @@ export function destroy_each(iterations, detaching) {\n \t}\n }\n \n-export function element<K extends keyof HTMLElementTagNameMap>(name: K) {\n-\treturn document.createElement<K>(name);\n+export function element<K extends keyof HTMLElementTagNameMap>(name: K): HTMLElementTagNameMap[K];\n+export function element(name: string, namespace: string): Element;\n+export function element(name: string, namespace?: string) {\n+\treturn namespace\n+\t\t? document.createElementNS(namespace, name)\n+\t\t: document.createElement(name);\n }\n \n export function object_without_properties<T, K extends keyof T>(obj: T, exclude: K[]) {\n@@ -133,7 +137,7 @@ export function children(element) {\n \treturn Array.from(element.childNodes);\n }\n \n-export function claim_element(nodes, name, attributes, svg) {\n+export function claim_element(nodes, name, attributes, namespace) {\n \tfor (let i = 0; i < nodes.length; i += 1) {\n \t\tconst node = nodes[i];\n \t\tif (node.nodeName === name) {\n@@ -145,7 +149,7 @@ export function claim_element(nodes, name, attributes, svg) {\n \t\t}\n \t}\n \n-\treturn svg ? svg_element(name) : element(name);\n+\treturn namespace ? document.createElementNS(namespace, name) : element(name);\n }\n \n export function claim_text(nodes, data) {\n@@ -281,4 +285,4 @@ export class HtmlTag {\n \td() {\n \t\tthis.n.forEach(detach);\n \t}\n-}\n\\ No newline at end of file\n+}\ndiff --git a/src/runtime/internal/utils.ts b/src/runtime/internal/utils.ts\nindex e457eb050..8924b7dce 100644\n--- a/src/runtime/internal/utils.ts\n+++ b/src/runtime/internal/utils.ts\n@@ -63,10 +63,10 @@ export function component_subscribe(component, store, callback) {\n \tcomponent.$$.on_destroy.push(subscribe(store, callback));\n }\n \n-export function create_slot(definition, ctx, fn) {\n+export function create_slot(definition, ctx, fn, namespace) {\n \tif (definition) {\n \t\tconst slot_ctx = get_slot_context(definition, ctx, fn);\n-\t\treturn definition[0](slot_ctx);\n+\t\treturn definition[0](slot_ctx, namespace);\n \t}\n }\n \n",
       "finalOutput": {
         "status": "completed",
@@ -152,119 +195,67 @@
             "files": [
               "src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/compiler/compile/render_dom/wrappers/Slot.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/render_dom/wrappers/Slot.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/compiler/compile/render_dom/wrappers/Element/index.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/render_dom/wrappers/Element/index.ts": [
+                {
+                  "start": 1,
+                  "end": 320
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/compiler/compile/render_dom/Renderer.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/render_dom/Renderer.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/compiler/compile/render_dom/wrappers/shared/Wrapper.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/compiler/compile/render_dom/wrappers/Element/Attribute.ts",
-              "src/compiler/compile/render_dom/wrappers/Element/fix_attribute_casing.ts",
-              "src/compiler/compile/render_dom/wrappers/Element/index.ts",
-              "src/compiler/compile/render_dom/wrappers/Text.ts"
-            ],
             "spans": {
-              "src/compiler/compile/render_dom/wrappers/Text.ts": [
-                {
-                  "start": 29,
-                  "end": 29
-                }
-              ],
-              "src/compiler/compile/render_dom/wrappers/Element/fix_attribute_casing.ts": [
+              "src/compiler/compile/render_dom/wrappers/shared/Wrapper.ts": [
                 {
                   "start": 1,
-                  "end": 1
-                },
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 11,
-                  "end": 11
-                }
-              ],
-              "src/compiler/compile/render_dom/wrappers/Element/Attribute.ts": [
-                {
-                  "start": 45,
-                  "end": 45
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                }
-              ],
-              "src/compiler/compile/render_dom/wrappers/Element/index.ts": [
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 286,
-                  "end": 286
-                },
-                {
-                  "start": 376,
-                  "end": 376
-                },
-                {
-                  "start": 378,
-                  "end": 378
-                },
-                {
-                  "start": 379,
-                  "end": 379
-                },
-                {
-                  "start": 382,
-                  "end": 382
-                },
-                {
-                  "start": 383,
-                  "end": 383
-                },
-                {
-                  "start": 395,
-                  "end": 395
-                },
-                {
-                  "start": 401,
-                  "end": 401
+                  "end": 220
                 }
               ]
             },
@@ -274,25 +265,25 @@
             "files": [
               "src/runtime/internal/dom.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/runtime/internal/dom.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/runtime/internal/dom.ts",
-              "src/runtime/internal/utils.ts"
+              "src/compiler/compile/render_dom/wrappers/Element/index.ts"
             ],
             "spans": {
-              "src/runtime/internal/utils.ts": [
+              "src/compiler/compile/render_dom/wrappers/Element/index.ts": [
                 {
-                  "start": 66,
-                  "end": 66
-                }
-              ],
-              "src/runtime/internal/dom.ts": [
-                {
-                  "start": 136,
-                  "end": 136
+                  "start": 320,
+                  "end": 440
                 }
               ]
             },
@@ -302,45 +293,11 @@
             "files": [
               "src/runtime/internal/utils.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/compiler/compile/nodes/Element.ts",
-              "src/compiler/compile/render_dom/wrappers/Element/index.ts"
-            ],
             "spans": {
-              "src/compiler/compile/nodes/Element.ts": [
+              "src/runtime/internal/utils.ts": [
                 {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 83,
-                  "end": 83
-                },
-                {
-                  "start": 87,
-                  "end": 87
-                },
-                {
-                  "start": 113,
-                  "end": 113
-                },
-                {
-                  "start": 162,
-                  "end": 162
-                }
-              ],
-              "src/compiler/compile/render_dom/wrappers/Element/index.ts": [
-                {
-                  "start": 378,
-                  "end": 378
-                },
-                {
-                  "start": 401,
-                  "end": 401
+                  "start": 1,
+                  "end": 160
                 }
               ]
             },
@@ -350,142 +307,25 @@
             "files": [
               "src/compiler/compile/nodes/Element.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/nodes/Element.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "test/js/samples/svg-title/input.svelte",
-              "test/runtime/samples/attribute-empty-svg/_config.js",
-              "test/runtime/samples/attribute-empty-svg/main.svelte",
-              "test/runtime/samples/svg-class/_config.js",
-              "test/runtime/samples/svg-class/main.svelte",
-              "test/runtime/samples/svg-each-block-namespace/_config.js",
-              "test/runtime/samples/svg-each-block-namespace/main.svelte",
-              "test/runtime/samples/svg/_config.js",
-              "test/runtime/samples/svg/main.svelte"
+              "src/compiler/compile/nodes/Element.ts"
             ],
             "spans": {
-              "test/runtime/samples/attribute-empty-svg/main.svelte": [
+              "src/compiler/compile/nodes/Element.ts": [
                 {
-                  "start": 1,
-                  "end": 1
-                },
-                {
-                  "start": 3,
-                  "end": 3
-                }
-              ],
-              "test/runtime/samples/attribute-empty-svg/_config.js": [
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "test/runtime/samples/svg-class/main.svelte": [
-                {
-                  "start": 1,
-                  "end": 1
-                }
-              ],
-              "test/runtime/samples/svg-class/_config.js": [
-                {
-                  "start": 1,
-                  "end": 1
-                },
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 10,
-                  "end": 10
-                }
-              ],
-              "test/runtime/samples/svg-each-block-namespace/main.svelte": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                }
-              ],
-              "test/runtime/samples/svg-each-block-namespace/_config.js": [
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "test/runtime/samples/svg/main.svelte": [
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 10,
-                  "end": 10
-                }
-              ],
-              "test/runtime/samples/svg/_config.js": [
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 20,
-                  "end": 20
-                }
-              ],
-              "test/js/samples/svg-title/input.svelte": [
-                {
-                  "start": 1,
-                  "end": 1
-                },
-                {
-                  "start": 3,
-                  "end": 3
+                  "start": 220,
+                  "end": 520
                 }
               ]
             },
@@ -495,7 +335,14 @@
             "files": [
               "src/compiler/compile/render_dom/Block.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/render_dom/Block.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -509,82 +356,53 @@
             "files": [
               "test/runtime/samples/component-slot-default/main.svelte"
             ],
-            "spans": {},
+            "spans": {
+              "test/runtime/samples/component-slot-default/main.svelte": [
+                {
+                  "start": 1,
+                  "end": 160
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "test/runtime/samples/component-slot-default/Nested.svelte"
             ],
-            "spans": {},
+            "spans": {
+              "test/runtime/samples/component-slot-default/Nested.svelte": [
+                {
+                  "start": 1,
+                  "end": 160
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "test/runtime/samples/component-slot-default/_config.js"
             ],
-            "spans": {},
+            "spans": {
+              "test/runtime/samples/component-slot-default/_config.js": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "test/runtime/index.js"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "test/css/index.js",
-              "test/custom-elements/index.js",
-              "test/parser/index.js",
-              "test/server-side-rendering/index.js",
-              "test/sourcemaps/index.js",
-              "test/vars/index.js"
-            ],
             "spans": {
-              "test/css/index.js": [
+              "test/runtime/index.js": [
                 {
-                  "start": 59,
-                  "end": 59
-                },
-                {
-                  "start": 64,
-                  "end": 64
-                }
-              ],
-              "test/sourcemaps/index.js": [
-                {
-                  "start": 29,
-                  "end": 29
-                }
-              ],
-              "test/parser/index.js": [
-                {
-                  "start": 26,
-                  "end": 26
-                }
-              ],
-              "test/custom-elements/index.js": [
-                {
-                  "start": 85,
-                  "end": 85
-                }
-              ],
-              "test/server-side-rendering/index.js": [
-                {
-                  "start": 84,
-                  "end": 84
-                },
-                {
-                  "start": 96,
-                  "end": 96
-                }
-              ],
-              "test/vars/index.js": [
-                {
-                  "start": 31,
-                  "end": 31
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -594,94 +412,11 @@
             "files": [
               "register.js"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "test/helpers.js"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/compiler/compile/render_dom/wrappers/Text.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "test/js/samples/svg-title/input.svelte"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "test/js/samples/svg-title/expected.js"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/compiler/utils/namespaces.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/compiler/compile/Component.ts",
-              "src/compiler/compile/nodes/Element.ts",
-              "src/compiler/compile/render_dom/wrappers/Element/index.ts",
-              "src/compiler/utils/namespaces.ts"
-            ],
             "spans": {
-              "src/compiler/utils/namespaces.ts": [
+              "register.js": [
                 {
-                  "start": 8,
-                  "end": 8
-                }
-              ],
-              "src/compiler/compile/Component.ts": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 1352,
-                  "end": 1352
-                },
-                {
-                  "start": 1353,
-                  "end": 1353
-                }
-              ],
-              "src/compiler/compile/nodes/Element.ts": [
-                {
-                  "start": 83,
-                  "end": 83
-                },
-                {
-                  "start": 87,
-                  "end": 87
-                },
-                {
-                  "start": 113,
-                  "end": 113
-                }
-              ],
-              "src/compiler/compile/render_dom/wrappers/Element/index.ts": [
-                {
-                  "start": 382,
-                  "end": 382
-                },
-                {
-                  "start": 401,
-                  "end": 401
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -689,381 +424,212 @@
           },
           {
             "files": [
-              "src/runtime/internal/index.ts"
+              "test/helpers.js"
+            ],
+            "spans": {
+              "test/helpers.js": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/compiler/compile/render_dom/Block.ts"
+            ],
+            "spans": {
+              "src/compiler/compile/render_dom/Block.ts": [
+                {
+                  "start": 220,
+                  "end": 520
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/compiler/compile/render_dom/wrappers/Text.ts"
+            ],
+            "spans": {
+              "src/compiler/compile/render_dom/wrappers/Text.ts": [
+                {
+                  "start": 1,
+                  "end": 140
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "test/js/samples/svg-title/input.svelte"
+            ],
+            "spans": {
+              "test/js/samples/svg-title/input.svelte": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "test/js/samples/svg-title/expected.js"
+            ],
+            "spans": {
+              "test/js/samples/svg-title/expected.js": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/compiler/utils/namespaces.ts"
             ],
             "spans": {},
             "symbols": {}
           },
           {
             "files": [
+              "src/runtime/internal/index.ts"
+            ],
+            "spans": {
+              "src/runtime/internal/index.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/compiler/compile/nodes/Element.ts"
+            ],
+            "spans": {
+              "src/compiler/compile/nodes/Element.ts": [
+                {
+                  "start": 76,
+                  "end": 98
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts"
+            ],
+            "spans": {
+              "src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts": [
+                {
+                  "start": 78,
+                  "end": 491
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/compiler/compile/render_dom/wrappers/Element/index.ts"
+            ],
+            "spans": {
+              "src/compiler/compile/render_dom/wrappers/Element/index.ts": [
+                {
+                  "start": 160,
+                  "end": 418
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/compiler/compile/render_dom/wrappers/Slot.ts"
+            ],
+            "spans": {
+              "src/compiler/compile/render_dom/wrappers/Slot.ts": [
+                {
+                  "start": 56,
+                  "end": 201
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/runtime/internal/utils.ts"
+            ],
+            "spans": {
+              "src/runtime/internal/utils.ts": [
+                {
+                  "start": 63,
+                  "end": 76
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/runtime/internal/dom.ts"
+            ],
+            "spans": {
+              "src/runtime/internal/dom.ts": [
+                {
+                  "start": 16,
+                  "end": 150
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
               "test/runtime/samples/component-slot-svg-namespace/_config.js"
             ],
-            "spans": {},
+            "spans": {
+              "test/runtime/samples/component-slot-svg-namespace/_config.js": [
+                {
+                  "start": 1,
+                  "end": 40
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "package.json",
-          "register.js",
-          "src/compiler/compile/Component.ts",
           "src/compiler/compile/nodes/Element.ts",
           "src/compiler/compile/render_dom/Block.ts",
-          "src/compiler/compile/render_dom/Renderer.ts",
-          "src/compiler/compile/render_dom/wrappers/Element/Attribute.ts",
-          "src/compiler/compile/render_dom/wrappers/Element/fix_attribute_casing.ts",
           "src/compiler/compile/render_dom/wrappers/Element/index.ts",
           "src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts",
           "src/compiler/compile/render_dom/wrappers/Slot.ts",
-          "src/compiler/compile/render_dom/wrappers/Text.ts",
-          "src/compiler/compile/render_dom/wrappers/shared/Wrapper.ts",
           "src/compiler/utils/namespaces.ts",
           "src/runtime/internal/dom.ts",
-          "src/runtime/internal/index.ts",
           "src/runtime/internal/utils.ts",
-          "test/css/index.js",
-          "test/custom-elements/index.js",
-          "test/helpers.js",
-          "test/js/samples/svg-title/expected.js",
-          "test/js/samples/svg-title/input.svelte",
-          "test/parser/index.js",
-          "test/runtime/index.js",
-          "test/runtime/samples/attribute-empty-svg/_config.js",
-          "test/runtime/samples/attribute-empty-svg/main.svelte",
-          "test/runtime/samples/component-slot-default/Nested.svelte",
-          "test/runtime/samples/component-slot-default/_config.js",
-          "test/runtime/samples/component-slot-default/main.svelte",
           "test/runtime/samples/component-slot-svg-namespace/Icon.svelte",
           "test/runtime/samples/component-slot-svg-namespace/_config.js",
-          "test/runtime/samples/component-slot-svg-namespace/main.svelte",
-          "test/runtime/samples/svg-class/_config.js",
-          "test/runtime/samples/svg-class/main.svelte",
-          "test/runtime/samples/svg-each-block-namespace/_config.js",
-          "test/runtime/samples/svg-each-block-namespace/main.svelte",
-          "test/runtime/samples/svg/_config.js",
-          "test/runtime/samples/svg/main.svelte",
-          "test/server-side-rendering/index.js",
-          "test/sourcemaps/index.js",
-          "test/vars/index.js"
+          "test/runtime/samples/component-slot-svg-namespace/main.svelte"
         ],
         "predSpans": {
-          "src/compiler/compile/render_dom/wrappers/Text.ts": [
-            {
-              "start": 29,
-              "end": 29
-            }
-          ],
-          "src/compiler/compile/render_dom/wrappers/Element/fix_attribute_casing.ts": [
-            {
-              "start": 1,
-              "end": 1
-            },
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 11,
-              "end": 11
-            }
-          ],
-          "src/compiler/compile/render_dom/wrappers/Element/Attribute.ts": [
-            {
-              "start": 45,
-              "end": 45
-            },
-            {
-              "start": 63,
-              "end": 63
-            }
-          ],
-          "src/compiler/compile/render_dom/wrappers/Element/index.ts": [
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 166,
-              "end": 172
-            },
-            {
-              "start": 286,
-              "end": 286
-            },
-            {
-              "start": 376,
-              "end": 376
-            },
-            {
-              "start": 376,
-              "end": 414
-            },
-            {
-              "start": 378,
-              "end": 378
-            },
-            {
-              "start": 379,
-              "end": 379
-            },
-            {
-              "start": 382,
-              "end": 382
-            },
-            {
-              "start": 383,
-              "end": 383
-            },
-            {
-              "start": 395,
-              "end": 395
-            },
-            {
-              "start": 401,
-              "end": 401
-            }
-          ],
-          "src/runtime/internal/utils.ts": [
-            {
-              "start": 66,
-              "end": 66
-            },
-            {
-              "start": 66,
-              "end": 70
-            }
-          ],
-          "src/runtime/internal/dom.ts": [
-            {
-              "start": 19,
-              "end": 24
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 140,
-              "end": 151
-            }
-          ],
           "src/compiler/compile/nodes/Element.ts": [
-            {
-              "start": 20,
-              "end": 20
-            },
             {
               "start": 78,
               "end": 96
-            },
-            {
-              "start": 83,
-              "end": 83
-            },
-            {
-              "start": 87,
-              "end": 87
-            },
-            {
-              "start": 113,
-              "end": 113
-            },
-            {
-              "start": 162,
-              "end": 162
-            }
-          ],
-          "test/runtime/samples/attribute-empty-svg/main.svelte": [
-            {
-              "start": 1,
-              "end": 1
-            },
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "test/runtime/samples/attribute-empty-svg/_config.js": [
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "test/runtime/samples/svg-class/main.svelte": [
-            {
-              "start": 1,
-              "end": 1
-            }
-          ],
-          "test/runtime/samples/svg-class/_config.js": [
-            {
-              "start": 1,
-              "end": 1
-            },
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 10,
-              "end": 10
-            }
-          ],
-          "test/runtime/samples/svg-each-block-namespace/main.svelte": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 9,
-              "end": 9
-            }
-          ],
-          "test/runtime/samples/svg-each-block-namespace/_config.js": [
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "test/runtime/samples/svg/main.svelte": [
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 10,
-              "end": 10
-            }
-          ],
-          "test/runtime/samples/svg/_config.js": [
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 20,
-              "end": 20
-            }
-          ],
-          "test/js/samples/svg-title/input.svelte": [
-            {
-              "start": 1,
-              "end": 1
-            },
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "test/css/index.js": [
-            {
-              "start": 59,
-              "end": 59
-            },
-            {
-              "start": 64,
-              "end": 64
-            }
-          ],
-          "test/sourcemaps/index.js": [
-            {
-              "start": 29,
-              "end": 29
-            }
-          ],
-          "test/parser/index.js": [
-            {
-              "start": 26,
-              "end": 26
-            }
-          ],
-          "test/custom-elements/index.js": [
-            {
-              "start": 85,
-              "end": 85
-            }
-          ],
-          "test/server-side-rendering/index.js": [
-            {
-              "start": 84,
-              "end": 84
-            },
-            {
-              "start": 96,
-              "end": 96
-            }
-          ],
-          "test/vars/index.js": [
-            {
-              "start": 31,
-              "end": 31
-            }
-          ],
-          "src/compiler/utils/namespaces.ts": [
-            {
-              "start": 8,
-              "end": 8
-            }
-          ],
-          "src/compiler/compile/Component.ts": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 1352,
-              "end": 1352
-            },
-            {
-              "start": 1353,
-              "end": 1353
             }
           ],
           "src/compiler/compile/render_dom/Block.ts": [
@@ -1074,6 +640,16 @@
             {
               "start": 410,
               "end": 415
+            }
+          ],
+          "src/compiler/compile/render_dom/wrappers/Element/index.ts": [
+            {
+              "start": 166,
+              "end": 172
+            },
+            {
+              "start": 376,
+              "end": 414
             }
           ],
           "src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts": [
@@ -1098,6 +674,22 @@
             {
               "start": 190,
               "end": 199
+            }
+          ],
+          "src/runtime/internal/dom.ts": [
+            {
+              "start": 19,
+              "end": 24
+            },
+            {
+              "start": 140,
+              "end": 151
+            }
+          ],
+          "src/runtime/internal/utils.ts": [
+            {
+              "start": 66,
+              "end": 70
             }
           ],
           "test/runtime/samples/component-slot-svg-namespace/_config.js": [
@@ -1135,266 +727,293 @@
             "step": 1,
             "coverage": {
               "file": 0.16666666666666666,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.2,
+              "span": 0.289457169752118,
+              "line": 0.3240223463687151
             }
           },
           {
             "step": 2,
             "coverage": {
               "file": 0.16666666666666666,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.2,
+              "span": 0.289457169752118,
+              "line": 0.3240223463687151
             }
           },
           {
             "step": 3,
             "coverage": {
               "file": 0.3333333333333333,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.26666666666666666,
+              "span": 0.289457169752118,
+              "line": 0.3240223463687151
             }
           },
           {
             "step": 4,
             "coverage": {
               "file": 0.3333333333333333,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.26666666666666666,
+              "span": 0.289457169752118,
+              "line": 0.3240223463687151
             }
           },
           {
             "step": 5,
             "coverage": {
               "file": 0.3333333333333333,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.26666666666666666,
+              "span": 0.289457169752118,
+              "line": 0.3240223463687151
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 0.3333333333333333,
-              "symbol": 0.2,
-              "span": 0.050674615625980544,
-              "line": 0.03910614525139665
+              "symbol": 0.26666666666666666,
+              "span": 0.289457169752118,
+              "line": 0.3240223463687151
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 0.3333333333333333,
-              "symbol": 0.2,
-              "span": 0.050674615625980544,
-              "line": 0.03910614525139665
+              "symbol": 0.4,
+              "span": 0.40696579855663634,
+              "line": 0.48044692737430167
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.26666666666666666,
-              "span": 0.05867587072481958,
-              "line": 0.0446927374301676
+              "symbol": 0.6,
+              "span": 0.49356761844995295,
+              "line": 0.5810055865921788
             }
           },
           {
             "step": 9,
             "coverage": {
-              "file": 0.5,
-              "symbol": 0.26666666666666666,
-              "span": 0.05867587072481958,
-              "line": 0.0446927374301676
+              "file": 0.6666666666666666,
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 14,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 15,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 16,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 17,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 18,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 19,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 20,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 21,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 22,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 23,
             "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "file": 0.8333333333333334,
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 24,
             "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "file": 0.8333333333333334,
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 25,
             "coverage": {
               "file": 0.8333333333333334,
-              "symbol": 0.4666666666666667,
-              "span": 0.21603388766865392,
-              "line": 0.0670391061452514
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 26,
             "coverage": {
               "file": 0.8333333333333334,
-              "symbol": 0.4666666666666667,
-              "span": 0.2213680577345466,
-              "line": 0.07262569832402235
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 27,
             "coverage": {
               "file": 0.8333333333333334,
-              "symbol": 0.4666666666666667,
-              "span": 0.2213680577345466,
-              "line": 0.07262569832402235
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           },
           {
             "step": 28,
             "coverage": {
               "file": 0.8333333333333334,
-              "symbol": 0.4666666666666667,
-              "span": 0.2213680577345466,
-              "line": 0.07262569832402235
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
+            }
+          },
+          {
+            "step": 29,
+            "coverage": {
+              "file": 0.8333333333333334,
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
+            }
+          },
+          {
+            "step": 30,
+            "coverage": {
+              "file": 0.8333333333333334,
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
+            }
+          },
+          {
+            "step": 31,
+            "coverage": {
+              "file": 0.8333333333333334,
+              "symbol": 0.8,
+              "span": 0.8638217759648572,
+              "line": 0.8100558659217877
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.5833333333333333,
-          "symbol": 0.35000000000000003,
-          "span": 0.15497669102156084,
-          "line": 0.05207501995211493
+          "file": 0.6236559139784946,
+          "symbol": 0.6731182795698925,
+          "span": 0.7259734607326134,
+          "line": 0.6979635970445125
         },
         "redundancy": {
-          "file": 0.20833333333333337,
-          "symbol": 0.20454545454545459,
-          "span": 0.05424424571177244,
-          "line": 0.10144927536231885
+          "file": 0.29032258064516125,
+          "symbol": 0.2142857142857143,
+          "span": 0.20376680617800658,
+          "line": 0.13168795305488434
         }
       },
       "fixOverlap": {
@@ -1789,7 +1408,54 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/compiler/compile/nodes/Element.ts",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/compiler/compile/render_dom/Block.ts",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/compiler/compile/render_dom/wrappers/Element/index.ts",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/compiler/compile/render_dom/wrappers/Slot.ts",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/compiler/utils/namespaces.ts",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/runtime/internal/dom.ts",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/runtime/internal/utils.ts",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/test/runtime/samples/component-slot-svg-namespace/Icon.svelte",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/test/runtime/samples/component-slot-svg-namespace/_config.js",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/test/runtime/samples/component-slot-svg-namespace/main.svelte",
+                "kind": "add"
+              }
+            ]
+          }
         },
         {
           "kind": "todo_list",
@@ -1821,7 +1487,18 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/compiler/compile/render_dom/wrappers/Element/index.ts",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/compiler/compile/render_dom/wrappers/Slot.ts",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "command_execution",
@@ -1833,7 +1510,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/runtime/internal/dom.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/runtime/internal/dom.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -1866,7 +1552,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/compiler/compile/render_dom/Block.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/compiler/compile/render_dom/Block.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -1906,22 +1601,60 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/compiler/compile/render_dom/wrappers/Slot.ts",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/compiler/compile/render_dom/wrappers/Slot.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/compiler/compile/render_dom/wrappers/Slot.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2068,9 +1801,30 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [
+          "test/runtime/samples/svg-slot-namespace/Widget.svelte",
+          "test/runtime/samples/svg-slot-namespace/_config.js",
+          "test/runtime/samples/svg-slot-namespace/main.svelte"
+        ],
+        "missingTrajectoryPaths": [
+          "7e762cf48:packages/svelte/src/compiler/phases/2-analyze/visitors/shared/fragment.js"
+        ],
+        "missingFinalPathCount": 3,
+        "missingTrajectoryPathCount": 1
+      },
       "startedAt": "2026-05-11T15:50:28Z",
       "completedAt": "2026-05-11T15:56:33Z",
       "durationMs": 364884,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1775089,
@@ -2079,6 +1833,28 @@
         "total_tokens": 1791217,
         "cache_read_input_tokens": 1644032
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 57,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/compiler/compile/nodes/Element.ts b/src/compiler/compile/nodes/Element.ts\nindex 62bc62059..e08e1f963 100644\n--- a/src/compiler/compile/nodes/Element.ts\n+++ b/src/compiler/compile/nodes/Element.ts\n@@ -84,7 +84,7 @@ function get_namespace(parent: Element, element: Element, explicit_namespace: st\n \t\t\t: null);\n \t}\n \n-\tif (element.name.toLowerCase() === 'svg') return namespaces.svg;\n+\tif (svg.test(element.name.toLowerCase())) return namespaces.svg;\n \tif (parent_element.name.toLowerCase() === 'foreignobject') return null;\n \n \treturn parent_element.namespace;\n",
       "finalOutput": {
         "status": "completed",
@@ -2128,585 +1904,13 @@
         "predSteps": [
           {
             "files": [
-              "src/compiler/compile/nodes/Element.ts",
-              "src/compiler/compile/render_dom/wrappers/Element/Attribute.ts",
-              "src/compiler/compile/render_dom/wrappers/Element/Binding.ts",
-              "src/compiler/compile/render_dom/wrappers/Element/StyleAttribute.ts",
-              "src/compiler/compile/render_dom/wrappers/Element/fix_attribute_casing.ts",
-              "src/compiler/compile/render_dom/wrappers/Element/index.ts",
-              "src/compiler/compile/render_ssr/handlers/Element.ts",
-              "src/compiler/compile/render_ssr/handlers/shared/get_slot_scope.ts",
-              "src/compiler/compile/utils/get_slot_data.ts",
-              "src/compiler/utils/namespaces.ts",
-              "test/custom-elements/samples/html-slots/main.svelte",
-              "test/custom-elements/samples/html-slots/test.js",
-              "test/js/samples/svg-title/expected.js",
-              "test/js/samples/svg-title/input.svelte",
-              "test/runtime/samples/attribute-empty-svg/_config.js",
-              "test/runtime/samples/attribute-empty-svg/main.svelte",
-              "test/runtime/samples/attribute-namespaced/_config.js",
-              "test/runtime/samples/attribute-namespaced/main.svelte",
-              "test/runtime/samples/await-then-catch-in-slot/Foo.svelte",
-              "test/runtime/samples/await-then-catch-in-slot/_config.js",
-              "test/runtime/samples/await-then-catch-in-slot/main.svelte",
-              "test/runtime/samples/component-namespaced/Foo.svelte",
-              "test/runtime/samples/component-namespaced/_config.js",
-              "test/runtime/samples/component-namespaced/components.js",
-              "test/runtime/samples/component-namespaced/main.svelte",
-              "test/runtime/samples/component-slot-binding-dimensions-destroys-cleanly/Nested.svelte",
-              "test/runtime/samples/component-slot-binding-dimensions-destroys-cleanly/_config.js",
-              "test/runtime/samples/component-slot-binding-dimensions-destroys-cleanly/main.svelte",
-              "test/runtime/samples/component-slot-chained/Inner.svelte",
-              "test/runtime/samples/component-slot-chained/Outer.svelte",
-              "test/runtime/samples/component-slot-chained/_config.js",
-              "test/runtime/samples/component-slot-chained/main.svelte",
-              "test/runtime/samples/component-slot-default/Nested.svelte",
-              "test/runtime/samples/component-slot-default/_config.js",
-              "test/runtime/samples/component-slot-default/main.svelte",
-              "test/runtime/samples/component-slot-dynamic/Nested.svelte",
-              "test/runtime/samples/component-slot-dynamic/_config.js",
-              "test/runtime/samples/component-slot-dynamic/main.svelte",
-              "test/runtime/samples/component-slot-each-block/Nested.svelte",
-              "test/runtime/samples/component-slot-each-block/_config.js",
-              "test/runtime/samples/component-slot-each-block/main.svelte",
-              "test/runtime/samples/component-slot-empty-b/Nested.svelte",
-              "test/runtime/samples/component-slot-empty-b/_config.js",
-              "test/runtime/samples/component-slot-empty-b/main.svelte",
-              "test/runtime/samples/component-slot-empty/Nested.svelte",
-              "test/runtime/samples/component-slot-empty/_config.js",
-              "test/runtime/samples/component-slot-empty/main.svelte",
-              "test/runtime/samples/component-slot-fallback/Nested.svelte",
-              "test/runtime/samples/component-slot-fallback/_config.js",
-              "test/runtime/samples/component-slot-fallback/main.svelte",
-              "test/runtime/samples/component-slot-if-block-before-node/Nested.svelte",
-              "test/runtime/samples/component-slot-if-block-before-node/_config.js",
-              "test/runtime/samples/component-slot-if-block-before-node/main.svelte",
-              "test/runtime/samples/component-slot-if-block/Nested.svelte",
-              "test/runtime/samples/component-slot-if-block/_config.js",
-              "test/runtime/samples/component-slot-if-block/main.svelte",
-              "test/runtime/samples/component-slot-if-else-block-before-node/Nested.svelte",
-              "test/runtime/samples/component-slot-if-else-block-before-node/_config.js",
-              "test/runtime/samples/component-slot-if-else-block-before-node/main.svelte",
-              "test/runtime/samples/component-slot-let-aliased/Nested.svelte",
-              "test/runtime/samples/component-slot-let-aliased/_config.js",
-              "test/runtime/samples/component-slot-let-aliased/main.svelte",
-              "test/runtime/samples/component-slot-let-b/Nested.svelte",
-              "test/runtime/samples/component-slot-let-b/_config.js",
-              "test/runtime/samples/component-slot-let-b/main.svelte",
-              "test/runtime/samples/component-slot-let-c/Nested.svelte",
-              "test/runtime/samples/component-slot-let-c/_config.js",
-              "test/runtime/samples/component-slot-let-c/main.svelte",
-              "test/runtime/samples/component-slot-let-d/Nested.svelte",
-              "test/runtime/samples/component-slot-let-d/_config.js",
-              "test/runtime/samples/component-slot-let-d/main.svelte",
-              "test/runtime/samples/component-slot-let-destructured/Nested.svelte",
-              "test/runtime/samples/component-slot-let-destructured/_config.js",
-              "test/runtime/samples/component-slot-let-destructured/main.svelte",
-              "test/runtime/samples/component-slot-let-e/Nested.svelte",
-              "test/runtime/samples/component-slot-let-e/_config.js",
-              "test/runtime/samples/component-slot-let-e/main.svelte",
-              "test/runtime/samples/component-slot-let-f/A.svelte",
-              "test/runtime/samples/component-slot-let-f/B.svelte",
-              "test/runtime/samples/component-slot-let-f/_config.js",
-              "test/runtime/samples/component-slot-let-f/main.svelte",
-              "test/runtime/samples/component-slot-let-in-binding/Nested.svelte",
-              "test/runtime/samples/component-slot-let-in-binding/_config.js",
-              "test/runtime/samples/component-slot-let-in-binding/main.svelte",
-              "test/runtime/samples/component-slot-let-named/Nested.svelte",
-              "test/runtime/samples/component-slot-let-named/_config.js",
-              "test/runtime/samples/component-slot-let-named/main.svelte",
-              "test/runtime/samples/component-slot-let-static/Nested.svelte",
-              "test/runtime/samples/component-slot-let-static/_config.js",
-              "test/runtime/samples/component-slot-let-static/main.svelte",
-              "test/runtime/samples/component-slot-let/Nested.svelte",
-              "test/runtime/samples/component-slot-let/_config.js",
-              "test/runtime/samples/component-slot-let/main.svelte",
-              "test/runtime/samples/component-slot-name-with-hyphen/Nested.svelte",
-              "test/runtime/samples/component-slot-name-with-hyphen/_config.js",
-              "test/runtime/samples/component-slot-name-with-hyphen/main.svelte",
-              "test/runtime/samples/component-slot-named-b/Nested.svelte",
-              "test/runtime/samples/component-slot-named-b/_config.js",
-              "test/runtime/samples/component-slot-named-b/main.svelte",
-              "test/runtime/samples/component-slot-named-c/Nested.svelte",
-              "test/runtime/samples/component-slot-named-c/_config.js",
-              "test/runtime/samples/component-slot-named-c/main.svelte",
-              "test/runtime/samples/component-slot-named-inherits-default-lets/Nested.svelte",
-              "test/runtime/samples/component-slot-named-inherits-default-lets/_config.js",
-              "test/runtime/samples/component-slot-named-inherits-default-lets/main.svelte",
-              "test/runtime/samples/component-slot-named/Nested.svelte",
-              "test/runtime/samples/component-slot-named/_config.js",
-              "test/runtime/samples/component-slot-named/main.svelte",
-              "test/runtime/samples/component-slot-names-sanitized/Nested.svelte",
-              "test/runtime/samples/component-slot-names-sanitized/_config.js",
-              "test/runtime/samples/component-slot-names-sanitized/main.svelte",
-              "test/runtime/samples/component-slot-nested-component/Inner.svelte",
-              "test/runtime/samples/component-slot-nested-component/Outer.svelte",
-              "test/runtime/samples/component-slot-nested-component/_config.js",
-              "test/runtime/samples/component-slot-nested-component/main.svelte",
-              "test/runtime/samples/component-slot-nested-in-element/One.svelte",
-              "test/runtime/samples/component-slot-nested-in-element/Two.svelte",
-              "test/runtime/samples/component-slot-nested-in-element/_config.js",
-              "test/runtime/samples/component-slot-nested-in-element/main.svelte",
-              "test/runtime/samples/component-slot-nested/Nested.svelte",
-              "test/runtime/samples/component-slot-nested/_config.js",
-              "test/runtime/samples/component-slot-nested/main.svelte",
-              "test/runtime/samples/component-slot-spread-props/Nested.svelte",
-              "test/runtime/samples/component-slot-spread-props/_config.js",
-              "test/runtime/samples/component-slot-spread-props/main.svelte",
-              "test/runtime/samples/component-slot-static-and-dynamic/Nested.svelte",
-              "test/runtime/samples/component-slot-static-and-dynamic/_config.js",
-              "test/runtime/samples/component-slot-static-and-dynamic/main.svelte",
-              "test/runtime/samples/component-slot-used-with-default-event/Nested.svelte",
-              "test/runtime/samples/component-slot-used-with-default-event/_config.js",
-              "test/runtime/samples/component-slot-used-with-default-event/main.svelte",
-              "test/runtime/samples/dynamic-component-slot/Bar.svelte",
-              "test/runtime/samples/dynamic-component-slot/Baz.svelte",
-              "test/runtime/samples/dynamic-component-slot/Foo.svelte",
-              "test/runtime/samples/dynamic-component-slot/_config.js",
-              "test/runtime/samples/dynamic-component-slot/main.svelte",
-              "test/runtime/samples/slot-in-custom-element/_config.js",
-              "test/runtime/samples/slot-in-custom-element/main.svelte",
-              "test/runtime/samples/svg-attributes/_config.js",
-              "test/runtime/samples/svg-attributes/main.svelte",
-              "test/runtime/samples/svg-child-component-declared-namespace-shorthand/Rect.svelte",
-              "test/runtime/samples/svg-child-component-declared-namespace-shorthand/_config.js",
-              "test/runtime/samples/svg-child-component-declared-namespace-shorthand/main.svelte",
-              "test/runtime/samples/svg-child-component-declared-namespace/Rect.svelte",
-              "test/runtime/samples/svg-child-component-declared-namespace/_config.js",
-              "test/runtime/samples/svg-child-component-declared-namespace/main.svelte",
-              "test/runtime/samples/svg-class/_config.js",
-              "test/runtime/samples/svg-class/main.svelte",
-              "test/runtime/samples/svg-each-block-anchor/_config.js",
-              "test/runtime/samples/svg-each-block-anchor/main.svelte",
-              "test/runtime/samples/svg-each-block-namespace/_config.js",
-              "test/runtime/samples/svg-each-block-namespace/main.svelte",
-              "test/runtime/samples/svg-foreignobject-namespace/_config.js",
-              "test/runtime/samples/svg-foreignobject-namespace/main.svelte",
-              "test/runtime/samples/svg-multiple/_config.js",
-              "test/runtime/samples/svg-multiple/main.svelte",
-              "test/runtime/samples/svg-no-whitespace/_config.js",
-              "test/runtime/samples/svg-no-whitespace/main.svelte",
-              "test/runtime/samples/svg-with-style/_config.js",
-              "test/runtime/samples/svg-with-style/main.svelte",
-              "test/runtime/samples/svg-xlink/_config.js",
-              "test/runtime/samples/svg-xlink/main.svelte",
-              "test/runtime/samples/svg-xmlns/_config.js",
-              "test/runtime/samples/svg-xmlns/main.svelte",
-              "test/runtime/samples/svg/_config.js",
-              "test/runtime/samples/svg/main.svelte",
-              "test/runtime/samples/transition-js-slot/Nested.svelte",
-              "test/runtime/samples/transition-js-slot/_config.js",
-              "test/runtime/samples/transition-js-slot/main.svelte",
-              "test/validator/samples/a11y-anchor-in-svg-is-valid/input.svelte",
-              "test/validator/samples/a11y-anchor-in-svg-is-valid/warnings.json",
-              "test/validator/samples/binding-dimensions-svg-child/errors.json",
-              "test/validator/samples/binding-dimensions-svg-child/input.svelte",
-              "test/validator/samples/binding-dimensions-svg/errors.json",
-              "test/validator/samples/binding-dimensions-svg/input.svelte",
-              "test/validator/samples/component-namespaced/input.svelte",
-              "test/validator/samples/component-namespaced/warnings.json",
-              "test/validator/samples/component-slot-default-duplicate.skip/errors.json",
-              "test/validator/samples/component-slot-default-duplicate.skip/input.svelte",
-              "test/validator/samples/component-slot-default-reserved/errors.json",
-              "test/validator/samples/component-slot-default-reserved/input.svelte",
-              "test/validator/samples/component-slot-dynamic-attribute/errors.json",
-              "test/validator/samples/component-slot-dynamic-attribute/input.svelte",
-              "test/validator/samples/component-slot-dynamic/errors.json",
-              "test/validator/samples/component-slot-dynamic/input.svelte",
-              "test/validator/samples/component-slot-named-duplicate.skip/errors.json",
-              "test/validator/samples/component-slot-named-duplicate.skip/input.svelte",
-              "test/validator/samples/component-slotted-each-block/errors.json",
-              "test/validator/samples/component-slotted-each-block/input.svelte",
-              "test/validator/samples/component-slotted-if-block/errors.json",
-              "test/validator/samples/component-slotted-if-block/input.svelte",
-              "test/validator/samples/namespace-invalid-unguessable/errors.json",
-              "test/validator/samples/namespace-invalid-unguessable/input.svelte",
-              "test/validator/samples/namespace-invalid/errors.json",
-              "test/validator/samples/namespace-invalid/input.svelte",
-              "test/validator/samples/namespace-non-literal/errors.json",
-              "test/validator/samples/namespace-non-literal/input.svelte",
-              "test/validator/samples/prop-slot/errors.json",
-              "test/validator/samples/prop-slot/input.svelte",
-              "test/validator/samples/slot-attribute-invalid/errors.json",
-              "test/validator/samples/slot-attribute-invalid/input.svelte",
-              "test/validator/samples/svg-child-component-declared-namespace/input.svelte",
-              "test/validator/samples/svg-child-component-declared-namespace/warnings.json",
-              "test/vars/samples/component-namespaced/_config.js",
-              "test/vars/samples/component-namespaced/input.svelte"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/compiler/compile/Component.ts",
-              "src/compiler/compile/nodes/Element.ts",
-              "src/compiler/compile/nodes/InlineComponent.ts",
-              "src/compiler/compile/nodes/Slot.ts",
-              "src/compiler/compile/render_dom/index.ts",
-              "src/compiler/compile/render_ssr/Renderer.ts",
-              "src/compiler/compile/render_ssr/handlers/Element.ts",
-              "src/compiler/compile/render_ssr/handlers/InlineComponent.ts",
-              "src/compiler/compile/render_ssr/handlers/Slot.ts",
-              "src/compiler/compile/render_ssr/handlers/shared/get_slot_scope.ts",
-              "src/compiler/compile/render_ssr/index.ts",
-              "src/compiler/compile/utils/get_slot_data.ts",
-              "src/compiler/interfaces.ts",
-              "src/compiler/parse/state/tag.ts",
-              "src/runtime/internal/ssr.ts",
-              "src/runtime/internal/utils.ts"
+              "src/compiler/utils/namespaces.ts"
             ],
             "spans": {
-              "src/compiler/interfaces.ts": [
+              "src/compiler/utils/namespaces.ts": [
                 {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 117,
-                  "end": 117
-                }
-              ],
-              "src/compiler/compile/Component.ts": [
-                {
-                  "start": 127,
-                  "end": 127
-                },
-                {
-                  "start": 128,
-                  "end": 128
-                }
-              ],
-              "src/runtime/internal/ssr.ts": [
-                {
-                  "start": 71,
-                  "end": 71
-                },
-                {
-                  "start": 87,
-                  "end": 87
-                }
-              ],
-              "src/compiler/compile/render_dom/index.ts": [
-                {
-                  "start": 80,
-                  "end": 80
-                },
-                {
-                  "start": 87,
-                  "end": 87
-                },
-                {
-                  "start": 283,
-                  "end": 283
-                },
-                {
-                  "start": 313,
-                  "end": 313
-                },
-                {
-                  "start": 314,
-                  "end": 314
-                },
-                {
-                  "start": 421,
-                  "end": 421
-                }
-              ],
-              "src/compiler/parse/state/tag.ts": [
-                {
-                  "start": 138,
-                  "end": 138
-                }
-              ],
-              "src/compiler/compile/render_ssr/Renderer.ts": [
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                }
-              ],
-              "src/compiler/compile/render_ssr/index.ts": [
-                {
-                  "start": 150,
-                  "end": 150
-                }
-              ],
-              "src/compiler/compile/nodes/Slot.ts": [
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 29,
-                  "end": 29
-                },
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 36,
-                  "end": 36
-                },
-                {
-                  "start": 37,
-                  "end": 37
-                },
-                {
-                  "start": 45,
-                  "end": 45
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 48,
-                  "end": 48
-                },
-                {
-                  "start": 49,
-                  "end": 49
-                },
-                {
-                  "start": 51,
-                  "end": 51
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 61,
-                  "end": 61
-                },
-                {
-                  "start": 62,
-                  "end": 62
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                }
-              ],
-              "src/compiler/compile/nodes/Element.ts": [
-                {
-                  "start": 377,
-                  "end": 377
-                },
-                {
-                  "start": 380,
-                  "end": 380
-                },
-                {
-                  "start": 381,
-                  "end": 381
-                },
-                {
-                  "start": 385,
-                  "end": 385
-                },
-                {
-                  "start": 387,
-                  "end": 387
-                },
-                {
-                  "start": 388,
-                  "end": 388
-                },
-                {
-                  "start": 391,
-                  "end": 391
-                },
-                {
-                  "start": 401,
-                  "end": 401
-                },
-                {
-                  "start": 404,
-                  "end": 404
-                },
-                {
-                  "start": 412,
-                  "end": 412
-                },
-                {
-                  "start": 413,
-                  "end": 413
-                }
-              ],
-              "src/compiler/compile/nodes/InlineComponent.ts": [
-                {
-                  "start": 48,
-                  "end": 48
-                },
-                {
-                  "start": 51,
-                  "end": 51
-                }
-              ],
-              "src/compiler/compile/render_ssr/handlers/Element.ts": [
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 67,
-                  "end": 67
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                },
-                {
-                  "start": 70,
-                  "end": 70
-                },
-                {
-                  "start": 71,
-                  "end": 71
-                },
-                {
-                  "start": 73,
-                  "end": 73
-                },
-                {
-                  "start": 74,
-                  "end": 74
-                },
-                {
-                  "start": 83,
-                  "end": 83
-                }
-              ],
-              "src/compiler/compile/render_ssr/handlers/Slot.ts": [
-                {
-                  "start": 2,
-                  "end": 2
-                },
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "src/compiler/compile/render_ssr/handlers/InlineComponent.ts": [
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 85,
-                  "end": 85
-                },
-                {
-                  "start": 89,
-                  "end": 89
-                },
-                {
-                  "start": 90,
-                  "end": 90
-                },
-                {
-                  "start": 95,
-                  "end": 95
-                },
-                {
-                  "start": 96,
-                  "end": 96
-                },
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 102,
-                  "end": 102
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                },
-                {
-                  "start": 105,
-                  "end": 105
-                },
-                {
-                  "start": 106,
-                  "end": 106
-                },
-                {
-                  "start": 113,
-                  "end": 113
-                },
-                {
-                  "start": 115,
-                  "end": 115
-                }
-              ],
-              "src/compiler/compile/utils/get_slot_data.ts": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "src/compiler/compile/render_ssr/handlers/shared/get_slot_scope.ts": [
-                {
-                  "start": 3,
-                  "end": 3
-                }
-              ],
-              "src/runtime/internal/utils.ts": [
-                {
-                  "start": 66,
-                  "end": 66
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -2714,101 +1918,83 @@
           },
           {
             "files": [
-              "src/compiler/utils/namespaces.ts"
+              "src/compiler/compile/nodes/Element.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/nodes/Element.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/compiler/compile/nodes/Element.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/nodes/Element.ts": [
+                {
+                  "start": 260,
+                  "end": 520
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/compiler/compile/render_dom/wrappers/Element/index.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/render_dom/wrappers/Element/index.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/compiler/compile/render_dom/Block.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/render_dom/Block.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/runtime/internal/utils.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/runtime/internal/utils.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/compiler/compile/render_dom/wrappers/Slot.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/compiler/compile/render_dom/wrappers/Element/Attribute.ts",
-              "src/compiler/compile/render_dom/wrappers/Element/index.ts",
-              "src/compiler/compile/render_dom/wrappers/Text.ts"
-            ],
             "spans": {
-              "src/compiler/compile/render_dom/wrappers/Text.ts": [
+              "src/compiler/compile/render_dom/wrappers/Slot.ts": [
                 {
-                  "start": 29,
-                  "end": 29
-                }
-              ],
-              "src/compiler/compile/render_dom/wrappers/Element/Attribute.ts": [
-                {
-                  "start": 45,
-                  "end": 45
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                }
-              ],
-              "src/compiler/compile/render_dom/wrappers/Element/index.ts": [
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 286,
-                  "end": 286
-                },
-                {
-                  "start": 376,
-                  "end": 376
-                },
-                {
-                  "start": 378,
-                  "end": 378
-                },
-                {
-                  "start": 382,
-                  "end": 382
-                },
-                {
-                  "start": 383,
-                  "end": 383
-                },
-                {
-                  "start": 395,
-                  "end": 395
-                },
-                {
-                  "start": 401,
-                  "end": 401
+                  "start": 1,
+                  "end": 240
                 }
               ]
             },
@@ -2818,60 +2004,109 @@
             "files": [
               "test/runtime/samples/svg-child-component-declared-namespace/main.svelte"
             ],
-            "spans": {},
+            "spans": {
+              "test/runtime/samples/svg-child-component-declared-namespace/main.svelte": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "test/runtime/samples/svg-child-component-declared-namespace-shorthand/main.svelte"
             ],
-            "spans": {},
+            "spans": {
+              "test/runtime/samples/svg-child-component-declared-namespace-shorthand/main.svelte": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "test/runtime/samples/svg-child-component-declared-namespace/_config.js"
             ],
-            "spans": {},
+            "spans": {
+              "test/runtime/samples/svg-child-component-declared-namespace/_config.js": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "test/runtime/samples/svg-child-component-declared-namespace/Rect.svelte"
             ],
-            "spans": {},
+            "spans": {
+              "test/runtime/samples/svg-child-component-declared-namespace/Rect.svelte": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "test/runtime/samples/svg-child-component-declared-namespace-shorthand/Rect.svelte"
             ],
-            "spans": {},
+            "spans": {
+              "test/runtime/samples/svg-child-component-declared-namespace-shorthand/Rect.svelte": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "test/runtime/samples/svg-child-component-declared-namespace-shorthand/_config.js"
             ],
-            "spans": {},
+            "spans": {
+              "test/runtime/samples/svg-child-component-declared-namespace-shorthand/_config.js": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/compiler/compile/Component.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/Component.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/compiler/compile/nodes/Element.ts"
+              "src/compiler/compile/Component.ts"
             ],
             "spans": {
-              "src/compiler/compile/nodes/Element.ts": [
+              "src/compiler/compile/Component.ts": [
                 {
-                  "start": 113,
-                  "end": 113
+                  "start": 220,
+                  "end": 420
                 }
               ]
             },
@@ -2881,29 +2116,25 @@
             "files": [
               "src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts": [
+                {
+                  "start": 1,
+                  "end": 320
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/compiler/compile/render_dom/wrappers/shared/Wrapper.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts"
-            ],
             "spans": {
-              "src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts": [
+              "src/compiler/compile/render_dom/wrappers/shared/Wrapper.ts": [
                 {
-                  "start": 73,
-                  "end": 73
-                },
-                {
-                  "start": 80,
-                  "end": 80
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -2920,30 +2151,11 @@
             "files": [
               "test/runtime/index.js"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "test/runtime/index.js"
-            ],
             "spans": {
               "test/runtime/index.js": [
                 {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 72,
-                  "end": 72
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 212,
-                  "end": 212
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -2953,61 +2165,88 @@
             "files": [
               "7e762cf48:packages/svelte/src/compiler/phases/2-analyze/visitors/shared/fragment.js"
             ],
-            "spans": {},
+            "spans": {
+              "7e762cf48:packages/svelte/src/compiler/phases/2-analyze/visitors/shared/fragment.js": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/compiler/compile/nodes/InlineComponent.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/nodes/InlineComponent.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/compiler/compile/nodes/shared/Node.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/compiler/compile/nodes/shared/Node.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "test/runtime/samples"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "test/runtime/samples/svg-slot-namespace/Widget.svelte",
-              "test/runtime/samples/svg-slot-namespace/_config.js",
-              "test/runtime/samples/svg-slot-namespace/main.svelte"
+              "src/compiler/compile/nodes/Element.ts"
             ],
             "spans": {
-              "test/runtime/samples/svg-slot-namespace/Widget.svelte": [
+              "src/compiler/compile/nodes/Element.ts": [
                 {
-                  "start": 2,
-                  "end": 2
+                  "start": 70,
+                  "end": 100
                 }
-              ],
-              "test/runtime/samples/svg-slot-namespace/_config.js": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/compiler/compile/nodes/Element.ts"
+            ],
+            "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/compiler/compile/nodes/Element.ts"
+            ],
+            "spans": {
+              "src/compiler/compile/nodes/Element.ts": [
                 {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 15,
-                  "end": 15
+                  "start": 76,
+                  "end": 92
                 }
-              ],
-              "test/runtime/samples/svg-slot-namespace/main.svelte": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/compiler/compile/nodes/Element.ts"
+            ],
+            "spans": {
+              "src/compiler/compile/nodes/Element.ts": [
                 {
-                  "start": 7,
-                  "end": 7
+                  "start": 1,
+                  "end": 24
                 }
               ]
             },
@@ -3015,402 +2254,12 @@
           }
         ],
         "predFiles": [
-          "7e762cf48:packages/svelte/src/compiler/phases/2-analyze/visitors/shared/fragment.js",
-          "package.json",
-          "src/compiler/compile/Component.ts",
           "src/compiler/compile/nodes/Element.ts",
-          "src/compiler/compile/nodes/InlineComponent.ts",
-          "src/compiler/compile/nodes/Slot.ts",
-          "src/compiler/compile/nodes/shared/Node.ts",
-          "src/compiler/compile/render_dom/Block.ts",
-          "src/compiler/compile/render_dom/index.ts",
-          "src/compiler/compile/render_dom/wrappers/Element/Attribute.ts",
-          "src/compiler/compile/render_dom/wrappers/Element/Binding.ts",
-          "src/compiler/compile/render_dom/wrappers/Element/StyleAttribute.ts",
-          "src/compiler/compile/render_dom/wrappers/Element/fix_attribute_casing.ts",
-          "src/compiler/compile/render_dom/wrappers/Element/index.ts",
-          "src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts",
-          "src/compiler/compile/render_dom/wrappers/Slot.ts",
-          "src/compiler/compile/render_dom/wrappers/Text.ts",
-          "src/compiler/compile/render_dom/wrappers/shared/Wrapper.ts",
-          "src/compiler/compile/render_ssr/Renderer.ts",
-          "src/compiler/compile/render_ssr/handlers/Element.ts",
-          "src/compiler/compile/render_ssr/handlers/InlineComponent.ts",
-          "src/compiler/compile/render_ssr/handlers/Slot.ts",
-          "src/compiler/compile/render_ssr/handlers/shared/get_slot_scope.ts",
-          "src/compiler/compile/render_ssr/index.ts",
-          "src/compiler/compile/utils/get_slot_data.ts",
-          "src/compiler/interfaces.ts",
-          "src/compiler/parse/state/tag.ts",
-          "src/compiler/utils/namespaces.ts",
-          "src/runtime/internal/ssr.ts",
-          "src/runtime/internal/utils.ts",
-          "test/custom-elements/samples/html-slots/main.svelte",
-          "test/custom-elements/samples/html-slots/test.js",
-          "test/js/samples/svg-title/expected.js",
-          "test/js/samples/svg-title/input.svelte",
-          "test/runtime/index.js",
-          "test/runtime/samples",
-          "test/runtime/samples/attribute-empty-svg/_config.js",
-          "test/runtime/samples/attribute-empty-svg/main.svelte",
-          "test/runtime/samples/attribute-namespaced/_config.js",
-          "test/runtime/samples/attribute-namespaced/main.svelte",
-          "test/runtime/samples/await-then-catch-in-slot/Foo.svelte",
-          "test/runtime/samples/await-then-catch-in-slot/_config.js",
-          "test/runtime/samples/await-then-catch-in-slot/main.svelte",
-          "test/runtime/samples/component-namespaced/Foo.svelte",
-          "test/runtime/samples/component-namespaced/_config.js",
-          "test/runtime/samples/component-namespaced/components.js",
-          "test/runtime/samples/component-namespaced/main.svelte",
-          "test/runtime/samples/component-slot-binding-dimensions-destroys-cleanly/Nested.svelte",
-          "test/runtime/samples/component-slot-binding-dimensions-destroys-cleanly/_config.js",
-          "test/runtime/samples/component-slot-binding-dimensions-destroys-cleanly/main.svelte",
-          "test/runtime/samples/component-slot-chained/Inner.svelte",
-          "test/runtime/samples/component-slot-chained/Outer.svelte",
-          "test/runtime/samples/component-slot-chained/_config.js",
-          "test/runtime/samples/component-slot-chained/main.svelte",
-          "test/runtime/samples/component-slot-default/Nested.svelte",
-          "test/runtime/samples/component-slot-default/_config.js",
-          "test/runtime/samples/component-slot-default/main.svelte",
-          "test/runtime/samples/component-slot-dynamic/Nested.svelte",
-          "test/runtime/samples/component-slot-dynamic/_config.js",
-          "test/runtime/samples/component-slot-dynamic/main.svelte",
-          "test/runtime/samples/component-slot-each-block/Nested.svelte",
-          "test/runtime/samples/component-slot-each-block/_config.js",
-          "test/runtime/samples/component-slot-each-block/main.svelte",
-          "test/runtime/samples/component-slot-empty-b/Nested.svelte",
-          "test/runtime/samples/component-slot-empty-b/_config.js",
-          "test/runtime/samples/component-slot-empty-b/main.svelte",
-          "test/runtime/samples/component-slot-empty/Nested.svelte",
-          "test/runtime/samples/component-slot-empty/_config.js",
-          "test/runtime/samples/component-slot-empty/main.svelte",
-          "test/runtime/samples/component-slot-fallback/Nested.svelte",
-          "test/runtime/samples/component-slot-fallback/_config.js",
-          "test/runtime/samples/component-slot-fallback/main.svelte",
-          "test/runtime/samples/component-slot-if-block-before-node/Nested.svelte",
-          "test/runtime/samples/component-slot-if-block-before-node/_config.js",
-          "test/runtime/samples/component-slot-if-block-before-node/main.svelte",
-          "test/runtime/samples/component-slot-if-block/Nested.svelte",
-          "test/runtime/samples/component-slot-if-block/_config.js",
-          "test/runtime/samples/component-slot-if-block/main.svelte",
-          "test/runtime/samples/component-slot-if-else-block-before-node/Nested.svelte",
-          "test/runtime/samples/component-slot-if-else-block-before-node/_config.js",
-          "test/runtime/samples/component-slot-if-else-block-before-node/main.svelte",
-          "test/runtime/samples/component-slot-let-aliased/Nested.svelte",
-          "test/runtime/samples/component-slot-let-aliased/_config.js",
-          "test/runtime/samples/component-slot-let-aliased/main.svelte",
-          "test/runtime/samples/component-slot-let-b/Nested.svelte",
-          "test/runtime/samples/component-slot-let-b/_config.js",
-          "test/runtime/samples/component-slot-let-b/main.svelte",
-          "test/runtime/samples/component-slot-let-c/Nested.svelte",
-          "test/runtime/samples/component-slot-let-c/_config.js",
-          "test/runtime/samples/component-slot-let-c/main.svelte",
-          "test/runtime/samples/component-slot-let-d/Nested.svelte",
-          "test/runtime/samples/component-slot-let-d/_config.js",
-          "test/runtime/samples/component-slot-let-d/main.svelte",
-          "test/runtime/samples/component-slot-let-destructured/Nested.svelte",
-          "test/runtime/samples/component-slot-let-destructured/_config.js",
-          "test/runtime/samples/component-slot-let-destructured/main.svelte",
-          "test/runtime/samples/component-slot-let-e/Nested.svelte",
-          "test/runtime/samples/component-slot-let-e/_config.js",
-          "test/runtime/samples/component-slot-let-e/main.svelte",
-          "test/runtime/samples/component-slot-let-f/A.svelte",
-          "test/runtime/samples/component-slot-let-f/B.svelte",
-          "test/runtime/samples/component-slot-let-f/_config.js",
-          "test/runtime/samples/component-slot-let-f/main.svelte",
-          "test/runtime/samples/component-slot-let-in-binding/Nested.svelte",
-          "test/runtime/samples/component-slot-let-in-binding/_config.js",
-          "test/runtime/samples/component-slot-let-in-binding/main.svelte",
-          "test/runtime/samples/component-slot-let-named/Nested.svelte",
-          "test/runtime/samples/component-slot-let-named/_config.js",
-          "test/runtime/samples/component-slot-let-named/main.svelte",
-          "test/runtime/samples/component-slot-let-static/Nested.svelte",
-          "test/runtime/samples/component-slot-let-static/_config.js",
-          "test/runtime/samples/component-slot-let-static/main.svelte",
-          "test/runtime/samples/component-slot-let/Nested.svelte",
-          "test/runtime/samples/component-slot-let/_config.js",
-          "test/runtime/samples/component-slot-let/main.svelte",
-          "test/runtime/samples/component-slot-name-with-hyphen/Nested.svelte",
-          "test/runtime/samples/component-slot-name-with-hyphen/_config.js",
-          "test/runtime/samples/component-slot-name-with-hyphen/main.svelte",
-          "test/runtime/samples/component-slot-named-b/Nested.svelte",
-          "test/runtime/samples/component-slot-named-b/_config.js",
-          "test/runtime/samples/component-slot-named-b/main.svelte",
-          "test/runtime/samples/component-slot-named-c/Nested.svelte",
-          "test/runtime/samples/component-slot-named-c/_config.js",
-          "test/runtime/samples/component-slot-named-c/main.svelte",
-          "test/runtime/samples/component-slot-named-inherits-default-lets/Nested.svelte",
-          "test/runtime/samples/component-slot-named-inherits-default-lets/_config.js",
-          "test/runtime/samples/component-slot-named-inherits-default-lets/main.svelte",
-          "test/runtime/samples/component-slot-named/Nested.svelte",
-          "test/runtime/samples/component-slot-named/_config.js",
-          "test/runtime/samples/component-slot-named/main.svelte",
-          "test/runtime/samples/component-slot-names-sanitized/Nested.svelte",
-          "test/runtime/samples/component-slot-names-sanitized/_config.js",
-          "test/runtime/samples/component-slot-names-sanitized/main.svelte",
-          "test/runtime/samples/component-slot-nested-component/Inner.svelte",
-          "test/runtime/samples/component-slot-nested-component/Outer.svelte",
-          "test/runtime/samples/component-slot-nested-component/_config.js",
-          "test/runtime/samples/component-slot-nested-component/main.svelte",
-          "test/runtime/samples/component-slot-nested-in-element/One.svelte",
-          "test/runtime/samples/component-slot-nested-in-element/Two.svelte",
-          "test/runtime/samples/component-slot-nested-in-element/_config.js",
-          "test/runtime/samples/component-slot-nested-in-element/main.svelte",
-          "test/runtime/samples/component-slot-nested/Nested.svelte",
-          "test/runtime/samples/component-slot-nested/_config.js",
-          "test/runtime/samples/component-slot-nested/main.svelte",
-          "test/runtime/samples/component-slot-spread-props/Nested.svelte",
-          "test/runtime/samples/component-slot-spread-props/_config.js",
-          "test/runtime/samples/component-slot-spread-props/main.svelte",
-          "test/runtime/samples/component-slot-static-and-dynamic/Nested.svelte",
-          "test/runtime/samples/component-slot-static-and-dynamic/_config.js",
-          "test/runtime/samples/component-slot-static-and-dynamic/main.svelte",
-          "test/runtime/samples/component-slot-used-with-default-event/Nested.svelte",
-          "test/runtime/samples/component-slot-used-with-default-event/_config.js",
-          "test/runtime/samples/component-slot-used-with-default-event/main.svelte",
-          "test/runtime/samples/dynamic-component-slot/Bar.svelte",
-          "test/runtime/samples/dynamic-component-slot/Baz.svelte",
-          "test/runtime/samples/dynamic-component-slot/Foo.svelte",
-          "test/runtime/samples/dynamic-component-slot/_config.js",
-          "test/runtime/samples/dynamic-component-slot/main.svelte",
-          "test/runtime/samples/slot-in-custom-element/_config.js",
-          "test/runtime/samples/slot-in-custom-element/main.svelte",
-          "test/runtime/samples/svg-attributes/_config.js",
-          "test/runtime/samples/svg-attributes/main.svelte",
-          "test/runtime/samples/svg-child-component-declared-namespace-shorthand/Rect.svelte",
-          "test/runtime/samples/svg-child-component-declared-namespace-shorthand/_config.js",
-          "test/runtime/samples/svg-child-component-declared-namespace-shorthand/main.svelte",
-          "test/runtime/samples/svg-child-component-declared-namespace/Rect.svelte",
-          "test/runtime/samples/svg-child-component-declared-namespace/_config.js",
-          "test/runtime/samples/svg-child-component-declared-namespace/main.svelte",
-          "test/runtime/samples/svg-class/_config.js",
-          "test/runtime/samples/svg-class/main.svelte",
-          "test/runtime/samples/svg-each-block-anchor/_config.js",
-          "test/runtime/samples/svg-each-block-anchor/main.svelte",
-          "test/runtime/samples/svg-each-block-namespace/_config.js",
-          "test/runtime/samples/svg-each-block-namespace/main.svelte",
-          "test/runtime/samples/svg-foreignobject-namespace/_config.js",
-          "test/runtime/samples/svg-foreignobject-namespace/main.svelte",
-          "test/runtime/samples/svg-multiple/_config.js",
-          "test/runtime/samples/svg-multiple/main.svelte",
-          "test/runtime/samples/svg-no-whitespace/_config.js",
-          "test/runtime/samples/svg-no-whitespace/main.svelte",
           "test/runtime/samples/svg-slot-namespace/Widget.svelte",
           "test/runtime/samples/svg-slot-namespace/_config.js",
-          "test/runtime/samples/svg-slot-namespace/main.svelte",
-          "test/runtime/samples/svg-with-style/_config.js",
-          "test/runtime/samples/svg-with-style/main.svelte",
-          "test/runtime/samples/svg-xlink/_config.js",
-          "test/runtime/samples/svg-xlink/main.svelte",
-          "test/runtime/samples/svg-xmlns/_config.js",
-          "test/runtime/samples/svg-xmlns/main.svelte",
-          "test/runtime/samples/svg/_config.js",
-          "test/runtime/samples/svg/main.svelte",
-          "test/runtime/samples/transition-js-slot/Nested.svelte",
-          "test/runtime/samples/transition-js-slot/_config.js",
-          "test/runtime/samples/transition-js-slot/main.svelte",
-          "test/validator/samples/a11y-anchor-in-svg-is-valid/input.svelte",
-          "test/validator/samples/a11y-anchor-in-svg-is-valid/warnings.json",
-          "test/validator/samples/binding-dimensions-svg-child/errors.json",
-          "test/validator/samples/binding-dimensions-svg-child/input.svelte",
-          "test/validator/samples/binding-dimensions-svg/errors.json",
-          "test/validator/samples/binding-dimensions-svg/input.svelte",
-          "test/validator/samples/component-namespaced/input.svelte",
-          "test/validator/samples/component-namespaced/warnings.json",
-          "test/validator/samples/component-slot-default-duplicate.skip/errors.json",
-          "test/validator/samples/component-slot-default-duplicate.skip/input.svelte",
-          "test/validator/samples/component-slot-default-reserved/errors.json",
-          "test/validator/samples/component-slot-default-reserved/input.svelte",
-          "test/validator/samples/component-slot-dynamic-attribute/errors.json",
-          "test/validator/samples/component-slot-dynamic-attribute/input.svelte",
-          "test/validator/samples/component-slot-dynamic/errors.json",
-          "test/validator/samples/component-slot-dynamic/input.svelte",
-          "test/validator/samples/component-slot-named-duplicate.skip/errors.json",
-          "test/validator/samples/component-slot-named-duplicate.skip/input.svelte",
-          "test/validator/samples/component-slotted-each-block/errors.json",
-          "test/validator/samples/component-slotted-each-block/input.svelte",
-          "test/validator/samples/component-slotted-if-block/errors.json",
-          "test/validator/samples/component-slotted-if-block/input.svelte",
-          "test/validator/samples/namespace-invalid-unguessable/errors.json",
-          "test/validator/samples/namespace-invalid-unguessable/input.svelte",
-          "test/validator/samples/namespace-invalid/errors.json",
-          "test/validator/samples/namespace-invalid/input.svelte",
-          "test/validator/samples/namespace-non-literal/errors.json",
-          "test/validator/samples/namespace-non-literal/input.svelte",
-          "test/validator/samples/prop-slot/errors.json",
-          "test/validator/samples/prop-slot/input.svelte",
-          "test/validator/samples/slot-attribute-invalid/errors.json",
-          "test/validator/samples/slot-attribute-invalid/input.svelte",
-          "test/validator/samples/svg-child-component-declared-namespace/input.svelte",
-          "test/validator/samples/svg-child-component-declared-namespace/warnings.json",
-          "test/vars/samples/component-namespaced/_config.js",
-          "test/vars/samples/component-namespaced/input.svelte"
+          "test/runtime/samples/svg-slot-namespace/main.svelte"
         ],
         "predSpans": {
-          "src/compiler/interfaces.ts": [
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 117,
-              "end": 117
-            }
-          ],
-          "src/compiler/compile/Component.ts": [
-            {
-              "start": 127,
-              "end": 127
-            },
-            {
-              "start": 128,
-              "end": 128
-            }
-          ],
-          "src/runtime/internal/ssr.ts": [
-            {
-              "start": 71,
-              "end": 71
-            },
-            {
-              "start": 87,
-              "end": 87
-            }
-          ],
-          "src/compiler/compile/render_dom/index.ts": [
-            {
-              "start": 80,
-              "end": 80
-            },
-            {
-              "start": 87,
-              "end": 87
-            },
-            {
-              "start": 283,
-              "end": 283
-            },
-            {
-              "start": 313,
-              "end": 313
-            },
-            {
-              "start": 314,
-              "end": 314
-            },
-            {
-              "start": 421,
-              "end": 421
-            }
-          ],
-          "src/compiler/parse/state/tag.ts": [
-            {
-              "start": 138,
-              "end": 138
-            }
-          ],
-          "src/compiler/compile/render_ssr/Renderer.ts": [
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 53,
-              "end": 53
-            }
-          ],
-          "src/compiler/compile/render_ssr/index.ts": [
-            {
-              "start": 150,
-              "end": 150
-            }
-          ],
-          "src/compiler/compile/nodes/Slot.ts": [
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 29,
-              "end": 29
-            },
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 37,
-              "end": 37
-            },
-            {
-              "start": 45,
-              "end": 45
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 48,
-              "end": 48
-            },
-            {
-              "start": 49,
-              "end": 49
-            },
-            {
-              "start": 51,
-              "end": 51
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 58,
-              "end": 58
-            },
-            {
-              "start": 60,
-              "end": 60
-            },
-            {
-              "start": 61,
-              "end": 61
-            },
-            {
-              "start": 62,
-              "end": 62
-            },
-            {
-              "start": 69,
-              "end": 69
-            }
-          ],
           "src/compiler/compile/nodes/Element.ts": [
             {
               "start": 20,
@@ -3419,312 +2268,24 @@
             {
               "start": 78,
               "end": 90
-            },
-            {
-              "start": 113,
-              "end": 113
-            },
-            {
-              "start": 377,
-              "end": 377
-            },
-            {
-              "start": 380,
-              "end": 380
-            },
-            {
-              "start": 381,
-              "end": 381
-            },
-            {
-              "start": 385,
-              "end": 385
-            },
-            {
-              "start": 387,
-              "end": 387
-            },
-            {
-              "start": 388,
-              "end": 388
-            },
-            {
-              "start": 391,
-              "end": 391
-            },
-            {
-              "start": 401,
-              "end": 401
-            },
-            {
-              "start": 404,
-              "end": 404
-            },
-            {
-              "start": 412,
-              "end": 412
-            },
-            {
-              "start": 413,
-              "end": 413
-            }
-          ],
-          "src/compiler/compile/nodes/InlineComponent.ts": [
-            {
-              "start": 48,
-              "end": 48
-            },
-            {
-              "start": 51,
-              "end": 51
-            }
-          ],
-          "src/compiler/compile/render_ssr/handlers/Element.ts": [
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 67,
-              "end": 67
-            },
-            {
-              "start": 69,
-              "end": 69
-            },
-            {
-              "start": 70,
-              "end": 70
-            },
-            {
-              "start": 71,
-              "end": 71
-            },
-            {
-              "start": 73,
-              "end": 73
-            },
-            {
-              "start": 74,
-              "end": 74
-            },
-            {
-              "start": 83,
-              "end": 83
-            }
-          ],
-          "src/compiler/compile/render_ssr/handlers/Slot.ts": [
-            {
-              "start": 2,
-              "end": 2
-            },
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "src/compiler/compile/render_ssr/handlers/InlineComponent.ts": [
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 85,
-              "end": 85
-            },
-            {
-              "start": 89,
-              "end": 89
-            },
-            {
-              "start": 90,
-              "end": 90
-            },
-            {
-              "start": 95,
-              "end": 95
-            },
-            {
-              "start": 96,
-              "end": 96
-            },
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 102,
-              "end": 102
-            },
-            {
-              "start": 103,
-              "end": 103
-            },
-            {
-              "start": 105,
-              "end": 105
-            },
-            {
-              "start": 106,
-              "end": 106
-            },
-            {
-              "start": 113,
-              "end": 113
-            },
-            {
-              "start": 115,
-              "end": 115
-            }
-          ],
-          "src/compiler/compile/utils/get_slot_data.ts": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "src/compiler/compile/render_ssr/handlers/shared/get_slot_scope.ts": [
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "src/runtime/internal/utils.ts": [
-            {
-              "start": 66,
-              "end": 66
-            }
-          ],
-          "src/compiler/compile/render_dom/wrappers/Text.ts": [
-            {
-              "start": 29,
-              "end": 29
-            }
-          ],
-          "src/compiler/compile/render_dom/wrappers/Element/Attribute.ts": [
-            {
-              "start": 45,
-              "end": 45
-            },
-            {
-              "start": 63,
-              "end": 63
-            }
-          ],
-          "src/compiler/compile/render_dom/wrappers/Element/index.ts": [
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 286,
-              "end": 286
-            },
-            {
-              "start": 376,
-              "end": 376
-            },
-            {
-              "start": 378,
-              "end": 378
-            },
-            {
-              "start": 382,
-              "end": 382
-            },
-            {
-              "start": 383,
-              "end": 383
-            },
-            {
-              "start": 395,
-              "end": 395
-            },
-            {
-              "start": 401,
-              "end": 401
-            }
-          ],
-          "src/compiler/compile/render_dom/wrappers/InlineComponent/index.ts": [
-            {
-              "start": 73,
-              "end": 73
-            },
-            {
-              "start": 80,
-              "end": 80
-            }
-          ],
-          "test/runtime/index.js": [
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 72,
-              "end": 72
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 212,
-              "end": 212
             }
           ],
           "test/runtime/samples/svg-slot-namespace/Widget.svelte": [
             {
               "start": 1,
               "end": 3
-            },
-            {
-              "start": 2,
-              "end": 2
-            }
-          ],
-          "test/runtime/samples/svg-slot-namespace/_config.js": [
-            {
-              "start": 1,
-              "end": 17
-            },
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 15,
-              "end": 15
             }
           ],
           "test/runtime/samples/svg-slot-namespace/main.svelte": [
             {
               "start": 1,
               "end": 9
-            },
+            }
+          ],
+          "test/runtime/samples/svg-slot-namespace/_config.js": [
             {
-              "start": 7,
-              "end": 7
+              "start": 1,
+              "end": 17
             }
           ]
         },
@@ -3739,312 +2300,249 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
+              "file": 0.16666666666666666,
               "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "span": 0.08738625666771259,
+              "line": 0.12849162011173185
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.3333333333333333,
+              "symbol": 0.2,
+              "span": 0.45764041418261686,
+              "line": 0.3575418994413408
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.3333333333333333,
+              "symbol": 0.2,
+              "span": 0.45764041418261686,
+              "line": 0.3575418994413408
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.26666666666666666,
+              "span": 0.45764041418261686,
+              "line": 0.3575418994413408
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.26666666666666666,
+              "span": 0.45764041418261686,
+              "line": 0.3575418994413408
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.6666666666666666,
+              "symbol": 0.4666666666666667,
+              "span": 0.5442422340759335,
+              "line": 0.4581005586592179
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.13333333333333333,
-              "span": 0.008001255098839033,
-              "line": 0.00558659217877095
+              "symbol": 0.4666666666666667,
+              "span": 0.5442422340759335,
+              "line": 0.4581005586592179
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.13333333333333333,
-              "span": 0.008001255098839033,
-              "line": 0.00558659217877095
+              "symbol": 0.4666666666666667,
+              "span": 0.5442422340759335,
+              "line": 0.4581005586592179
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.13333333333333333,
-              "span": 0.008001255098839033,
-              "line": 0.00558659217877095
+              "symbol": 0.4666666666666667,
+              "span": 0.5442422340759335,
+              "line": 0.4581005586592179
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.13333333333333333,
-              "span": 0.008001255098839033,
-              "line": 0.00558659217877095
+              "symbol": 0.4666666666666667,
+              "span": 0.5442422340759335,
+              "line": 0.4581005586592179
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.13333333333333333,
-              "span": 0.008001255098839033,
-              "line": 0.00558659217877095
+              "symbol": 0.4666666666666667,
+              "span": 0.5442422340759335,
+              "line": 0.4581005586592179
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.13333333333333333,
-              "span": 0.008001255098839033,
-              "line": 0.00558659217877095
+              "symbol": 0.4666666666666667,
+              "span": 0.5442422340759335,
+              "line": 0.4581005586592179
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.13333333333333333,
-              "span": 0.008001255098839033,
-              "line": 0.00558659217877095
+              "symbol": 0.4666666666666667,
+              "span": 0.5442422340759335,
+              "line": 0.4581005586592179
             }
           },
           {
             "step": 14,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.3333333333333333,
-              "span": 0.0528710385942893,
-              "line": 0.03910614525139665
+              "symbol": 0.4666666666666667,
+              "span": 0.5442422340759335,
+              "line": 0.4581005586592179
             }
           },
           {
             "step": 15,
             "coverage": {
               "file": 0.6666666666666666,
-              "symbol": 0.3333333333333333,
-              "span": 0.0528710385942893,
-              "line": 0.03910614525139665
+              "symbol": 0.4666666666666667,
+              "span": 0.5442422340759335,
+              "line": 0.4581005586592179
             }
           },
           {
             "step": 16,
             "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.3333333333333333,
-              "span": 0.0528710385942893,
-              "line": 0.03910614525139665
+              "file": 0.8333333333333334,
+              "symbol": 0.6666666666666666,
+              "span": 0.8336994038280514,
+              "line": 0.7821229050279329
             }
           },
           {
             "step": 17,
             "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.3333333333333333,
-              "span": 0.0528710385942893,
-              "line": 0.03910614525139665
+              "file": 0.8333333333333334,
+              "symbol": 0.6666666666666666,
+              "span": 0.8336994038280514,
+              "line": 0.7821229050279329
             }
           },
           {
             "step": 18,
             "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.3333333333333333,
-              "span": 0.0528710385942893,
-              "line": 0.03910614525139665
+              "file": 0.8333333333333334,
+              "symbol": 0.6666666666666666,
+              "span": 0.8336994038280514,
+              "line": 0.7821229050279329
             }
           },
           {
             "step": 19,
             "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.3333333333333333,
-              "span": 0.0528710385942893,
-              "line": 0.03910614525139665
+              "file": 0.8333333333333334,
+              "symbol": 0.6666666666666666,
+              "span": 0.8336994038280514,
+              "line": 0.7821229050279329
             }
           },
           {
             "step": 20,
             "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.3333333333333333,
-              "span": 0.0528710385942893,
-              "line": 0.03910614525139665
+              "file": 0.8333333333333334,
+              "symbol": 0.6666666666666666,
+              "span": 0.8336994038280514,
+              "line": 0.7821229050279329
             }
           },
           {
             "step": 21,
             "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.3333333333333333,
-              "span": 0.0528710385942893,
-              "line": 0.03910614525139665
+              "file": 0.8333333333333334,
+              "symbol": 0.6666666666666666,
+              "span": 0.8336994038280514,
+              "line": 0.7821229050279329
             }
           },
           {
             "step": 22,
             "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.4,
-              "span": 0.06369626608095387,
-              "line": 0.0446927374301676
+              "file": 1.0,
+              "symbol": 0.8666666666666667,
+              "span": 0.8824913711954816,
+              "line": 0.8435754189944135
             }
           },
           {
             "step": 23,
             "coverage": {
-              "file": 0.8333333333333334,
-              "symbol": 0.4,
-              "span": 0.06369626608095387,
-              "line": 0.0446927374301676
+              "file": 1.0,
+              "symbol": 0.8666666666666667,
+              "span": 0.8824913711954816,
+              "line": 0.8435754189944135
             }
           },
           {
             "step": 24,
             "coverage": {
-              "file": 0.8333333333333334,
-              "symbol": 0.4,
-              "span": 0.06369626608095387,
-              "line": 0.0446927374301676
+              "file": 1.0,
+              "symbol": 0.8666666666666667,
+              "span": 0.8824913711954816,
+              "line": 0.8435754189944135
             }
           },
           {
             "step": 25,
             "coverage": {
-              "file": 0.8333333333333334,
-              "symbol": 0.5333333333333333,
-              "span": 0.07922811421399435,
-              "line": 0.055865921787709494
+              "file": 1.0,
+              "symbol": 0.8666666666666667,
+              "span": 0.8824913711954816,
+              "line": 0.8435754189944135
             }
           },
           {
             "step": 26,
             "coverage": {
-              "file": 0.8333333333333334,
-              "symbol": 0.5333333333333333,
-              "span": 0.07922811421399435,
-              "line": 0.055865921787709494
-            }
-          },
-          {
-            "step": 27,
-            "coverage": {
-              "file": 0.8333333333333334,
-              "symbol": 0.5333333333333333,
-              "span": 0.07922811421399435,
-              "line": 0.055865921787709494
-            }
-          },
-          {
-            "step": 28,
-            "coverage": {
-              "file": 0.8333333333333334,
-              "symbol": 0.5333333333333333,
-              "span": 0.07922811421399435,
-              "line": 0.055865921787709494
-            }
-          },
-          {
-            "step": 29,
-            "coverage": {
-              "file": 0.8333333333333334,
-              "symbol": 0.5333333333333333,
-              "span": 0.07922811421399435,
-              "line": 0.055865921787709494
-            }
-          },
-          {
-            "step": 30,
-            "coverage": {
-              "file": 0.8333333333333334,
-              "symbol": 0.5333333333333333,
-              "span": 0.07922811421399435,
-              "line": 0.055865921787709494
-            }
-          },
-          {
-            "step": 31,
-            "coverage": {
               "file": 1.0,
-              "symbol": 0.5333333333333333,
-              "span": 0.07922811421399435,
-              "line": 0.055865921787709494
-            }
-          },
-          {
-            "step": 32,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.5333333333333333,
-              "span": 0.07922811421399435,
-              "line": 0.055865921787709494
-            }
-          },
-          {
-            "step": 33,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.5333333333333333,
-              "span": 0.07922811421399435,
-              "line": 0.055865921787709494
+              "symbol": 0.8666666666666667,
+              "span": 0.8824913711954816,
+              "line": 0.8435754189944135
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.6313131313131313,
-          "symbol": 0.29090909090909095,
-          "span": 0.041912694564090865,
-          "line": 0.029964448958862383
+          "file": 0.7115384615384616,
+          "symbol": 0.5358974358974359,
+          "span": 0.6451932128116626,
+          "line": 0.5788568972926516
         },
         "redundancy": {
-          "file": 0.08536585365853655,
-          "symbol": 0.02941176470588236,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.23076923076923073,
+          "symbol": 0.0636363636363636,
+          "span": 0.0429785428692645,
+          "line": 0.015764806135492138
         }
       },
       "fixOverlap": {
@@ -4063,35 +2561,35 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/c92b50457929e25a1bdd/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/c92b50457929e25a1bdd/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/c92b50457929e25a1bdd/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/c92b50457929e25a1bdd/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/c92b50457929e25a1bdd/home/.agents/skills/superpowers/systematic-debugging/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: systematic-debugging\ndescription: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes\n---\n\n# Systematic Debugging\n\n## Overview\n\nRandom fixes waste time and create new bugs. Quick patches mask underlying issues.\n\n**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.\n\n**Violating the letter of this process is violating the spirit of debugging.**\n\n## The Iron Law\n\n```\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST\n```\n\nIf you haven't completed Phase 1, you cannot propose fixes.\n\n## When to Use\n\nUse for ANY technical issue:\n- Test failures\n- Bugs in production\n- Unexpected behavior\n- Performance problems\n- Build failures\n- Integration issues\n\n**Use this ESPECIALLY when:**\n- Under time pressure (emergencies make guessing tempting)\n- \"Just one quick fix\" seems obvious\n- You've already tried multiple fixes\n- Previous fix didn't work\n- You don't fully understand the issue\n\n**Don't skip when:**\n- Issue seems simple (simple bugs have root causes too)\n- You're in a hurry (rushing guarantees rework)\n- Manager wants it fixed NOW (systematic is faster than thrashing)\n\n## The Four Phases\n\nYou MUST complete each phase before proceeding to the next.\n\n### Phase 1: Root Cause Investigation\n\n**BEFORE attempting ANY fix:**\n\n1. **Read Error Messages Carefully**\n   - Don't skip past errors or warnings\n   - They often contain the exact solution\n   - Read stack traces completely\n   - Note line numbers, file paths, error codes\n\n2. **Reproduce Consistently**\n   - Can you trigger it reliably?\n   - What are the exact steps?\n   - Does it happen every time?\n   - If not reproducible \u2192 gather more data, don't guess\n\n3. **Check Recent Changes**\n   - What changed that could cause this?\n   - Git diff, recent commits\n   - New dependencies, config changes\n   - Environmental differences\n\n4. **Gather Evidence in Multi-Component Systems**\n\n   **WHEN system has multiple components (CI \u2192 build \u2192 signing, API \u2192 service \u2192 database):**\n\n   **BEFORE proposing fixes, add diagnostic instrumentation:**\n   ```\n   For EACH component boundary:\n     - Log what data enters component\n     - Log what data exits component\n     - Verify environment/config propagation\n     - Check state at each layer\n\n   Run once to gather evidence showing WHERE it breaks\n   THEN analyze evidence to identify failing component\n   THEN investigate that specific component\n   ```\n\n   **Example (multi-layer system):**\n   ```bash\n   # Layer 1: Workflow\n   echo \"=== Secrets available in workflow: ===\"\n   echo \"IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}\"\n\n   # Layer 2: Build script\n   echo \"=== Env vars in build script: ===\"\n   env | grep IDENTITY || echo \"IDENTITY not in environment\"\n\n   # Layer 3: Signing script\n   echo \"=== Keychain state: ===\"\n   security list-keychains\n   security find-identity -v\n\n   # Layer 4: Actual signing\n   codesign --sign \"$IDENTITY\" --verbose=4 \"$APP\"\n   ```\n\n   **This reveals:** Which layer fails (secrets \u2192 workflow \u2713, workflow \u2192 build \u2717)\n\n5. **Trace Data Flow**\n\n   **WHEN error is deep in call stack:**\n\n   See `root-cause-tracing.md` in this directory for the complete backward tracing technique.\n\n   **Quick version:**\n   - Where does bad value originate?\n   - What called this with bad value?\n   - Keep tracing up until you find the source\n   - Fix at source, not at symptom\n\n### Phase 2: Pattern Analysis\n\n**Find the pattern before fixing:**\n\n1. **Find Working Examples**\n   - Locate similar working code in same codebase\n   - What works that's similar to what's broken?\n\n2. **Compare Against References**\n   - If implementing pattern, read reference implementation COMPLETELY\n   - Don't skim - read every line\n   - Understand the pattern fully before applying\n\n3. **Identify Differences**\n   - What's different between working and broken?\n   - List every difference, however small\n   - Don't assume \"that can't matter\"\n\n4. **Understand Dependencies**\n   - What other components does this need?\n   - \u2026",
           "exitCode": 0
         },
@@ -4392,12 +2890,36 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/test/runtime/samples/svg-slot-namespace/Widget.svelte",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/test/runtime/samples/svg-slot-namespace/_config.js",
+                "kind": "add"
+              },
+              {
+                "path": "<worktree>/test/runtime/samples/svg-slot-namespace/main.svelte",
+                "kind": "add"
+              }
+            ]
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/compiler/compile/nodes/Element.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/compiler/compile/nodes/Element.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

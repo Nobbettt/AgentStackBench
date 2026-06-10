@@ -1,30 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState } from "react";
-import { Bar, BarChart, CartesianGrid, Cell, LabelList, ReferenceLine, ResponsiveContainer, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, ReferenceDot, ResponsiveContainer, XAxis, YAxis } from "recharts";
 
-import type { ComparisonCard } from "@/data/comparisons";
+import type { ComparisonCard, ComparisonInstance } from "@/data/comparisons";
 import {
   coveragePrecision,
   f1,
   formatLanguageLabel,
-  formatPercentDelta,
-  formatSignedFixed,
   getComparisonPair,
   sortBench,
 } from "@/components/comparison/format";
+import {
+  formatPValue,
+  formatSignificanceEffect,
+  formatSignificanceInterval,
+  getGroupedMetricSignificance,
+  type PairedSignificance,
+} from "@/components/comparison/significance";
 import { ComparisonSectionShell, HelpIcon } from "@/components/comparison/shared";
-import type { DeltaDisplayMode, ComparisonResultsViewMode } from "@/components/comparison/types";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 
 export function LanguageMetricsSection({
   comparison,
-  viewMode,
-  deltaDisplayMode,
 }: {
   comparison: ComparisonCard;
-  viewMode: ComparisonResultsViewMode;
-  deltaDisplayMode: DeltaDisplayMode;
 }) {
   const [activeSlideKey, setActiveSlideKey] = useState<LanguageMetricSlideKey>("resolution");
   const comparisonPair = getComparisonPair(comparison);
@@ -62,7 +62,6 @@ export function LanguageMetricsSection({
   const toolUsageBenchData = getUsageRows(comparisonPair.baseline, comparisonPair.treatment, "tools", "bench");
   const toolUsageRepoSizeData = getUsageRows(comparisonPair.baseline, comparisonPair.treatment, "tools", "repositorySize");
   const toolUsageAxis = getUsageAxis([...toolUsageData, ...toolUsageBenchData, ...toolUsageRepoSizeData]);
-  const showDeltas = viewMode === "treatment-delta";
   const availableSlides: LanguageMetricSlide[] = [
     {
       key: "resolution",
@@ -90,13 +89,13 @@ export function LanguageMetricsSection({
     },
     {
       key: "context",
-      label: "Context F1",
-      languageTitle: "Context F1 by Language",
-      languageDescription: "ContextBench F1 by language, computed from file, symbol, and span retrieval F1.",
-      benchmarkTitle: "Context F1 by Benchmark",
-      benchmarkDescription: "ContextBench F1 by benchmark slice, computed from file, symbol, and span retrieval F1.",
-      repositorySizeTitle: "Context F1 by Repository Size",
-      repositorySizeDescription: "ContextBench F1 by git-tracked file count bucket, computed from file, symbol, and span retrieval F1. Tasks without local repository-size metadata are omitted.",
+      label: "Macro Context F1",
+      languageTitle: "Macro Context F1 by Language",
+      languageDescription: "ContextBench F1 by language, computed from file, block, line, and symbol retrieval F1.",
+      benchmarkTitle: "Macro Context F1 by Benchmark",
+      benchmarkDescription: "ContextBench F1 by benchmark slice, computed from file, block, line, and symbol retrieval F1.",
+      repositorySizeTitle: "Macro Context F1 by Repository Size",
+      repositorySizeDescription: "ContextBench F1 by git-tracked file count bucket, computed from file, block, line, and symbol retrieval F1. Tasks without local repository-size metadata are omitted.",
       data: contextLanguageData,
       benchmarkData: contextBenchData,
       repositorySizeData: contextRepoSizeData,
@@ -105,7 +104,7 @@ export function LanguageMetricsSection({
       yTickFormatter: (value) => Number(value).toFixed(2),
       tooltipFormatter: (value, key, item) => {
         const taskCount = item.payload?.[`${key}Total`];
-        const countLabel = typeof taskCount === "number" ? ` (${taskCount} tasks)` : "";
+        const countLabel = typeof taskCount === "number" ? ` (${taskCount} valid evals)` : "";
         return `${Number(value).toFixed(3)}${countLabel}`;
       },
     },
@@ -200,7 +199,13 @@ export function LanguageMetricsSection({
                 <h3 className="text-lg font-semibold tracking-tight">{activeSlide.languageTitle}</h3>
                 <HelpIcon label={activeSlide.languageTitle} explanation={activeSlide.languageDescription} />
               </div>
-              <LanguageMetricChart chartConfig={chartConfig} slide={activeSlide} data={activeSlide.data} showDeltas={showDeltas} deltaDisplayMode={deltaDisplayMode} />
+              <LanguageMetricChart
+                comparison={comparison}
+                groupKey="language"
+                chartConfig={chartConfig}
+                slide={activeSlide}
+                data={activeSlide.data}
+              />
             </div>
           ) : null}
           <div>
@@ -209,7 +214,13 @@ export function LanguageMetricsSection({
               <HelpIcon label={activeSlide.benchmarkTitle} explanation={activeSlide.benchmarkDescription} />
             </div>
             {activeSlide.benchmarkData.length > 0 ? (
-              <LanguageMetricChart chartConfig={chartConfig} slide={activeSlide} data={activeSlide.benchmarkData} showDeltas={showDeltas} deltaDisplayMode={deltaDisplayMode} />
+              <LanguageMetricChart
+                comparison={comparison}
+                groupKey="bench"
+                chartConfig={chartConfig}
+                slide={activeSlide}
+                data={activeSlide.benchmarkData}
+              />
             ) : (
               <div className="rounded-lg bg-muted/40 p-6 text-sm text-muted-foreground">
                 No benchmark-level {activeSlide.label.toLowerCase()} data is available for the current filters.
@@ -222,7 +233,13 @@ export function LanguageMetricsSection({
                 <h3 className="text-lg font-semibold tracking-tight">{activeSlide.repositorySizeTitle}</h3>
                 <HelpIcon label={activeSlide.repositorySizeTitle} explanation={activeSlide.repositorySizeDescription} />
               </div>
-              <LanguageMetricChart chartConfig={chartConfig} slide={activeSlide} data={activeSlide.repositorySizeData} showDeltas={showDeltas} deltaDisplayMode={deltaDisplayMode} />
+              <LanguageMetricChart
+                comparison={comparison}
+                groupKey="repositorySize"
+                chartConfig={chartConfig}
+                slide={activeSlide}
+                data={activeSlide.repositorySizeData}
+              />
             </div>
           ) : null}
         </div>
@@ -265,35 +282,24 @@ type LanguageMetricRow = {
 };
 
 function LanguageMetricChart({
+  comparison,
+  groupKey,
   chartConfig,
   slide,
   data,
-  showDeltas,
-  deltaDisplayMode,
 }: {
+  comparison: ComparisonCard;
+  groupKey: MetricGroupKey;
   chartConfig: ChartConfig;
   slide: LanguageMetricSlide;
   data: LanguageMetricRow[];
-  showDeltas: boolean;
-  deltaDisplayMode: DeltaDisplayMode;
 }) {
-  const deltaRows = showDeltas ? buildLanguageMetricDeltaRows(data, slide, deltaDisplayMode) : [];
-  const chartData = showDeltas ? deltaRows : data;
-  const deltaAxis = showDeltas ? getLanguageMetricDeltaAxis(deltaRows, slide, deltaDisplayMode) : null;
-  const effectiveChartConfig = showDeltas
-    ? {
-      ...chartConfig,
-      deltaValue: {
-        label: deltaDisplayMode === "percent" ? "Percent delta" : "Delta",
-        color: "hsl(var(--chart-2))",
-      },
-    } satisfies ChartConfig
-    : chartConfig;
+  const chartData = buildLanguageMetricChartRows(comparison, slide, data, groupKey);
 
   return (
-    <ChartContainer config={effectiveChartConfig} className="h-[360px] w-full">
+    <ChartContainer config={chartConfig} className="h-[360px] w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={chartData} margin={{ top: showDeltas ? 36 : 16, right: 16, bottom: 24, left: 0 }}>
+        <BarChart data={chartData} margin={{ top: 38, right: 16, bottom: 24, left: 0 }} barGap={6}>
           <CartesianGrid vertical={false} />
           <XAxis
             dataKey="language"
@@ -306,147 +312,137 @@ function LanguageMetricChart({
             tickLine={false}
             axisLine={false}
             tickMargin={10}
-            width={showDeltas ? 56 : 44}
-            domain={deltaAxis?.domain ?? slide.domain}
-            ticks={deltaAxis?.ticks ?? slide.yTicks}
-            tickFormatter={deltaAxis?.tickFormatter ?? slide.yTickFormatter}
+            width={44}
+            domain={slide.domain}
+            ticks={slide.yTicks}
+            tickFormatter={slide.yTickFormatter}
           />
-          {showDeltas ? <ReferenceLine y={0} stroke="hsl(var(--border))" strokeWidth={1.5} /> : null}
           <ChartTooltip
             cursor={false}
             content={
               <ChartTooltipContent
                 formatter={(value, _name, item) => {
-                  if (showDeltas) {
-                    return languageMetricDeltaTooltipValue(item.payload, slide, deltaDisplayMode);
-                  }
                   const key = item.dataKey === "baseline" ? "baseline" : "treatment";
-                  return slide.tooltipFormatter(value, key, item);
+                  const formattedValue = slide.tooltipFormatter(value, key, item);
+                  const significance = key === "treatment" ? item.payload?.significance : null;
+                  return significance ? `${formattedValue}; ${languageMetricSignificanceTooltip(significance)}` : formattedValue;
                 }}
               />
             }
           />
-          {showDeltas ? null : <ChartLegend content={<ChartLegendContent />} />}
-          {showDeltas ? (
-            <Bar dataKey="deltaValue" fill="var(--color-deltaValue)" radius={[4, 4, 4, 4]} isAnimationActive={false}>
-              <LabelList
-                dataKey="deltaLabel"
-                position="top"
-                offset={6}
-                className="fill-foreground text-xs font-medium"
-              />
-              {deltaRows.map((row) => (
-                <Cell key={row.language} fill={languageMetricDeltaFill(row.deltaValue)} />
-              ))}
-            </Bar>
-          ) : null}
-          {showDeltas ? null : <Bar dataKey="baseline" fill="var(--color-baseline)" radius={[4, 4, 0, 0]} />}
-          {showDeltas ? null : <Bar dataKey="treatment" fill="var(--color-treatment)" radius={[4, 4, 0, 0]} />}
+          <ChartLegend content={<ChartLegendContent />} />
+          <Bar dataKey="baseline" fill="var(--color-baseline)" radius={[4, 4, 0, 0]} />
+          <Bar dataKey="treatment" fill="var(--color-treatment)" radius={[4, 4, 0, 0]} />
+          {chartData.map((row) => row.significance ? (
+            <ReferenceDot
+              key={row.sortKey ?? row.language}
+              x={row.language}
+              y={Math.max(row.baseline, row.treatment)}
+              r={0}
+              isFront
+              ifOverflow="visible"
+              shape={(props) => (
+                <LanguageMetricSignificanceReferenceBadge
+                  {...props}
+                  significance={row.significance}
+                />
+              )}
+            />
+          ) : null)}
         </BarChart>
       </ResponsiveContainer>
     </ChartContainer>
   );
 }
 
-type LanguageMetricDeltaRow = LanguageMetricRow & {
-  deltaValue: number | null;
-  deltaLabel: string;
+type LanguageMetricChartRow = LanguageMetricRow & {
+  significance?: PairedSignificance | null;
 };
 
-function buildLanguageMetricDeltaRows(
-  rows: LanguageMetricRow[],
+function buildLanguageMetricChartRows(
+  comparison: ComparisonCard,
   slide: LanguageMetricSlide,
-  deltaDisplayMode: DeltaDisplayMode,
-): LanguageMetricDeltaRow[] {
+  rows: LanguageMetricRow[],
+  groupKey: MetricGroupKey,
+): LanguageMetricChartRow[] {
+  const metricKey = languageMetricSignificanceKey(slide.key);
   return rows.map((row) => ({
     ...row,
-    deltaValue: languageMetricDeltaValue(row, deltaDisplayMode),
-    deltaLabel: languageMetricDeltaLabel(row, slide, deltaDisplayMode),
+    significance: getGroupedMetricSignificance(comparison, metricKey, groupKey, row.sortKey),
   }));
 }
 
-function languageMetricDeltaValue(row: LanguageMetricRow, deltaDisplayMode: DeltaDisplayMode): number | null {
-  const delta = row.treatment - row.baseline;
-  if (deltaDisplayMode === "percent") {
-    if (row.baseline === 0) return delta === 0 ? 0 : null;
-    return (delta / Math.abs(row.baseline)) * 100;
-  }
-  return delta;
+function LanguageMetricSignificanceReferenceBadge({
+  cx,
+  cy,
+  significance,
+}: {
+  cx?: number | string;
+  cy?: number | string;
+  significance: PairedSignificance;
+}) {
+  const numericX = Number(cx);
+  const numericY = Number(cy);
+  if (!Number.isFinite(numericX) || !Number.isFinite(numericY)) return null;
+
+  const badgeWidth = significance.significant ? 46 : 50;
+  const badgeHeight = 18;
+  const centerX = numericX;
+  const centerY = numericY - 15;
+  const startX = centerX - badgeWidth / 2;
+  const startY = centerY - badgeHeight / 2;
+  const iconX = startX + 12;
+  const textX = startX + 31;
+  const iconStroke = significance.significant ? "rgb(4 120 87)" : "hsl(var(--muted-foreground))";
+  const badgeFill = significance.significant ? "rgb(236 253 245)" : "hsl(var(--muted))";
+  const badgeStroke = significance.significant ? "rgb(167 243 208)" : "hsl(var(--border))";
+  const textFill = significance.significant ? "rgb(4 120 87)" : "hsl(var(--muted-foreground))";
+  const opacity = significance.significant ? 1 : 0.66;
+
+  return (
+    <g opacity={opacity}>
+      <rect
+        x={startX}
+        y={startY}
+        width={badgeWidth}
+        height={badgeHeight}
+        rx={9}
+        fill={badgeFill}
+        stroke={badgeStroke}
+      />
+      <circle cx={iconX} cy={centerY} r={4.6} fill="none" stroke={iconStroke} strokeWidth={1.8} />
+      <path
+        d={`M ${iconX - 2.3} ${centerY - 0.1} L ${iconX - 0.7} ${centerY + 1.7} L ${iconX + 2.7} ${centerY - 2.3}`}
+        fill="none"
+        stroke={iconStroke}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={1.8}
+      />
+      <text
+        x={textX}
+        y={centerY}
+        dominantBaseline="central"
+        textAnchor="middle"
+        fill={textFill}
+        className="text-[9px] font-semibold"
+      >
+        {significance.significant ? "sig" : "n.s."}
+      </text>
+    </g>
+  );
 }
 
-function getLanguageMetricDeltaAxis(
-  rows: LanguageMetricDeltaRow[],
-  slide: LanguageMetricSlide,
-  deltaDisplayMode: DeltaDisplayMode,
-) {
-  const values = rows
-    .map((row) => row.deltaValue)
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  const fallback = deltaDisplayMode === "percent"
-    ? 10
-    : slide.key === "context"
-      ? 0.1
-      : 1;
-  const maxAbs = nicePositiveCeiling(Math.max(fallback, ...values.map((value) => Math.abs(value))));
-
-  return {
-    domain: [-maxAbs, maxAbs] as [number, number],
-    ticks: [-maxAbs, -maxAbs / 2, 0, maxAbs / 2, maxAbs],
-    tickFormatter: (value: number) => languageMetricDeltaTickFormatter(value, maxAbs, slide, deltaDisplayMode),
-  };
+function languageMetricSignificanceKey(slideKey: LanguageMetricSlideKey): string {
+  if (slideKey === "resolution") return "officialPassAt1";
+  if (slideKey === "context") return "contextF1";
+  if (slideKey === "skills") return "skillInvocations";
+  return "toolInvocations";
 }
 
-function nicePositiveCeiling(value: number): number {
-  if (!Number.isFinite(value) || value <= 0) return 1;
-  const magnitude = 10 ** Math.floor(Math.log10(value));
-  const normalized = value / magnitude;
-  if (normalized <= 1) return magnitude;
-  if (normalized <= 2) return 2 * magnitude;
-  if (normalized <= 5) return 5 * magnitude;
-  return 10 * magnitude;
-}
-
-function languageMetricDeltaTickFormatter(
-  value: number,
-  maxAbs: number,
-  slide: LanguageMetricSlide,
-  deltaDisplayMode: DeltaDisplayMode,
-): string {
-  if (deltaDisplayMode === "percent") return `${value.toFixed(maxAbs < 10 ? 1 : 0)}%`;
-  if (slide.key === "resolution") return value.toFixed(maxAbs < 10 ? 1 : 0);
-  if (slide.key === "context") return value.toFixed(maxAbs < 0.1 ? 3 : 2);
-  return value.toFixed(maxAbs < 10 ? 2 : 1);
-}
-
-function languageMetricDeltaFill(value: number | null): string {
-  if (value == null || value === 0) return "hsl(var(--muted-foreground))";
-  return value > 0 ? "hsl(var(--chart-2))" : "hsl(var(--destructive))";
-}
-
-function languageMetricDeltaTooltipValue(
-  row: LanguageMetricDeltaRow | undefined,
-  slide: LanguageMetricSlide,
-  deltaDisplayMode: DeltaDisplayMode,
-): string {
-  if (!row) return "-";
-  const baseline = slide.tooltipFormatter(row.baseline, "baseline", { payload: row });
-  const treatment = slide.tooltipFormatter(row.treatment, "treatment", { payload: row });
-  return `${languageMetricDeltaLabel(row, slide, deltaDisplayMode)} (${baseline} -> ${treatment})`;
-}
-
-function languageMetricDeltaLabel(
-  row: LanguageMetricRow,
-  slide: LanguageMetricSlide,
-  deltaDisplayMode: DeltaDisplayMode,
-): string {
-  const delta = row.treatment - row.baseline;
-  if (deltaDisplayMode === "percent") {
-    if (row.baseline === 0) return delta === 0 ? "0.0%" : "n/a";
-    return formatPercentDelta((delta / Math.abs(row.baseline)) * 100);
-  }
-  if (slide.key === "resolution") return `${formatSignedFixed(delta, 1)} pts`;
-  if (slide.key === "context") return formatSignedFixed(delta, 3);
-  return formatSignedFixed(delta, 2);
+function languageMetricSignificanceTooltip(stat: PairedSignificance): string {
+  const label = stat.significant ? "significant" : "not significant";
+  return `${label}, n=${stat.n}, q=${formatPValue(stat.qValue)}, ${stat.effectLabel ?? "Effect"}: ${formatSignificanceEffect(stat)}, 95% CI ${formatSignificanceInterval(stat)}`;
 }
 
 type LanguageResolutionStat = {
@@ -474,6 +470,10 @@ function metricGroupValue(
   const trackedFiles = instance.repositorySize?.trackedFiles;
   if (typeof trackedFiles !== "number") return null;
   return repositorySizeBuckets.find((bucket) => trackedFiles >= bucket.min && trackedFiles < bucket.max)?.key ?? null;
+}
+
+function hasValidEvaluation(instance: ComparisonInstance): boolean {
+  return !instance.artifacts?.evaluationStatus || instance.artifacts.evaluationStatus === "valid";
 }
 
 function formatMetricGroupLabel(value: string, groupKey: MetricGroupKey): string {
@@ -555,6 +555,9 @@ type QualityTotals = {
   file: QualityBucket;
   symbol: QualityBucket;
   span: QualityBucket;
+  line: QualityBucket;
+  contextF1Sum: number;
+  total: number;
 };
 
 type QualityBucket = {
@@ -592,22 +595,26 @@ function getContextRows(
 function getContextStatsByGroup(
   variant: ComparisonCard["variants"][number],
   groupKey: MetricGroupKey,
-): Map<string, QualityTotals & { total: number }> {
-  const byGroup = new Map<string, QualityTotals & { total: number }>();
+): Map<string, QualityTotals> {
+  const byGroup = new Map<string, QualityTotals>();
   for (const instance of variant.instances ?? []) {
+    if (!hasValidEvaluation(instance)) continue;
     const group = metricGroupValue(instance, groupKey);
     if (!group) continue;
     const stats = byGroup.get(group) ?? {
       file: { intersection: 0, goldSize: 0, predSize: 0 },
       symbol: { intersection: 0, goldSize: 0, predSize: 0 },
       span: { intersection: 0, goldSize: 0, predSize: 0 },
+      line: { intersection: 0, goldSize: 0, predSize: 0 },
+      contextF1Sum: 0,
       total: 0,
     };
-    for (const level of ["file", "symbol", "span"] as const) {
+    for (const level of ["file", "span", "line", "symbol"] as const) {
       stats[level].intersection += instance.quality[level].intersection;
       stats[level].goldSize += instance.quality[level].goldSize;
       stats[level].predSize += instance.quality[level].predSize;
     }
+    stats.contextF1Sum += contextF1ForInstance(instance);
     stats.total += 1;
     byGroup.set(group, stats);
   }
@@ -615,10 +622,30 @@ function getContextStatsByGroup(
 }
 
 function contextF1FromTotals(totals: QualityTotals): number {
+  if (totals.total > 0) return totals.contextF1Sum / totals.total;
   const fileMetrics = coveragePrecision(totals.file.predSize, totals.file.goldSize, totals.file.intersection);
-  const symbolMetrics = coveragePrecision(totals.symbol.predSize, totals.symbol.goldSize, totals.symbol.intersection);
   const spanMetrics = coveragePrecision(totals.span.predSize, totals.span.goldSize, totals.span.intersection);
-  return (f1(fileMetrics.coverage, fileMetrics.precision) + f1(symbolMetrics.coverage, symbolMetrics.precision) + f1(spanMetrics.coverage, spanMetrics.precision)) / 3;
+  const lineMetrics = coveragePrecision(totals.line.predSize, totals.line.goldSize, totals.line.intersection);
+  const symbolMetrics = coveragePrecision(totals.symbol.predSize, totals.symbol.goldSize, totals.symbol.intersection);
+  return (
+    f1(fileMetrics.coverage, fileMetrics.precision) +
+    f1(spanMetrics.coverage, spanMetrics.precision) +
+    f1(lineMetrics.coverage, lineMetrics.precision) +
+    f1(symbolMetrics.coverage, symbolMetrics.precision)
+  ) / 4;
+}
+
+function contextF1ForInstance(instance: ComparisonInstance): number {
+  const fileMetrics = coveragePrecision(instance.quality.file.predSize, instance.quality.file.goldSize, instance.quality.file.intersection);
+  const spanMetrics = coveragePrecision(instance.quality.span.predSize, instance.quality.span.goldSize, instance.quality.span.intersection);
+  const lineMetrics = coveragePrecision(instance.quality.line.predSize, instance.quality.line.goldSize, instance.quality.line.intersection);
+  const symbolMetrics = coveragePrecision(instance.quality.symbol.predSize, instance.quality.symbol.goldSize, instance.quality.symbol.intersection);
+  return (
+    f1(fileMetrics.coverage, fileMetrics.precision) +
+    f1(spanMetrics.coverage, spanMetrics.precision) +
+    f1(lineMetrics.coverage, lineMetrics.precision) +
+    f1(symbolMetrics.coverage, symbolMetrics.precision)
+  ) / 4;
 }
 
 type UsageKind = "skills" | "tools";

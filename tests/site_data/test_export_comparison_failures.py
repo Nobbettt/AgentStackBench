@@ -6,9 +6,25 @@ from pathlib import Path
 
 import pytest
 
-from scripts.export_comparison_data import ComparisonExportError, build_comparison_payload
+from scripts.export_comparison_data import ComparisonExportError, _assert_clean_prediction_artifacts, build_comparison_payload
 
 from .helpers import _record, _write
+
+def test_export_rejects_trace_inference_final_context_source() -> None:
+    rows = [
+        {
+            "instance_id": "task-a",
+            "traj_data": {
+                "pred_files_source": ["trace_inference", "agent_report"],
+                "pred_files": ["src/a.py"],
+                "pred_spans": {},
+                "pred_symbols": {},
+            },
+        }
+    ]
+
+    with pytest.raises(ComparisonExportError, match="trace_inference"):
+        _assert_clean_prediction_artifacts(rows, label="pred.jsonl")
 
 def test_build_comparison_payload_fails_when_eval_is_missing(tmp_path: Path) -> None:
     suite_dir = tmp_path / "results" / "run_suites" / "demo-suite"

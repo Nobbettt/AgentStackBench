@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-04-29T22:40:49Z",
       "completedAt": "2026-04-29T22:47:04Z",
       "durationMs": 374611,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1434250,
@@ -25,6 +40,28 @@
         "total_tokens": 1450401,
         "cache_read_input_tokens": 1348736
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 47,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/sklearn/impute/_iterative.py b/sklearn/impute/_iterative.py\nindex 1d918bc0c..97d28ad33 100644\n--- a/sklearn/impute/_iterative.py\n+++ b/sklearn/impute/_iterative.py\n@@ -117,6 +117,11 @@ class IterativeImputer(_BaseImputer):\n         Which strategy to use to initialize the missing values. Same as the\n         `strategy` parameter in :class:`~sklearn.impute.SimpleImputer`.\n \n+    fill_value : str or numerical value, default=None\n+        When `initial_strategy=\"constant\"`, `fill_value` is used to replace\n+        all occurrences of missing_values. This is passed to the\n+        `fill_value` parameter of :class:`~sklearn.impute.SimpleImputer`.\n+\n     imputation_order : {'ascending', 'descending', 'roman', 'arabic', \\\n             'random'}, default='ascending'\n         The order in which the features will be imputed. Possible values:\n@@ -281,6 +286,7 @@ class IterativeImputer(_BaseImputer):\n         \"initial_strategy\": [\n             StrOptions({\"mean\", \"median\", \"most_frequent\", \"constant\"})\n         ],\n+        \"fill_value\": \"no_validation\",\n         \"imputation_order\": [\n             StrOptions({\"ascending\", \"descending\", \"roman\", \"arabic\", \"random\"})\n         ],\n@@ -301,6 +307,7 @@ class IterativeImputer(_BaseImputer):\n         tol=1e-3,\n         n_nearest_features=None,\n         initial_strategy=\"mean\",\n+        fill_value=None,\n         imputation_order=\"ascending\",\n         skip_complete=False,\n         min_value=-np.inf,\n@@ -322,6 +329,7 @@ class IterativeImputer(_BaseImputer):\n         self.tol = tol\n         self.n_nearest_features = n_nearest_features\n         self.initial_strategy = initial_strategy\n+        self.fill_value = fill_value\n         self.imputation_order = imputation_order\n         self.skip_complete = skip_complete\n         self.min_value = min_value\n@@ -613,15 +621,19 @@ class IterativeImputer(_BaseImputer):\n             self.initial_imputer_ = SimpleImputer(\n                 missing_values=self.missing_values,\n                 strategy=self.initial_strategy,\n+                fill_value=self.fill_value,\n                 keep_empty_features=self.keep_empty_features,\n             )\n             X_filled = self.initial_imputer_.fit_transform(X)\n         else:\n             X_filled = self.initial_imputer_.transform(X)\n \n-        valid_mask = np.flatnonzero(\n-            np.logical_not(np.isnan(self.initial_imputer_.statistics_))\n-        )\n+        if self.initial_strategy == \"constant\":\n+            valid_mask = np.arange(X.shape[1])\n+        else:\n+            valid_mask = np.flatnonzero(\n+                np.logical_not(np.isnan(self.initial_imputer_.statistics_))\n+            )\n \n         if not self.keep_empty_features:\n             # drop empty features\ndiff --git a/sklearn/impute/tests/test_impute.py b/sklearn/impute/tests/test_impute.py\nindex 86553effa..2d6ece9b3 100644\n--- a/sklearn/impute/tests/test_impute.py\n+++ b/sklearn/impute/tests/test_impute.py\n@@ -778,6 +778,36 @@ def test_iterative_imputer_missing_at_transform(strategy):\n     )\n \n \n+def test_iterative_imputer_constant_initial_strategy_fill_value():\n+    X = np.array([[np.nan, 1], [2, np.nan], [3, 4]])\n+    fill_value = -5\n+\n+    imputer = IterativeImputer(\n+        max_iter=0, initial_strategy=\"constant\", fill_value=fill_value\n+    )\n+    simple_imputer = SimpleImputer(strategy=\"constant\", fill_value=fill_value)\n+\n+    X_imputed = imputer.fit_transform(X)\n+    assert_allclose(X_imputed, simple_imputer.fit_transform(X))\n+\n+    X_test = np.array([[np.nan, 5], [6, np.nan]])\n+    assert_allclose(imputer.transform(X_test), simple_imputer.transform(X_test))\n+\n+\n+def test_iterative_imputer_constant_initial_strategy_nan_fill_value():\n+    X = np.array([[1, np.nan], [np.nan, 2], [3, 3]])\n+\n+    imputer = IterativeImputer(\n+        estimator=DummyRegressor(),\n+        max_iter=1,\n+        initial_strategy=\"constant\",\n+        fill_value=np.nan,\n+    )\n+\n+    X_imputed = imputer.fit_transform(X)\n+    assert_allclose(X_imputed, np.array([[1.0, 2.5], [2.0, 2.0], [3.0, 3.0]]))\n+\n+\n def test_iterative_imputer_transform_stochasticity():\n     rng1 = np.random.RandomState(0)\n     rng2 = np.random.RandomState(1)\n",
       "finalOutput": {
         "status": "completed",
@@ -90,716 +127,146 @@
         "predSteps": [
           {
             "files": [
-              "sklearn/impute/__init__.py",
-              "sklearn/impute/_base.py",
-              "sklearn/impute/_iterative.py",
-              "sklearn/impute/_knn.py",
-              "sklearn/impute/tests/test_common.py",
+              "sklearn/impute/_iterative.py"
+            ],
+            "spans": {
+              "sklearn/impute/_iterative.py": [
+                {
+                  "start": 600,
+                  "end": 660
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
               "sklearn/impute/tests/test_impute.py"
             ],
             "spans": {
-              "sklearn/impute/__init__.py": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 17,
-                  "end": 17
-                }
-              ],
-              "sklearn/impute/_iterative.py": [
-                {
-                  "start": 25,
-                  "end": 25
-                },
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 73,
-                  "end": 73
-                },
-                {
-                  "start": 92,
-                  "end": 92
-                },
-                {
-                  "start": 115,
-                  "end": 115
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 177,
-                  "end": 177
-                },
-                {
-                  "start": 184,
-                  "end": 184
-                },
-                {
-                  "start": 223,
-                  "end": 223
-                },
-                {
-                  "start": 263,
-                  "end": 263
-                },
-                {
-                  "start": 264,
-                  "end": 264
-                },
-                {
-                  "start": 266,
-                  "end": 266
-                },
-                {
-                  "start": 281,
-                  "end": 281
-                },
-                {
-                  "start": 303,
-                  "end": 303
-                },
-                {
-                  "start": 324,
-                  "end": 324
-                },
-                {
-                  "start": 613,
-                  "end": 613
-                },
-                {
-                  "start": 615,
-                  "end": 615
-                },
-                {
-                  "start": 737,
-                  "end": 737
-                },
-                {
-                  "start": 765,
-                  "end": 765
-                },
-                {
-                  "start": 774,
-                  "end": 774
-                },
-                {
-                  "start": 780,
-                  "end": 780
-                },
-                {
-                  "start": 786,
-                  "end": 786
-                },
-                {
-                  "start": 823,
-                  "end": 823
-                },
-                {
-                  "start": 837,
-                  "end": 837
-                }
-              ],
-              "sklearn/impute/_knn.py": [
-                {
-                  "start": 101,
-                  "end": 101
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                }
-              ],
-              "sklearn/impute/_base.py": [
-                {
-                  "start": 142,
-                  "end": 142
-                },
-                {
-                  "start": 151,
-                  "end": 151
-                },
-                {
-                  "start": 172,
-                  "end": 172
-                },
-                {
-                  "start": 178,
-                  "end": 178
-                },
-                {
-                  "start": 179,
-                  "end": 179
-                },
-                {
-                  "start": 181,
-                  "end": 181
-                },
-                {
-                  "start": 182,
-                  "end": 182
-                },
-                {
-                  "start": 214,
-                  "end": 214
-                },
-                {
-                  "start": 243,
-                  "end": 243
-                },
-                {
-                  "start": 256,
-                  "end": 256
-                },
-                {
-                  "start": 261,
-                  "end": 261
-                },
-                {
-                  "start": 262,
-                  "end": 262
-                },
-                {
-                  "start": 264,
-                  "end": 264
-                },
-                {
-                  "start": 275,
-                  "end": 275
-                },
-                {
-                  "start": 285,
-                  "end": 285
-                },
-                {
-                  "start": 297,
-                  "end": 297
-                },
-                {
-                  "start": 305,
-                  "end": 305
-                },
-                {
-                  "start": 353,
-                  "end": 353
-                },
-                {
-                  "start": 392,
-                  "end": 392
-                },
-                {
-                  "start": 394,
-                  "end": 394
-                },
-                {
-                  "start": 396,
-                  "end": 396
-                },
-                {
-                  "start": 398,
-                  "end": 398
-                },
-                {
-                  "start": 400,
-                  "end": 400
-                },
-                {
-                  "start": 402,
-                  "end": 402
-                },
-                {
-                  "start": 406,
-                  "end": 406
-                },
-                {
-                  "start": 409,
-                  "end": 409
-                },
-                {
-                  "start": 411,
-                  "end": 411
-                },
-                {
-                  "start": 425,
-                  "end": 425
-                },
-                {
-                  "start": 430,
-                  "end": 430
-                },
-                {
-                  "start": 435,
-                  "end": 435
-                },
-                {
-                  "start": 445,
-                  "end": 445
-                },
-                {
-                  "start": 446,
-                  "end": 446
-                },
-                {
-                  "start": 477,
-                  "end": 477
-                },
-                {
-                  "start": 532,
-                  "end": 532
-                },
-                {
-                  "start": 533,
-                  "end": 533
-                },
-                {
-                  "start": 627,
-                  "end": 627
-                },
-                {
-                  "start": 656,
-                  "end": 656
-                },
-                {
-                  "start": 778,
-                  "end": 778
-                },
-                {
-                  "start": 779,
-                  "end": 779
-                }
-              ],
-              "sklearn/impute/tests/test_common.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 18,
-                  "end": 18
-                },
-                {
-                  "start": 22,
-                  "end": 22
-                },
-                {
-                  "start": 25,
-                  "end": 25
-                },
-                {
-                  "start": 37,
-                  "end": 37
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                }
-              ],
               "sklearn/impute/tests/test_impute.py": [
                 {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                },
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 92,
-                  "end": 92
-                },
-                {
-                  "start": 101,
-                  "end": 101
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 132,
-                  "end": 132
-                },
-                {
-                  "start": 149,
-                  "end": 149
-                },
-                {
-                  "start": 275,
-                  "end": 275
-                },
-                {
-                  "start": 288,
-                  "end": 288
-                },
-                {
-                  "start": 307,
-                  "end": 307
-                },
-                {
-                  "start": 309,
-                  "end": 309
-                },
-                {
-                  "start": 333,
-                  "end": 333
-                },
-                {
-                  "start": 335,
-                  "end": 335
-                },
-                {
-                  "start": 363,
-                  "end": 363
-                },
-                {
-                  "start": 383,
-                  "end": 383
-                },
-                {
-                  "start": 391,
-                  "end": 391
-                },
-                {
-                  "start": 396,
-                  "end": 396
-                },
-                {
-                  "start": 397,
-                  "end": 397
-                },
-                {
-                  "start": 408,
-                  "end": 408
-                },
-                {
-                  "start": 434,
-                  "end": 434
-                },
-                {
-                  "start": 463,
-                  "end": 463
-                },
-                {
-                  "start": 464,
-                  "end": 464
-                },
-                {
-                  "start": 490,
-                  "end": 490
-                },
-                {
-                  "start": 499,
-                  "end": 499
-                },
-                {
-                  "start": 501,
-                  "end": 501
-                },
-                {
-                  "start": 515,
-                  "end": 515
-                },
-                {
-                  "start": 533,
-                  "end": 533
-                },
-                {
-                  "start": 540,
-                  "end": 540
-                },
-                {
-                  "start": 547,
-                  "end": 547
-                },
-                {
-                  "start": 554,
-                  "end": 554
-                },
-                {
-                  "start": 561,
-                  "end": 561
-                },
-                {
-                  "start": 579,
-                  "end": 579
-                },
-                {
-                  "start": 585,
-                  "end": 585
-                },
-                {
-                  "start": 600,
-                  "end": 600
-                },
-                {
-                  "start": 603,
-                  "end": 603
-                },
-                {
-                  "start": 612,
-                  "end": 612
-                },
-                {
-                  "start": 626,
-                  "end": 626
-                },
-                {
-                  "start": 628,
-                  "end": 628
-                },
-                {
-                  "start": 667,
-                  "end": 667
-                },
-                {
-                  "start": 691,
-                  "end": 691
-                },
-                {
-                  "start": 708,
-                  "end": 708
-                },
-                {
-                  "start": 737,
-                  "end": 737
-                },
-                {
-                  "start": 769,
-                  "end": 769
-                },
-                {
-                  "start": 770,
-                  "end": 770
-                },
-                {
-                  "start": 772,
-                  "end": 772
-                },
-                {
-                  "start": 789,
-                  "end": 789
-                },
-                {
-                  "start": 803,
-                  "end": 803
-                },
-                {
-                  "start": 812,
-                  "end": 812
-                },
-                {
-                  "start": 835,
-                  "end": 835
-                },
-                {
-                  "start": 836,
-                  "end": 836
-                },
-                {
-                  "start": 855,
-                  "end": 855
-                },
-                {
-                  "start": 878,
-                  "end": 878
-                },
-                {
-                  "start": 906,
-                  "end": 906
-                },
-                {
-                  "start": 922,
-                  "end": 922
-                },
-                {
-                  "start": 928,
-                  "end": 928
-                },
-                {
-                  "start": 934,
-                  "end": 934
-                },
-                {
-                  "start": 959,
-                  "end": 959
-                },
-                {
-                  "start": 983,
-                  "end": 983
-                },
-                {
-                  "start": 985,
-                  "end": 985
-                },
-                {
-                  "start": 1009,
-                  "end": 1009
-                },
-                {
-                  "start": 1011,
-                  "end": 1011
-                },
-                {
-                  "start": 1034,
-                  "end": 1034
-                },
-                {
-                  "start": 1037,
-                  "end": 1037
-                },
-                {
-                  "start": 1053,
-                  "end": 1053
-                },
-                {
-                  "start": 1054,
-                  "end": 1054
-                },
-                {
-                  "start": 1078,
-                  "end": 1078
-                },
+                  "start": 740,
+                  "end": 790
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/_iterative.py"
+            ],
+            "spans": {
+              "sklearn/impute/_iterative.py": [
+                {
+                  "start": 100,
+                  "end": 360
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/tests/test_impute.py"
+            ],
+            "spans": {
+              "sklearn/impute/tests/test_impute.py": [
+                {
+                  "start": 1500,
+                  "end": 1535
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/_iterative.py"
+            ],
+            "spans": {
+              "sklearn/impute/_iterative.py": [
+                {
+                  "start": 160,
+                  "end": 210
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/_iterative.py"
+            ],
+            "spans": {
+              "sklearn/impute/_iterative.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/_base.py"
+            ],
+            "spans": {
+              "sklearn/impute/_base.py": [
+                {
+                  "start": 260,
+                  "end": 310
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/tests/test_impute.py"
+            ],
+            "spans": {
+              "sklearn/impute/tests/test_impute.py": [
                 {
                   "start": 1280,
-                  "end": 1280
-                },
+                  "end": 1345
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/_base.py"
+            ],
+            "spans": {
+              "sklearn/impute/_base.py": [
                 {
-                  "start": 1287,
-                  "end": 1287
-                },
+                  "start": 388,
+                  "end": 414
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/tests/test_impute.py"
+            ],
+            "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/tests/test_impute.py"
+            ],
+            "spans": {
+              "sklearn/impute/tests/test_impute.py": [
                 {
-                  "start": 1332,
-                  "end": 1332
-                },
-                {
-                  "start": 1362,
-                  "end": 1362
-                },
-                {
-                  "start": 1378,
-                  "end": 1378
-                },
-                {
-                  "start": 1398,
-                  "end": 1398
-                },
-                {
-                  "start": 1444,
-                  "end": 1444
-                },
-                {
-                  "start": 1474,
-                  "end": 1474
-                },
-                {
-                  "start": 1510,
-                  "end": 1510
-                },
-                {
-                  "start": 1512,
-                  "end": 1512
-                },
-                {
-                  "start": 1518,
-                  "end": 1518
-                },
-                {
-                  "start": 1519,
-                  "end": 1519
-                },
-                {
-                  "start": 1548,
-                  "end": 1548
-                },
-                {
-                  "start": 1555,
-                  "end": 1555
-                },
-                {
-                  "start": 1562,
-                  "end": 1562
-                },
-                {
-                  "start": 1568,
-                  "end": 1568
-                },
-                {
-                  "start": 1575,
-                  "end": 1575
-                },
-                {
-                  "start": 1582,
-                  "end": 1582
-                },
-                {
-                  "start": 1589,
-                  "end": 1589
-                },
-                {
-                  "start": 1596,
-                  "end": 1596
-                },
-                {
-                  "start": 1629,
-                  "end": 1629
-                },
-                {
-                  "start": 1641,
-                  "end": 1641
-                },
-                {
-                  "start": 1657,
-                  "end": 1657
-                },
-                {
-                  "start": 1658,
-                  "end": 1658
-                },
-                {
-                  "start": 1660,
-                  "end": 1660
-                },
-                {
-                  "start": 1670,
-                  "end": 1670
-                },
-                {
-                  "start": 1682,
-                  "end": 1682
+                  "start": 70,
+                  "end": 100
                 }
               ]
             },
@@ -814,27 +281,27 @@
           },
           {
             "files": [
-              "sklearn/impute/tests/test_impute.py"
+              "sklearn/impute/_iterative.py"
             ],
-            "spans": {},
+            "spans": {
+              "sklearn/impute/_iterative.py": [
+                {
+                  "start": 560,
+                  "end": 625
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "sklearn/impute/_base.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "sklearn/__check_build/__init__.py"
-            ],
             "spans": {
-              "sklearn/__check_build/__init__.py": [
+              "sklearn/impute/_base.py": [
                 {
-                  "start": 21,
-                  "end": 21
+                  "start": 414,
+                  "end": 540
                 }
               ]
             },
@@ -842,132 +309,41 @@
           },
           {
             "files": [
-              "sklearn/impute/_iterative.py",
+              "sklearn/impute/_base.py"
+            ],
+            "spans": {
+              "sklearn/impute/_base.py": [
+                {
+                  "start": 540,
+                  "end": 700
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
               "sklearn/impute/tests/test_impute.py"
             ],
             "spans": {
               "sklearn/impute/tests/test_impute.py": [
                 {
-                  "start": 1512,
-                  "end": 1512
-                },
-                {
-                  "start": 1514,
-                  "end": 1514
-                },
-                {
-                  "start": 1519,
-                  "end": 1519
-                },
-                {
-                  "start": 1527,
-                  "end": 1527
-                },
-                {
-                  "start": 1528,
-                  "end": 1528
-                },
-                {
-                  "start": 1529,
-                  "end": 1529
-                },
-                {
-                  "start": 1532,
-                  "end": 1532
-                },
-                {
-                  "start": 1536,
-                  "end": 1536
-                },
-                {
-                  "start": 1649,
-                  "end": 1649
-                },
-                {
-                  "start": 1650,
-                  "end": 1650
-                },
-                {
-                  "start": 1651,
-                  "end": 1651
-                },
-                {
-                  "start": 1661,
-                  "end": 1661
-                },
-                {
-                  "start": 1675,
-                  "end": 1675
-                },
-                {
-                  "start": 1676,
-                  "end": 1676
-                },
-                {
-                  "start": 1677,
-                  "end": 1677
-                },
-                {
-                  "start": 1682,
-                  "end": 1682
-                },
-                {
-                  "start": 1686,
-                  "end": 1686
+                  "start": 1645,
+                  "end": 1692
                 }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/_iterative.py"
+            ],
+            "spans": {
               "sklearn/impute/_iterative.py": [
                 {
-                  "start": 173,
-                  "end": 173
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 311,
-                  "end": 311
-                },
-                {
-                  "start": 316,
-                  "end": 316
-                },
-                {
-                  "start": 616,
-                  "end": 616
-                },
-                {
-                  "start": 622,
-                  "end": 622
-                },
-                {
-                  "start": 626,
-                  "end": 626
-                },
-                {
-                  "start": 627,
-                  "end": 627
-                },
-                {
-                  "start": 628,
-                  "end": 628
-                },
-                {
-                  "start": 629,
-                  "end": 629
-                },
-                {
-                  "start": 631,
-                  "end": 631
-                },
-                {
-                  "start": 633,
-                  "end": 633
-                },
-                {
-                  "start": 794,
-                  "end": 794
+                  "start": 700,
+                  "end": 790
                 }
               ]
             },
@@ -975,17 +351,13 @@
           },
           {
             "files": [
-              "sklearn/experimental/enable_hist_gradient_boosting.py"
+              "sklearn/impute/_iterative.py"
             ],
             "spans": {
-              "sklearn/experimental/enable_hist_gradient_boosting.py": [
+              "sklearn/impute/_iterative.py": [
                 {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 19,
-                  "end": 19
+                  "start": 487,
+                  "end": 525
                 }
               ]
             },
@@ -993,25 +365,13 @@
           },
           {
             "files": [
-              "sklearn/ensemble/_hist_gradient_boosting/gradient_boosting.py"
+              "sklearn/impute/tests/test_impute.py"
             ],
             "spans": {
-              "sklearn/ensemble/_hist_gradient_boosting/gradient_boosting.py": [
+              "sklearn/impute/tests/test_impute.py": [
                 {
-                  "start": 269,
-                  "end": 269
-                },
-                {
-                  "start": 1166,
-                  "end": 1166
-                },
-                {
-                  "start": 1190,
-                  "end": 1190
-                },
-                {
-                  "start": 1541,
-                  "end": 1541
+                  "start": 1,
+                  "end": 40
                 }
               ]
             },
@@ -1026,903 +386,123 @@
           },
           {
             "files": [
-              "pyproject.toml",
-              "setup.py"
+              "sklearn/dummy.py"
             ],
-            "spans": {},
+            "spans": {
+              "sklearn/dummy.py": [
+                {
+                  "start": 500,
+                  "end": 620
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/_iterative.py"
+            ],
+            "spans": {
+              "sklearn/impute/_iterative.py": [
+                {
+                  "start": 110,
+                  "end": 340
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/tests/test_impute.py"
+            ],
+            "spans": {
+              "sklearn/impute/tests/test_impute.py": [
+                {
+                  "start": 760,
+                  "end": 825
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "setup.py"
             ],
-            "spans": {},
+            "spans": {
+              "setup.py": [
+                {
+                  "start": 1,
+                  "end": 80
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/_iterative.py"
+            ],
+            "spans": {
+              "sklearn/impute/_iterative.py": [
+                {
+                  "start": 612,
+                  "end": 640
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/tests/test_impute.py"
+            ],
+            "spans": {
+              "sklearn/impute/tests/test_impute.py": [
+                {
+                  "start": 770,
+                  "end": 820
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "pyproject.toml",
-          "setup.py",
-          "sklearn/__check_build/__init__.py",
-          "sklearn/dummy.py",
-          "sklearn/ensemble/_hist_gradient_boosting/gradient_boosting.py",
-          "sklearn/experimental/enable_hist_gradient_boosting.py",
-          "sklearn/impute/__init__.py",
           "sklearn/impute/_base.py",
           "sklearn/impute/_iterative.py",
-          "sklearn/impute/_knn.py",
-          "sklearn/impute/tests/test_common.py",
           "sklearn/impute/tests/test_impute.py"
         ],
         "predSpans": {
-          "sklearn/impute/__init__.py": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 17,
-              "end": 17
-            }
-          ],
           "sklearn/impute/_iterative.py": [
-            {
-              "start": 25,
-              "end": 25
-            },
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 73,
-              "end": 73
-            },
-            {
-              "start": 92,
-              "end": 92
-            },
-            {
-              "start": 115,
-              "end": 115
-            },
             {
               "start": 115,
               "end": 123
-            },
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 173,
-              "end": 173
-            },
-            {
-              "start": 177,
-              "end": 177
-            },
-            {
-              "start": 184,
-              "end": 184
-            },
-            {
-              "start": 223,
-              "end": 223
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 263,
-              "end": 263
-            },
-            {
-              "start": 264,
-              "end": 264
-            },
-            {
-              "start": 266,
-              "end": 266
             },
             {
               "start": 279,
               "end": 338
             },
             {
-              "start": 281,
-              "end": 281
-            },
-            {
-              "start": 303,
-              "end": 303
-            },
-            {
-              "start": 311,
-              "end": 311
-            },
-            {
-              "start": 316,
-              "end": 316
-            },
-            {
-              "start": 324,
-              "end": 324
-            },
-            {
-              "start": 613,
-              "end": 613
-            },
-            {
-              "start": 615,
-              "end": 615
-            },
-            {
-              "start": 616,
-              "end": 616
-            },
-            {
               "start": 620,
               "end": 636
-            },
-            {
-              "start": 622,
-              "end": 622
-            },
-            {
-              "start": 626,
-              "end": 626
-            },
-            {
-              "start": 627,
-              "end": 627
-            },
-            {
-              "start": 628,
-              "end": 628
-            },
-            {
-              "start": 629,
-              "end": 629
-            },
-            {
-              "start": 631,
-              "end": 631
-            },
-            {
-              "start": 633,
-              "end": 633
-            },
-            {
-              "start": 737,
-              "end": 737
-            },
-            {
-              "start": 765,
-              "end": 765
-            },
-            {
-              "start": 774,
-              "end": 774
-            },
-            {
-              "start": 780,
-              "end": 780
-            },
-            {
-              "start": 786,
-              "end": 786
-            },
-            {
-              "start": 794,
-              "end": 794
-            },
-            {
-              "start": 823,
-              "end": 823
-            },
-            {
-              "start": 837,
-              "end": 837
-            }
-          ],
-          "sklearn/impute/_knn.py": [
-            {
-              "start": 101,
-              "end": 101
-            },
-            {
-              "start": 103,
-              "end": 103
-            }
-          ],
-          "sklearn/impute/_base.py": [
-            {
-              "start": 142,
-              "end": 142
-            },
-            {
-              "start": 151,
-              "end": 151
-            },
-            {
-              "start": 172,
-              "end": 172
-            },
-            {
-              "start": 178,
-              "end": 178
-            },
-            {
-              "start": 179,
-              "end": 179
-            },
-            {
-              "start": 181,
-              "end": 181
-            },
-            {
-              "start": 182,
-              "end": 182
-            },
-            {
-              "start": 214,
-              "end": 214
-            },
-            {
-              "start": 243,
-              "end": 243
-            },
-            {
-              "start": 256,
-              "end": 256
-            },
-            {
-              "start": 261,
-              "end": 261
-            },
-            {
-              "start": 262,
-              "end": 262
-            },
-            {
-              "start": 264,
-              "end": 264
-            },
-            {
-              "start": 275,
-              "end": 275
-            },
-            {
-              "start": 275,
-              "end": 297
-            },
-            {
-              "start": 285,
-              "end": 285
-            },
-            {
-              "start": 297,
-              "end": 297
-            },
-            {
-              "start": 305,
-              "end": 305
-            },
-            {
-              "start": 353,
-              "end": 353
-            },
-            {
-              "start": 392,
-              "end": 392
-            },
-            {
-              "start": 392,
-              "end": 402
-            },
-            {
-              "start": 394,
-              "end": 394
-            },
-            {
-              "start": 396,
-              "end": 396
-            },
-            {
-              "start": 398,
-              "end": 398
-            },
-            {
-              "start": 400,
-              "end": 400
-            },
-            {
-              "start": 402,
-              "end": 402
-            },
-            {
-              "start": 406,
-              "end": 406
-            },
-            {
-              "start": 409,
-              "end": 409
-            },
-            {
-              "start": 411,
-              "end": 411
-            },
-            {
-              "start": 425,
-              "end": 425
-            },
-            {
-              "start": 430,
-              "end": 430
-            },
-            {
-              "start": 435,
-              "end": 435
-            },
-            {
-              "start": 445,
-              "end": 445
-            },
-            {
-              "start": 446,
-              "end": 446
-            },
-            {
-              "start": 477,
-              "end": 477
-            },
-            {
-              "start": 532,
-              "end": 532
-            },
-            {
-              "start": 533,
-              "end": 533
-            },
-            {
-              "start": 627,
-              "end": 627
-            },
-            {
-              "start": 656,
-              "end": 656
-            },
-            {
-              "start": 778,
-              "end": 778
-            },
-            {
-              "start": 779,
-              "end": 779
-            }
-          ],
-          "sklearn/impute/tests/test_common.py": [
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 18,
-              "end": 18
-            },
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 25,
-              "end": 25
-            },
-            {
-              "start": 37,
-              "end": 37
-            },
-            {
-              "start": 69,
-              "end": 69
-            },
-            {
-              "start": 103,
-              "end": 103
             }
           ],
           "sklearn/impute/tests/test_impute.py": [
             {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 69,
-              "end": 69
-            },
-            {
-              "start": 86,
-              "end": 86
-            },
-            {
-              "start": 92,
-              "end": 92
-            },
-            {
-              "start": 101,
-              "end": 101
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 132,
-              "end": 132
-            },
-            {
-              "start": 149,
-              "end": 149
-            },
-            {
-              "start": 275,
-              "end": 275
-            },
-            {
-              "start": 288,
-              "end": 288
-            },
-            {
-              "start": 307,
-              "end": 307
-            },
-            {
-              "start": 309,
-              "end": 309
-            },
-            {
-              "start": 333,
-              "end": 333
-            },
-            {
-              "start": 335,
-              "end": 335
-            },
-            {
-              "start": 363,
-              "end": 363
-            },
-            {
-              "start": 383,
-              "end": 383
-            },
-            {
-              "start": 391,
-              "end": 391
-            },
-            {
-              "start": 396,
-              "end": 396
-            },
-            {
-              "start": 397,
-              "end": 397
-            },
-            {
-              "start": 408,
-              "end": 408
-            },
-            {
-              "start": 434,
-              "end": 434
-            },
-            {
-              "start": 463,
-              "end": 463
-            },
-            {
-              "start": 464,
-              "end": 464
-            },
-            {
-              "start": 490,
-              "end": 490
-            },
-            {
-              "start": 499,
-              "end": 499
-            },
-            {
-              "start": 501,
-              "end": 501
-            },
-            {
-              "start": 515,
-              "end": 515
-            },
-            {
-              "start": 533,
-              "end": 533
-            },
-            {
-              "start": 540,
-              "end": 540
-            },
-            {
-              "start": 547,
-              "end": 547
-            },
-            {
-              "start": 554,
-              "end": 554
-            },
-            {
-              "start": 561,
-              "end": 561
-            },
-            {
-              "start": 579,
-              "end": 579
-            },
-            {
-              "start": 585,
-              "end": 585
-            },
-            {
-              "start": 600,
-              "end": 600
-            },
-            {
-              "start": 603,
-              "end": 603
-            },
-            {
-              "start": 612,
-              "end": 612
-            },
-            {
-              "start": 626,
-              "end": 626
-            },
-            {
-              "start": 628,
-              "end": 628
-            },
-            {
-              "start": 667,
-              "end": 667
-            },
-            {
-              "start": 691,
-              "end": 691
-            },
-            {
-              "start": 708,
-              "end": 708
-            },
-            {
-              "start": 737,
-              "end": 737
-            },
-            {
-              "start": 769,
-              "end": 769
-            },
-            {
-              "start": 770,
-              "end": 770
-            },
-            {
-              "start": 772,
-              "end": 772
-            },
-            {
               "start": 781,
               "end": 808
-            },
-            {
-              "start": 789,
-              "end": 789
-            },
-            {
-              "start": 803,
-              "end": 803
-            },
-            {
-              "start": 812,
-              "end": 812
-            },
-            {
-              "start": 835,
-              "end": 835
-            },
-            {
-              "start": 836,
-              "end": 836
-            },
-            {
-              "start": 855,
-              "end": 855
-            },
-            {
-              "start": 878,
-              "end": 878
-            },
-            {
-              "start": 906,
-              "end": 906
-            },
-            {
-              "start": 922,
-              "end": 922
-            },
-            {
-              "start": 928,
-              "end": 928
-            },
-            {
-              "start": 934,
-              "end": 934
-            },
-            {
-              "start": 959,
-              "end": 959
-            },
-            {
-              "start": 983,
-              "end": 983
-            },
-            {
-              "start": 985,
-              "end": 985
-            },
-            {
-              "start": 1009,
-              "end": 1009
-            },
-            {
-              "start": 1011,
-              "end": 1011
-            },
-            {
-              "start": 1034,
-              "end": 1034
-            },
-            {
-              "start": 1037,
-              "end": 1037
-            },
-            {
-              "start": 1053,
-              "end": 1053
-            },
-            {
-              "start": 1054,
-              "end": 1054
-            },
-            {
-              "start": 1078,
-              "end": 1078
-            },
-            {
-              "start": 1280,
-              "end": 1280
-            },
-            {
-              "start": 1287,
-              "end": 1287
-            },
-            {
-              "start": 1332,
-              "end": 1332
-            },
-            {
-              "start": 1362,
-              "end": 1362
-            },
-            {
-              "start": 1378,
-              "end": 1378
-            },
-            {
-              "start": 1398,
-              "end": 1398
-            },
-            {
-              "start": 1444,
-              "end": 1444
-            },
-            {
-              "start": 1474,
-              "end": 1474
-            },
-            {
-              "start": 1510,
-              "end": 1510
-            },
-            {
-              "start": 1512,
-              "end": 1512
-            },
-            {
-              "start": 1514,
-              "end": 1514
-            },
-            {
-              "start": 1518,
-              "end": 1518
-            },
-            {
-              "start": 1519,
-              "end": 1519
-            },
-            {
-              "start": 1527,
-              "end": 1527
-            },
-            {
-              "start": 1528,
-              "end": 1528
-            },
-            {
-              "start": 1529,
-              "end": 1529
-            },
-            {
-              "start": 1532,
-              "end": 1532
-            },
-            {
-              "start": 1536,
-              "end": 1536
-            },
-            {
-              "start": 1548,
-              "end": 1548
-            },
-            {
-              "start": 1555,
-              "end": 1555
-            },
-            {
-              "start": 1562,
-              "end": 1562
-            },
-            {
-              "start": 1568,
-              "end": 1568
-            },
-            {
-              "start": 1575,
-              "end": 1575
-            },
-            {
-              "start": 1582,
-              "end": 1582
-            },
-            {
-              "start": 1589,
-              "end": 1589
-            },
-            {
-              "start": 1596,
-              "end": 1596
-            },
-            {
-              "start": 1629,
-              "end": 1629
-            },
-            {
-              "start": 1641,
-              "end": 1641
-            },
-            {
-              "start": 1649,
-              "end": 1649
-            },
-            {
-              "start": 1650,
-              "end": 1650
-            },
-            {
-              "start": 1651,
-              "end": 1651
-            },
-            {
-              "start": 1657,
-              "end": 1657
-            },
-            {
-              "start": 1658,
-              "end": 1658
-            },
-            {
-              "start": 1660,
-              "end": 1660
-            },
-            {
-              "start": 1661,
-              "end": 1661
-            },
-            {
-              "start": 1670,
-              "end": 1670
-            },
-            {
-              "start": 1675,
-              "end": 1675
-            },
-            {
-              "start": 1676,
-              "end": 1676
-            },
-            {
-              "start": 1677,
-              "end": 1677
-            },
-            {
-              "start": 1682,
-              "end": 1682
-            },
-            {
-              "start": 1686,
-              "end": 1686
             }
           ],
-          "sklearn/__check_build/__init__.py": [
+          "sklearn/impute/_base.py": [
             {
-              "start": 21,
-              "end": 21
-            }
-          ],
-          "sklearn/experimental/enable_hist_gradient_boosting.py": [
-            {
-              "start": 5,
-              "end": 5
+              "start": 275,
+              "end": 297
             },
             {
-              "start": 19,
-              "end": 19
-            }
-          ],
-          "sklearn/ensemble/_hist_gradient_boosting/gradient_boosting.py": [
-            {
-              "start": 269,
-              "end": 269
-            },
-            {
-              "start": 1166,
-              "end": 1166
-            },
-            {
-              "start": 1190,
-              "end": 1190
-            },
-            {
-              "start": 1541,
-              "end": 1541
+              "start": 392,
+              "end": 402
             }
           ]
         },
@@ -1944,114 +524,249 @@
           {
             "step": 1,
             "coverage": {
-              "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.16683046683046682,
-              "line": 0.12322274881516587
+              "file": 0.5,
+              "symbol": 0.2857142857142857,
+              "span": 0.15995085995085995,
+              "line": 0.17535545023696683
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.16683046683046682,
-              "line": 0.12322274881516587
+              "file": 0.5,
+              "symbol": 0.2857142857142857,
+              "span": 0.15995085995085995,
+              "line": 0.17535545023696683
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.16683046683046682,
-              "line": 0.12322274881516587
+              "file": 0.5,
+              "symbol": 0.42857142857142855,
+              "span": 0.44889434889434887,
+              "line": 0.45023696682464454
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.16683046683046682,
-              "line": 0.12322274881516587
+              "file": 0.5,
+              "symbol": 0.42857142857142855,
+              "span": 0.44889434889434887,
+              "line": 0.45023696682464454
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.16683046683046682,
-              "line": 0.12322274881516587
+              "file": 0.5,
+              "symbol": 0.42857142857142855,
+              "span": 0.44889434889434887,
+              "line": 0.45023696682464454
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.22616707616707618,
-              "line": 0.17061611374407584
+              "file": 0.5,
+              "symbol": 0.42857142857142855,
+              "span": 0.44889434889434887,
+              "line": 0.45023696682464454
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.22616707616707618,
-              "line": 0.17061611374407584
+              "symbol": 0.7142857142857143,
+              "span": 0.5196560196560197,
+              "line": 0.5355450236966824
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.22616707616707618,
-              "line": 0.17061611374407584
+              "symbol": 0.7142857142857143,
+              "span": 0.5196560196560197,
+              "line": 0.5355450236966824
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.22616707616707618,
-              "line": 0.17061611374407584
+              "symbol": 0.8571428571428571,
+              "span": 0.6202702702702703,
+              "line": 0.6445497630331753
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.22616707616707618,
-              "line": 0.17061611374407584
+              "symbol": 0.8571428571428571,
+              "span": 0.6202702702702703,
+              "line": 0.6445497630331753
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 1.0,
+              "symbol": 0.8571428571428571,
+              "span": 0.6202702702702703,
+              "line": 0.6445497630331753
+            }
+          },
+          {
+            "step": 12,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.8571428571428571,
+              "span": 0.6202702702702703,
+              "line": 0.6445497630331753
+            }
+          },
+          {
+            "step": 13,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.8571428571428571,
+              "span": 0.6374692874692874,
+              "line": 0.6635071090047393
+            }
+          },
+          {
+            "step": 14,
+            "coverage": {
+              "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22616707616707618,
-              "line": 0.17061611374407584
+              "span": 0.9103194103194103,
+              "line": 0.933649289099526
+            }
+          },
+          {
+            "step": 15,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9103194103194103,
+              "line": 0.933649289099526
+            }
+          },
+          {
+            "step": 16,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9103194103194103,
+              "line": 0.933649289099526
+            }
+          },
+          {
+            "step": 17,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9103194103194103,
+              "line": 0.933649289099526
+            }
+          },
+          {
+            "step": 18,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9103194103194103,
+              "line": 0.933649289099526
+            }
+          },
+          {
+            "step": 19,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9103194103194103,
+              "line": 0.933649289099526
+            }
+          },
+          {
+            "step": 20,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9103194103194103,
+              "line": 0.933649289099526
+            }
+          },
+          {
+            "step": 21,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9103194103194103,
+              "line": 0.933649289099526
+            }
+          },
+          {
+            "step": 22,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9103194103194103,
+              "line": 0.933649289099526
+            }
+          },
+          {
+            "step": 23,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9103194103194103,
+              "line": 0.933649289099526
+            }
+          },
+          {
+            "step": 24,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9103194103194103,
+              "line": 0.933649289099526
+            }
+          },
+          {
+            "step": 25,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9103194103194103,
+              "line": 0.933649289099526
+            }
+          },
+          {
+            "step": 26,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9103194103194103,
+              "line": 0.933649289099526
             }
           }
         ],
         "aucCoverage": {
-          "file": 1.0,
-          "symbol": 1.0,
-          "span": 0.199195890104981,
-          "line": 0.14907367514002584
+          "file": 0.8846153846153846,
+          "symbol": 0.8076923076923077,
+          "span": 0.6964420714420714,
+          "line": 0.7154575282537368
         },
         "redundancy": {
-          "file": 0.33333333333333337,
-          "symbol": 0.08433734939759041,
-          "span": 0.0179684338324565,
-          "line": 0.014285714285714235
+          "file": 0.8076923076923077,
+          "symbol": 0.34375,
+          "span": 0.2438348956674652,
+          "line": 0.2320209973753281
         }
       },
       "fixOverlap": {
@@ -2280,12 +995,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/sklearn/impute/_iterative.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/sklearn/impute/_iterative.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/sklearn/impute/tests/test_impute.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/sklearn/impute/tests/test_impute.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2492,9 +1225,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-04-29T22:40:48Z",
       "completedAt": "2026-04-29T22:45:07Z",
       "durationMs": 259162,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 930984,
@@ -2503,6 +1251,28 @@
         "total_tokens": 941818,
         "cache_read_input_tokens": 857856
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 33,
+        "readToolCalls": 0,
+        "editToolCalls": 4
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/sklearn/impute/_iterative.py b/sklearn/impute/_iterative.py\nindex 1d918bc0c..6d6f76048 100644\n--- a/sklearn/impute/_iterative.py\n+++ b/sklearn/impute/_iterative.py\n@@ -117,6 +117,11 @@ class IterativeImputer(_BaseImputer):\n         Which strategy to use to initialize the missing values. Same as the\n         `strategy` parameter in :class:`~sklearn.impute.SimpleImputer`.\n \n+    fill_value : str or numerical value, default=None\n+        When `initial_strategy=\"constant\"`, `fill_value` is used to replace\n+        missing values in the initial imputation. This is passed to\n+        :class:`~sklearn.impute.SimpleImputer`.\n+\n     imputation_order : {'ascending', 'descending', 'roman', 'arabic', \\\n             'random'}, default='ascending'\n         The order in which the features will be imputed. Possible values:\n@@ -281,6 +286,7 @@ class IterativeImputer(_BaseImputer):\n         \"initial_strategy\": [\n             StrOptions({\"mean\", \"median\", \"most_frequent\", \"constant\"})\n         ],\n+        \"fill_value\": \"no_validation\",  # any object is valid\n         \"imputation_order\": [\n             StrOptions({\"ascending\", \"descending\", \"roman\", \"arabic\", \"random\"})\n         ],\n@@ -301,6 +307,7 @@ class IterativeImputer(_BaseImputer):\n         tol=1e-3,\n         n_nearest_features=None,\n         initial_strategy=\"mean\",\n+        fill_value=None,\n         imputation_order=\"ascending\",\n         skip_complete=False,\n         min_value=-np.inf,\n@@ -322,6 +329,7 @@ class IterativeImputer(_BaseImputer):\n         self.tol = tol\n         self.n_nearest_features = n_nearest_features\n         self.initial_strategy = initial_strategy\n+        self.fill_value = fill_value\n         self.imputation_order = imputation_order\n         self.skip_complete = skip_complete\n         self.min_value = min_value\n@@ -613,6 +621,7 @@ class IterativeImputer(_BaseImputer):\n             self.initial_imputer_ = SimpleImputer(\n                 missing_values=self.missing_values,\n                 strategy=self.initial_strategy,\n+                fill_value=self.fill_value,\n                 keep_empty_features=self.keep_empty_features,\n             )\n             X_filled = self.initial_imputer_.fit_transform(X)\ndiff --git a/sklearn/impute/tests/test_impute.py b/sklearn/impute/tests/test_impute.py\nindex 86553effa..124227787 100644\n--- a/sklearn/impute/tests/test_impute.py\n+++ b/sklearn/impute/tests/test_impute.py\n@@ -755,8 +755,16 @@ def test_iterative_imputer_truncated_normal_posterior():\n     assert ks_statistic < 0.2 or p_value > 0.1, \"The posterior does appear to be normal\"\n \n \n-@pytest.mark.parametrize(\"strategy\", [\"mean\", \"median\", \"most_frequent\"])\n-def test_iterative_imputer_missing_at_transform(strategy):\n+@pytest.mark.parametrize(\n+    \"strategy, fill_value\",\n+    [\n+        (\"mean\", None),\n+        (\"median\", None),\n+        (\"most_frequent\", None),\n+        (\"constant\", -5),\n+    ],\n+)\n+def test_iterative_imputer_missing_at_transform(strategy, fill_value):\n     rng = np.random.RandomState(0)\n     n = 100\n     d = 10\n@@ -767,9 +775,15 @@ def test_iterative_imputer_missing_at_transform(strategy):\n     X_test[0, 0] = 0  # definitely missing value in 0th column\n \n     imputer = IterativeImputer(\n-        missing_values=0, max_iter=1, initial_strategy=strategy, random_state=rng\n+        missing_values=0,\n+        max_iter=1,\n+        initial_strategy=strategy,\n+        fill_value=fill_value,\n+        random_state=rng,\n+    ).fit(X_train)\n+    initial_imputer = SimpleImputer(\n+        missing_values=0, strategy=strategy, fill_value=fill_value\n     ).fit(X_train)\n-    initial_imputer = SimpleImputer(missing_values=0, strategy=strategy).fit(X_train)\n \n     # if there were no missing values at time of fit, then imputer will\n     # only use the initial imputer for that feature at transform\n@@ -1524,6 +1538,32 @@ def test_iterative_imputer_keep_empty_features(initial_strategy):\n     assert_allclose(X_imputed[:, 1], 0)\n \n \n+def test_iterative_imputer_keep_empty_features_constant_fill_value():\n+    X = np.array([[1, np.nan, 2], [3, np.nan, np.nan]])\n+\n+    imputer = IterativeImputer(\n+        initial_strategy=\"constant\",\n+        fill_value=-5,\n+        keep_empty_features=True,\n+        max_iter=0,\n+    )\n+    X_imputed = imputer.fit_transform(X)\n+    assert_allclose(X_imputed[:, 1], -5)\n+    X_imputed = imputer.transform(X)\n+    assert_allclose(X_imputed[:, 1], -5)\n+\n+\n+def test_iterative_imputer_constant_initial_strategy_nan_fill_value():\n+    X = np.array([[1, np.nan], [np.nan, 2]])\n+\n+    imputer = IterativeImputer(\n+        initial_strategy=\"constant\", fill_value=np.nan, max_iter=0\n+    )\n+    expected = SimpleImputer(strategy=\"constant\", fill_value=np.nan).fit_transform(X)\n+\n+    assert_allclose(imputer.fit_transform(X), expected, equal_nan=True)\n+\n+\n @pytest.mark.parametrize(\"keep_empty_features\", [True, False])\n def test_knn_imputer_keep_empty_features(keep_empty_features):\n     \"\"\"Check the behaviour of `keep_empty_features` for `KNNImputer`.\"\"\"\n",
       "finalOutput": {
         "status": "completed",
@@ -2564,194 +1334,81 @@
             "files": [
               "sklearn/impute/tests/test_impute.py"
             ],
-            "spans": {},
+            "spans": {
+              "sklearn/impute/tests/test_impute.py": [
+                {
+                  "start": 720,
+                  "end": 860
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "sklearn/impute/_iterative.py"
             ],
-            "spans": {},
+            "spans": {
+              "sklearn/impute/_iterative.py": [
+                {
+                  "start": 1,
+                  "end": 420
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/tests/test_impute.py"
+            ],
+            "spans": {
+              "sklearn/impute/tests/test_impute.py": [
+                {
+                  "start": 1480,
+                  "end": 1565
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/_iterative.py"
+            ],
+            "spans": {
+              "sklearn/impute/_iterative.py": [
+                {
+                  "start": 560,
+                  "end": 700
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "sklearn/impute/_base.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "sklearn/impute/_base.py",
-              "sklearn/impute/_iterative.py",
-              "sklearn/impute/tests/test_impute.py"
-            ],
             "spans": {
-              "sklearn/impute/tests/test_impute.py": [
-                {
-                  "start": 391,
-                  "end": 391
-                },
-                {
-                  "start": 397,
-                  "end": 397
-                },
-                {
-                  "start": 408,
-                  "end": 408
-                },
-                {
-                  "start": 434,
-                  "end": 434
-                },
-                {
-                  "start": 464,
-                  "end": 464
-                },
-                {
-                  "start": 1548,
-                  "end": 1548
-                },
-                {
-                  "start": 1555,
-                  "end": 1555
-                },
-                {
-                  "start": 1562,
-                  "end": 1562
-                },
-                {
-                  "start": 1568,
-                  "end": 1568
-                },
-                {
-                  "start": 1589,
-                  "end": 1589
-                },
-                {
-                  "start": 1657,
-                  "end": 1657
-                },
-                {
-                  "start": 1660,
-                  "end": 1660
-                },
-                {
-                  "start": 1670,
-                  "end": 1670
-                }
-              ],
               "sklearn/impute/_base.py": [
                 {
-                  "start": 172,
-                  "end": 172
-                },
-                {
-                  "start": 178,
-                  "end": 178
-                },
-                {
-                  "start": 179,
-                  "end": 179
-                },
-                {
-                  "start": 181,
-                  "end": 181
-                },
-                {
-                  "start": 182,
-                  "end": 182
-                },
-                {
-                  "start": 214,
-                  "end": 214
-                },
-                {
-                  "start": 275,
-                  "end": 275
-                },
-                {
-                  "start": 285,
-                  "end": 285
-                },
-                {
-                  "start": 297,
-                  "end": 297
-                },
-                {
-                  "start": 392,
-                  "end": 392
-                },
-                {
-                  "start": 394,
-                  "end": 394
-                },
-                {
-                  "start": 396,
-                  "end": 396
-                },
-                {
-                  "start": 398,
-                  "end": 398
-                },
-                {
-                  "start": 400,
-                  "end": 400
-                },
-                {
-                  "start": 402,
-                  "end": 402
-                },
-                {
-                  "start": 406,
-                  "end": 406
-                },
-                {
-                  "start": 409,
-                  "end": 409
-                },
-                {
-                  "start": 411,
-                  "end": 411
-                },
-                {
-                  "start": 425,
-                  "end": 425
-                },
-                {
-                  "start": 430,
-                  "end": 430
-                },
-                {
-                  "start": 435,
-                  "end": 435
-                },
-                {
-                  "start": 445,
-                  "end": 445
-                },
-                {
-                  "start": 446,
-                  "end": 446
-                },
-                {
-                  "start": 477,
-                  "end": 477
-                },
-                {
-                  "start": 532,
-                  "end": 532
-                },
-                {
-                  "start": 533,
-                  "end": 533
+                  "start": 140,
+                  "end": 340
                 }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/_iterative.py"
+            ],
+            "spans": {
               "sklearn/impute/_iterative.py": [
                 {
-                  "start": 177,
-                  "end": 177
+                  "start": 340,
+                  "end": 560
                 }
               ]
             },
@@ -2764,12 +1421,8 @@
             "spans": {
               "sklearn/impute/tests/test_impute.py": [
                 {
-                  "start": 579,
-                  "end": 579
-                },
-                {
-                  "start": 581,
-                  "end": 581
+                  "start": 560,
+                  "end": 620
                 }
               ]
             },
@@ -2777,137 +1430,13 @@
           },
           {
             "files": [
-              "doc/whats_new"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "doc/whats_new/v0.20.rst"
+              "sklearn/impute/tests/test_impute.py"
             ],
             "spans": {
-              "doc/whats_new/v0.20.rst": [
+              "sklearn/impute/tests/test_impute.py": [
                 {
-                  "start": 896,
-                  "end": 896
-                }
-              ]
-            },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "sklearn/base.py",
-              "sklearn/dummy.py",
-              "sklearn/model_selection/_search_successive_halving.py",
-              "sklearn/model_selection/tests/test_successive_halving.py",
-              "sklearn/preprocessing/_encoders.py",
-              "sklearn/preprocessing/_function_transformer.py",
-              "sklearn/utils/_param_validation.py",
-              "sklearn/utils/_tags.py",
-              "sklearn/utils/estimator_checks.py",
-              "sklearn/utils/tests/test_param_validation.py"
-            ],
-            "spans": {
-              "sklearn/base.py": [
-                {
-                  "start": 463,
-                  "end": 463
-                },
-                {
-                  "start": 464,
-                  "end": 464
-                },
-                {
-                  "start": 534,
-                  "end": 534
-                },
-                {
-                  "start": 535,
-                  "end": 535
-                }
-              ],
-              "sklearn/dummy.py": [
-                {
-                  "start": 408,
-                  "end": 408
-                },
-                {
-                  "start": 641,
-                  "end": 641
-                }
-              ],
-              "sklearn/model_selection/_search_successive_halving.py": [
-                {
-                  "start": 163,
-                  "end": 163
-                }
-              ],
-              "sklearn/preprocessing/_function_transformer.py": [
-                {
-                  "start": 314,
-                  "end": 314
-                }
-              ],
-              "sklearn/preprocessing/_encoders.py": [
-                {
-                  "start": 487,
-                  "end": 487
-                },
-                {
-                  "start": 1237,
-                  "end": 1237
-                }
-              ],
-              "sklearn/model_selection/tests/test_successive_halving.py": [
-                {
-                  "start": 36,
-                  "end": 36
-                }
-              ],
-              "sklearn/utils/tests/test_param_validation.py": [
-                {
-                  "start": 604,
-                  "end": 604
-                }
-              ],
-              "sklearn/utils/_tags.py": [
-                {
-                  "start": 9,
-                  "end": 9
-                }
-              ],
-              "sklearn/utils/_param_validation.py": [
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 71,
-                  "end": 71
-                }
-              ],
-              "sklearn/utils/estimator_checks.py": [
-                {
-                  "start": 107,
-                  "end": 107
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 159,
-                  "end": 159
-                },
-                {
-                  "start": 221,
-                  "end": 221
+                  "start": 1,
+                  "end": 140
                 }
               ]
             },
@@ -2917,213 +1446,82 @@
             "files": [
               "doc/whats_new/v1.3.rst"
             ],
-            "spans": {},
+            "spans": {
+              "doc/whats_new/v1.3.rst": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/_iterative.py"
+            ],
+            "spans": {
+              "sklearn/impute/_iterative.py": [
+                {
+                  "start": 108,
+                  "end": 340
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/_iterative.py"
+            ],
+            "spans": {
+              "sklearn/impute/_iterative.py": [
+                {
+                  "start": 608,
+                  "end": 632
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/tests/test_impute.py"
+            ],
+            "spans": {
+              "sklearn/impute/tests/test_impute.py": [
+                {
+                  "start": 755,
+                  "end": 805
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sklearn/impute/tests/test_impute.py"
+            ],
+            "spans": {
+              "sklearn/impute/tests/test_impute.py": [
+                {
+                  "start": 1510,
+                  "end": 1568
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "doc/whats_new",
-          "doc/whats_new/v0.20.rst",
-          "doc/whats_new/v1.3.rst",
-          "sklearn/base.py",
-          "sklearn/dummy.py",
-          "sklearn/impute/_base.py",
           "sklearn/impute/_iterative.py",
-          "sklearn/impute/tests/test_impute.py",
-          "sklearn/model_selection/_search_successive_halving.py",
-          "sklearn/model_selection/tests/test_successive_halving.py",
-          "sklearn/preprocessing/_encoders.py",
-          "sklearn/preprocessing/_function_transformer.py",
-          "sklearn/utils/_param_validation.py",
-          "sklearn/utils/_tags.py",
-          "sklearn/utils/estimator_checks.py",
-          "sklearn/utils/tests/test_param_validation.py"
+          "sklearn/impute/tests/test_impute.py"
         ],
         "predSpans": {
-          "sklearn/impute/tests/test_impute.py": [
-            {
-              "start": 391,
-              "end": 391
-            },
-            {
-              "start": 397,
-              "end": 397
-            },
-            {
-              "start": 408,
-              "end": 408
-            },
-            {
-              "start": 434,
-              "end": 434
-            },
-            {
-              "start": 464,
-              "end": 464
-            },
-            {
-              "start": 579,
-              "end": 579
-            },
-            {
-              "start": 581,
-              "end": 581
-            },
-            {
-              "start": 758,
-              "end": 792
-            },
-            {
-              "start": 1523,
-              "end": 1564
-            },
-            {
-              "start": 1548,
-              "end": 1548
-            },
-            {
-              "start": 1555,
-              "end": 1555
-            },
-            {
-              "start": 1562,
-              "end": 1562
-            },
-            {
-              "start": 1568,
-              "end": 1568
-            },
-            {
-              "start": 1589,
-              "end": 1589
-            },
-            {
-              "start": 1657,
-              "end": 1657
-            },
-            {
-              "start": 1660,
-              "end": 1660
-            },
-            {
-              "start": 1670,
-              "end": 1670
-            }
-          ],
-          "sklearn/impute/_base.py": [
-            {
-              "start": 172,
-              "end": 172
-            },
-            {
-              "start": 178,
-              "end": 178
-            },
-            {
-              "start": 179,
-              "end": 179
-            },
-            {
-              "start": 181,
-              "end": 181
-            },
-            {
-              "start": 182,
-              "end": 182
-            },
-            {
-              "start": 214,
-              "end": 214
-            },
-            {
-              "start": 275,
-              "end": 275
-            },
-            {
-              "start": 285,
-              "end": 285
-            },
-            {
-              "start": 297,
-              "end": 297
-            },
-            {
-              "start": 392,
-              "end": 392
-            },
-            {
-              "start": 394,
-              "end": 394
-            },
-            {
-              "start": 396,
-              "end": 396
-            },
-            {
-              "start": 398,
-              "end": 398
-            },
-            {
-              "start": 400,
-              "end": 400
-            },
-            {
-              "start": 402,
-              "end": 402
-            },
-            {
-              "start": 406,
-              "end": 406
-            },
-            {
-              "start": 409,
-              "end": 409
-            },
-            {
-              "start": 411,
-              "end": 411
-            },
-            {
-              "start": 425,
-              "end": 425
-            },
-            {
-              "start": 430,
-              "end": 430
-            },
-            {
-              "start": 435,
-              "end": 435
-            },
-            {
-              "start": 445,
-              "end": 445
-            },
-            {
-              "start": 446,
-              "end": 446
-            },
-            {
-              "start": 477,
-              "end": 477
-            },
-            {
-              "start": 532,
-              "end": 532
-            },
-            {
-              "start": 533,
-              "end": 533
-            }
-          ],
           "sklearn/impute/_iterative.py": [
             {
               "start": 115,
               "end": 123
-            },
-            {
-              "start": 177,
-              "end": 177
             },
             {
               "start": 279,
@@ -3134,110 +1532,14 @@
               "end": 625
             }
           ],
-          "doc/whats_new/v0.20.rst": [
+          "sklearn/impute/tests/test_impute.py": [
             {
-              "start": 896,
-              "end": 896
-            }
-          ],
-          "sklearn/base.py": [
-            {
-              "start": 463,
-              "end": 463
+              "start": 758,
+              "end": 792
             },
             {
-              "start": 464,
-              "end": 464
-            },
-            {
-              "start": 534,
-              "end": 534
-            },
-            {
-              "start": 535,
-              "end": 535
-            }
-          ],
-          "sklearn/dummy.py": [
-            {
-              "start": 408,
-              "end": 408
-            },
-            {
-              "start": 641,
-              "end": 641
-            }
-          ],
-          "sklearn/model_selection/_search_successive_halving.py": [
-            {
-              "start": 163,
-              "end": 163
-            }
-          ],
-          "sklearn/preprocessing/_function_transformer.py": [
-            {
-              "start": 314,
-              "end": 314
-            }
-          ],
-          "sklearn/preprocessing/_encoders.py": [
-            {
-              "start": 487,
-              "end": 487
-            },
-            {
-              "start": 1237,
-              "end": 1237
-            }
-          ],
-          "sklearn/model_selection/tests/test_successive_halving.py": [
-            {
-              "start": 36,
-              "end": 36
-            }
-          ],
-          "sklearn/utils/tests/test_param_validation.py": [
-            {
-              "start": 604,
-              "end": 604
-            }
-          ],
-          "sklearn/utils/_tags.py": [
-            {
-              "start": 9,
-              "end": 9
-            }
-          ],
-          "sklearn/utils/_param_validation.py": [
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 71,
-              "end": 71
-            }
-          ],
-          "sklearn/utils/estimator_checks.py": [
-            {
-              "start": 107,
-              "end": 107
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 159,
-              "end": 159
-            },
-            {
-              "start": 221,
-              "end": 221
+              "start": 1523,
+              "end": 1564
             }
           ]
         },
@@ -3266,55 +1568,55 @@
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.2857142857142857,
+              "span": 0.2889434889434889,
+              "line": 0.27488151658767773
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.2857142857142857,
+              "span": 0.2889434889434889,
+              "line": 0.27488151658767773
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.42857142857142855,
+              "span": 0.4660933660933661,
+              "line": 0.46919431279620855
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.7142857142857143,
+              "span": 0.6265356265356266,
+              "line": 0.6208530805687204
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.7142857142857143,
+              "span": 0.6265356265356266,
+              "line": 0.6208530805687204
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.7142857142857143,
+              "span": 0.6265356265356266,
+              "line": 0.6208530805687204
             }
           },
           {
@@ -3322,8 +1624,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 0.7142857142857143,
-              "span": 0.13206388206388206,
-              "line": 0.0947867298578199
+              "span": 0.6265356265356266,
+              "line": 0.6208530805687204
             }
           },
           {
@@ -3331,8 +1633,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 0.7142857142857143,
-              "span": 0.13206388206388206,
-              "line": 0.0947867298578199
+              "span": 0.6265356265356266,
+              "line": 0.6208530805687204
             }
           },
           {
@@ -3340,8 +1642,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 0.7142857142857143,
-              "span": 0.13206388206388206,
-              "line": 0.0947867298578199
+              "span": 0.6265356265356266,
+              "line": 0.6208530805687204
             }
           },
           {
@@ -3349,8 +1651,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 0.7142857142857143,
-              "span": 0.13206388206388206,
-              "line": 0.0947867298578199
+              "span": 0.6265356265356266,
+              "line": 0.6208530805687204
             }
           },
           {
@@ -3358,8 +1660,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 0.7142857142857143,
-              "span": 0.13206388206388206,
-              "line": 0.0947867298578199
+              "span": 0.6265356265356266,
+              "line": 0.6208530805687204
             }
           },
           {
@@ -3367,22 +1669,22 @@
             "coverage": {
               "file": 1.0,
               "symbol": 0.7142857142857143,
-              "span": 0.13206388206388206,
-              "line": 0.0947867298578199
+              "span": 0.6265356265356266,
+              "line": 0.6208530805687204
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.5769230769230769,
-          "symbol": 0.32967032967032966,
-          "span": 0.06095256095256096,
-          "line": 0.04374772147283996
+          "file": 0.8076923076923077,
+          "symbol": 0.5714285714285714,
+          "span": 0.5140616140616141,
+          "line": 0.5082026977761575
         },
         "redundancy": {
-          "file": 0.21052631578947367,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.6923076923076923,
+          "symbol": 0.30612244897959184,
+          "span": 0.2385911835182929,
+          "line": 0.2236118059029515
         }
       },
       "fixOverlap": {
@@ -3401,28 +1703,28 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/544e27a1e2e9f3ab58b4/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/544e27a1e2e9f3ab58b4/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/544e27a1e2e9f3ab58b4/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/544e27a1e2e9f3ab58b4/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
@@ -3527,7 +1829,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/sklearn/impute/tests/test_impute.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/sklearn/impute/tests/test_impute.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3581,17 +1892,44 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/sklearn/impute/_iterative.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/sklearn/impute/_iterative.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/doc/whats_new/v1.3.rst",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/doc/whats_new/v1.3.rst",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/doc/whats_new/v1.3.rst",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/doc/whats_new/v1.3.rst",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
