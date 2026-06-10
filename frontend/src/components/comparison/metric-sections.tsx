@@ -655,7 +655,11 @@ export function FixOverlapVsGoldSection({
           <FixOverlapVariantGrid variants={comparison.variants} />
         )}
         {showDeltas && !showVersus ? (
-          <FixOverlapDumbbellChart baseline={comparisonPair.baseline} treatment={comparisonPair.treatment} />
+          <FixOverlapDumbbellChart
+            baseline={comparisonPair.baseline}
+            treatment={comparisonPair.treatment}
+            deltaDisplayMode={deltaDisplayMode}
+          />
         ) : null}
       </div>
     </ComparisonSectionShell>
@@ -749,9 +753,11 @@ function fixOverlapMetricKey(measure: FixOverlapMeasureKey): string {
 function FixOverlapDumbbellChart({
   baseline,
   treatment,
+  deltaDisplayMode,
 }: {
   baseline: ComparisonCard["variants"][number];
   treatment: ComparisonCard["variants"][number];
+  deltaDisplayMode: DeltaDisplayMode;
 }) {
   return (
     <div>
@@ -787,8 +793,8 @@ function FixOverlapDumbbellChart({
                 />
               </div>
               <FixOverlapDumbbellValues
-                baselineLabel={fixOverlapMeasureValue(baseline, measure.key)}
-                treatmentLabel={fixOverlapMeasureValue(treatment, measure.key)}
+                baselineLabel={formatFixOverlapChartValue(baselineValue, deltaDisplayMode)}
+                treatmentLabel={formatFixOverlapChartValue(treatmentValue, deltaDisplayMode)}
                 baselineValue={baselineValue}
                 treatmentValue={treatmentValue}
               />
@@ -798,6 +804,10 @@ function FixOverlapDumbbellChart({
       </div>
     </div>
   );
+}
+
+function formatFixOverlapChartValue(value: number, displayMode: DeltaDisplayMode): string {
+  return displayMode === "percent" ? `${value.toFixed(1)}%` : value.toFixed(1);
 }
 
 function FixOverlapDumbbellValues({

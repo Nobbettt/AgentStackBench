@@ -66,7 +66,7 @@ function formatTokens(value: number): string {
   if (value >= 1_000) {
     return `${(value / 1_000).toFixed(0)}K`;
   }
-  return String(value);
+  return String(Math.round(value));
 }
 
 function formatCurrency(value: number): string {
@@ -308,6 +308,11 @@ function aggregateVariant(
   const outputTokens = filteredInstances.reduce((sum, instance) => sum + (instance.resources.outputTokens ?? 0), 0);
   const cachedInputTokens = filteredInstances.reduce((sum, instance) => sum + (instance.resources.cachedInputTokens ?? 0), 0);
   const nonCachedInputTokens = filteredInstances.reduce((sum, instance) => sum + (instance.resources.nonCachedInputTokens ?? 0), 0);
+  const averageTotalTokens = taskCount > 0 ? totalTokens / taskCount : 0;
+  const averageInputTokens = taskCount > 0 ? inputTokens / taskCount : 0;
+  const averageOutputTokens = taskCount > 0 ? outputTokens / taskCount : 0;
+  const averageCachedInputTokens = taskCount > 0 ? cachedInputTokens / taskCount : 0;
+  const averageNonCachedInputTokens = taskCount > 0 ? nonCachedInputTokens / taskCount : 0;
   const toolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.toolCalls ?? 0), 0);
   const mcpToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.mcpToolCalls ?? 0), 0);
   const successfulMcpToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.successfulMcpToolCalls ?? 0), 0);
@@ -316,6 +321,8 @@ function aggregateVariant(
   const editToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.editToolCalls ?? 0), 0);
   const rawTraceEvents = filteredInstances.reduce((sum, instance) => sum + (instance.resources.rawTraceEvents ?? 0), 0);
   const rawAgentActions = filteredInstances.reduce((sum, instance) => sum + (instance.resources.rawAgentActions ?? 0), 0);
+  const averageRawTraceEvents = taskCount > 0 ? rawTraceEvents / taskCount : 0;
+  const averageRawAgentActions = taskCount > 0 ? rawAgentActions / taskCount : 0;
   const costValues = filteredInstances
     .map((instance) => instance.resources.costUsd)
     .filter((value): value is number => typeof value === "number");
@@ -415,11 +422,11 @@ function aggregateVariant(
         excludedDurationValues,
         averageSteps: averageSteps !== null ? formatPatternMetric(averageSteps) : undefined,
         avgLinesPerStep: avgLinesPerStep !== null ? formatPatternMetric(avgLinesPerStep) : undefined,
-        totalTokens: totalTokens > 0 ? formatTokens(totalTokens) : undefined,
-        inputTokens: inputTokens > 0 ? formatTokens(inputTokens) : undefined,
-        outputTokens: outputTokens > 0 ? formatTokens(outputTokens) : undefined,
-        cachedInputTokens: cachedInputTokens > 0 ? formatTokens(cachedInputTokens) : undefined,
-        nonCachedInputTokens: nonCachedInputTokens > 0 ? formatTokens(nonCachedInputTokens) : undefined,
+        totalTokens: averageTotalTokens > 0 ? formatTokens(averageTotalTokens) : undefined,
+        inputTokens: averageInputTokens > 0 ? formatTokens(averageInputTokens) : undefined,
+        outputTokens: averageOutputTokens > 0 ? formatTokens(averageOutputTokens) : undefined,
+        cachedInputTokens: averageCachedInputTokens > 0 ? formatTokens(averageCachedInputTokens) : undefined,
+        nonCachedInputTokens: averageNonCachedInputTokens > 0 ? formatTokens(averageNonCachedInputTokens) : undefined,
         cachedInputShare: inputTokens > 0 ? formatPercent(cachedInputTokens / inputTokens) : null,
         toolCalls: String(toolCalls),
         mcpToolCalls: String(mcpToolCalls),
@@ -427,8 +434,8 @@ function aggregateVariant(
         commandExecutions: String(commandExecutions),
         readToolCalls: String(readToolCalls),
         editToolCalls: String(editToolCalls),
-        rawTraceEvents: String(rawTraceEvents),
-        rawAgentActions: String(rawAgentActions),
+        rawTraceEvents: formatPatternMetric(averageRawTraceEvents),
+        rawAgentActions: formatPatternMetric(averageRawAgentActions),
         cost: taskCount > 0 && costValues.length === taskCount ? formatCurrency(costValues.reduce((sum, value) => sum + value, 0) / costValues.length) : undefined,
       },
       skills: {

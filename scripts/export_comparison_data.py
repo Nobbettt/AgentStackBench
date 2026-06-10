@@ -166,12 +166,12 @@ def _format_duration_ms(value: float) -> str:
     return f"{minutes}m {seconds:02d}s"
 
 
-def _format_tokens(value: int) -> str:
+def _format_tokens(value: float) -> str:
     if value >= 1_000_000:
         return f"{value / 1_000_000:.2f}M"
     if value >= 1_000:
         return f"{value / 1_000:.0f}K"
-    return str(value)
+    return str(int(round(value)))
 
 
 def _format_currency(value: float) -> str:
@@ -2899,6 +2899,14 @@ def _load_variant_payload(
     edit_tool_calls = sum(int((row.get("resources") or {}).get("editToolCalls") or 0) for row in instance_rows)
     raw_trace_events = sum(int((row.get("resources") or {}).get("rawTraceEvents") or 0) for row in instance_rows)
     raw_agent_actions = sum(int((row.get("resources") or {}).get("rawAgentActions") or 0) for row in instance_rows)
+    instance_count = len(instance_rows)
+    avg_total_tokens = total_tokens / instance_count if instance_count > 0 else 0
+    avg_input_tokens = input_tokens / instance_count if instance_count > 0 else 0
+    avg_output_tokens = output_tokens / instance_count if instance_count > 0 else 0
+    avg_cached_input_tokens = cached_input_tokens / instance_count if instance_count > 0 else 0
+    avg_non_cached_input_tokens = non_cached_input_tokens / instance_count if instance_count > 0 else 0
+    avg_raw_trace_events = raw_trace_events / instance_count if instance_count > 0 else 0
+    avg_raw_agent_actions = raw_agent_actions / instance_count if instance_count > 0 else 0
     retry_attempts = sum(int((row.get("resources") or {}).get("retryAttempts") or 1) for row in instance_rows)
     retried_runs = sum(1 for row in instance_rows if (row.get("resources") or {}).get("retried"))
     retry_suppressed_runs = sum(1 for row in instance_rows if (row.get("resources") or {}).get("retrySuppressed"))
@@ -2991,11 +2999,11 @@ def _load_variant_payload(
                 "excludedDurationValues": invalid_duration_count,
                 "averageSteps": pattern_metrics.get("averageSteps"),
                 "avgLinesPerStep": pattern_metrics.get("avgLinesPerStep"),
-                "totalTokens": _format_tokens(total_tokens),
-                "inputTokens": _format_tokens(input_tokens),
-                "outputTokens": _format_tokens(output_tokens),
-                "cachedInputTokens": _format_tokens(cached_input_tokens),
-                "nonCachedInputTokens": _format_tokens(non_cached_input_tokens),
+                "totalTokens": _format_tokens(avg_total_tokens),
+                "inputTokens": _format_tokens(avg_input_tokens),
+                "outputTokens": _format_tokens(avg_output_tokens),
+                "cachedInputTokens": _format_tokens(avg_cached_input_tokens),
+                "nonCachedInputTokens": _format_tokens(avg_non_cached_input_tokens),
                 "cachedInputShare": _format_percent(cached_input_tokens / input_tokens) if input_tokens > 0 else None,
                 "toolCalls": str(tool_calls),
                 "mcpToolCalls": str(mcp_tool_calls),
@@ -3003,8 +3011,8 @@ def _load_variant_payload(
                 "commandExecutions": str(command_executions),
                 "readToolCalls": str(read_tool_calls),
                 "editToolCalls": str(edit_tool_calls),
-                "rawTraceEvents": str(raw_trace_events),
-                "rawAgentActions": str(raw_agent_actions),
+                "rawTraceEvents": _format_pattern_metric(avg_raw_trace_events),
+                "rawAgentActions": _format_pattern_metric(avg_raw_agent_actions),
                 "cost": cost_metric,
             },
             "retries": {

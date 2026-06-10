@@ -512,13 +512,14 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
     assert payload["comparisonCards"][0]["variants"][0]["instances"][1]["resources"]["rawDurationMs"] == 2_500_000
     assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["averageDuration"] == "0m 01s"
     assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["excludedDurationValues"] == 1
-    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["inputTokens"] == "2K"
-    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["outputTokens"] == "500"
-    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["cachedInputTokens"] == "1K"
-    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["nonCachedInputTokens"] == "600"
+    # Token and trace metrics are per-run averages over the 2 included runs.
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["inputTokens"] == "950"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["outputTokens"] == "250"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["cachedInputTokens"] == "650"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["nonCachedInputTokens"] == "300"
     assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["cachedInputShare"] == "68.4%"
-    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["rawTraceEvents"] == "5"
-    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["rawAgentActions"] == "3"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["rawTraceEvents"] == "2.50"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["rawAgentActions"] == "1.50"
     assert payload["comparisonCards"][0]["variants"][0]["notes"]
     assert any("excluded 1 scored-task duration value" in note for note in payload["comparisonCards"][0]["variants"][0]["notes"])
     assert any("Context F1 is macro-averaged across valid evaluations" in note for note in payload["comparisonCards"][0]["notes"])
