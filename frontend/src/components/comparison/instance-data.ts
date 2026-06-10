@@ -1,62 +1,46 @@
 
 import type { ComparisonCard, ComparisonInstance } from "@/data/comparisons";
-import { coveragePrecision, f1, formatCurrency, formatDurationMs, formatMetric, formatPatternMetric, formatPercent, formatTokens, sortBench } from "@/components/comparison/format";
+import { formatCurrency, formatDurationMs, formatMetric, formatPatternMetric, formatPercent, formatTokens, sortBench } from "@/components/comparison/format";
 import { getComparisonPair } from "@/components/comparison/format";
+import {
+  type ContextLevel,
+  coveragePrecisionOrNull,
+  f1,
+  instanceContextAggregate,
+  instanceTrajectoryGoldFound as sharedInstanceTrajectoryGoldFound,
+  terminalTrajectoryCoverage as sharedTerminalTrajectoryCoverage,
+} from "@/data/instance-metrics";
 import type { ComparisonVariant, InstanceRow } from "@/components/comparison/types";
 
 export function instanceContextF1(instance: ComparisonInstance | undefined): number | null {
-  if (!instance || (instance.artifacts && instance.artifacts.evaluationStatus !== "valid")) return null;
-  const fileMetrics = coveragePrecision(instance.quality.file.predSize, instance.quality.file.goldSize, instance.quality.file.intersection);
-  const symbolMetrics = coveragePrecision(instance.quality.symbol.predSize, instance.quality.symbol.goldSize, instance.quality.symbol.intersection);
-  const spanMetrics = coveragePrecision(instance.quality.span.predSize, instance.quality.span.goldSize, instance.quality.span.intersection);
-  const lineMetrics = coveragePrecision(instance.quality.line.predSize, instance.quality.line.goldSize, instance.quality.line.intersection);
-  return (
-    f1(fileMetrics.coverage, fileMetrics.precision) +
-    f1(spanMetrics.coverage, spanMetrics.precision) +
-    f1(lineMetrics.coverage, lineMetrics.precision) +
-    f1(symbolMetrics.coverage, symbolMetrics.precision)
-  ) / 4;
+  if (!instance) return null;
+  return instanceContextAggregate(instance, "f1");
 }
 
 function instanceContextRecallPrecision(instance: ComparisonInstance | undefined): { recall: number; precision: number } | null {
-  if (!instance || (instance.artifacts && instance.artifacts.evaluationStatus !== "valid")) return null;
-  const fileMetrics = coveragePrecision(instance.quality.file.predSize, instance.quality.file.goldSize, instance.quality.file.intersection);
-  const symbolMetrics = coveragePrecision(instance.quality.symbol.predSize, instance.quality.symbol.goldSize, instance.quality.symbol.intersection);
-  const spanMetrics = coveragePrecision(instance.quality.span.predSize, instance.quality.span.goldSize, instance.quality.span.intersection);
-  const lineMetrics = coveragePrecision(instance.quality.line.predSize, instance.quality.line.goldSize, instance.quality.line.intersection);
-  return {
-    recall: (fileMetrics.coverage + spanMetrics.coverage + lineMetrics.coverage + symbolMetrics.coverage) / 4,
-    precision: (fileMetrics.precision + spanMetrics.precision + lineMetrics.precision + symbolMetrics.precision) / 4,
-  };
-}
-
-function terminalTrajectoryCoverage(instance: ComparisonInstance | undefined, level: "file" | "symbol" | "span" | "line"): number | null {
-  if (!instance || (instance.artifacts && instance.artifacts.evaluationStatus !== "valid")) return null;
-  if (!instance.evaluatedTrajectory) return null;
-  const steps = (instance.evaluatedTrajectory?.steps ?? []).filter((step) => !step.isSkillRead);
-  const values = steps
-    .map((step) => step.coverage[level])
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  if (values.length === 0) return 0;
-  return Math.min(Math.max(values[values.length - 1], 0), 1);
+  if (!instance) return null;
+  const recall = instanceContextAggregate(instance, "recall");
+  const precision = instanceContextAggregate(instance, "precision");
+  if (recall === null || precision === null) return null;
+  return { recall, precision };
 }
 
 function instanceTrajectoryGoldFound(instance: ComparisonInstance | undefined): number | null {
-  const values = (["file", "span", "line", "symbol"] as const)
-    .map((level) => terminalTrajectoryCoverage(instance, level))
-    .filter((value): value is number => value !== null);
-  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  return instance ? sharedInstanceTrajectoryGoldFound(instance) : null;
 }
 
-function formatTrajectoryLevel(instance: ComparisonInstance | undefined, level: "file" | "symbol" | "span" | "line") {
-  const value = terminalTrajectoryCoverage(instance, level);
+function formatTrajectoryLevel(instance: ComparisonInstance | undefined, level: ContextLevel) {
+  const value = instance ? sharedTerminalTrajectoryCoverage(instance, level) : null;
   return {
     goldFound: value !== null ? formatMetric(value) : undefined,
   };
 }
 
 function formatContextLevelMetrics(metric: ComparisonInstance["quality"]["file"] | undefined) {
-  const values = coveragePrecision(metric?.predSize ?? 0, metric?.goldSize ?? 0, metric?.intersection ?? 0);
+  const values = coveragePrecisionOrNull(metric?.predSize ?? 0, metric?.goldSize ?? 0, metric?.intersection ?? 0);
+  if (!values) {
+    return { recall: "—", precision: "—", f1: "—" };
+  }
   return {
     recall: formatMetric(values.coverage),
     precision: formatMetric(values.precision),
@@ -154,10 +138,10 @@ export function buildInstanceVariant(variant: ComparisonVariant, instance: Compa
         contextRecall: contextRecallPrecision ? formatMetric(contextRecallPrecision.recall) : undefined,
         contextPrecision: contextRecallPrecision ? formatMetric(contextRecallPrecision.precision) : undefined,
         trajectoryGoldFound: trajectoryGoldFound !== null ? formatMetric(trajectoryGoldFound) : undefined,
-        fileF1: hasValidEvaluation && instance ? formatMetric(fileF1) : undefined,
-        symbolF1: hasValidEvaluation && instance ? formatMetric(symbolF1) : undefined,
-        spanF1: hasValidEvaluation && instance ? formatMetric(spanF1) : undefined,
-        avgLineF1: hasValidEvaluation && instance ? formatMetric(lineF1) : undefined,
+        fileF1: hasValidEvaluation && instance && fileF1 !== null ? formatMetric(fileF1) : undefined,
+        symbolF1: hasValidEvaluation && instance && symbolF1 !== null ? formatMetric(symbolF1) : undefined,
+        spanF1: hasValidEvaluation && instance && spanF1 !== null ? formatMetric(spanF1) : undefined,
+        avgLineF1: hasValidEvaluation && instance && lineF1 !== null ? formatMetric(lineF1) : undefined,
         contextLevels: hasValidEvaluation && instance
           ? {
               file: formatContextLevelMetrics(instance.quality.file),
@@ -224,9 +208,9 @@ function fixOverlapSummaryFromInstance(instance: ComparisonInstance | undefined)
   };
 }
 
-function metricF1(metric: ComparisonInstance["quality"]["file"] | undefined): number {
-  const values = coveragePrecision(metric?.predSize ?? 0, metric?.goldSize ?? 0, metric?.intersection ?? 0);
-  return f1(values.coverage, values.precision);
+function metricF1(metric: ComparisonInstance["quality"]["file"] | undefined): number | null {
+  const values = coveragePrecisionOrNull(metric?.predSize ?? 0, metric?.goldSize ?? 0, metric?.intersection ?? 0);
+  return values ? f1(values.coverage, values.precision) : null;
 }
 
 export function buildInstanceComparison(comparison: ComparisonCard, row: InstanceRow): ComparisonCard {

@@ -5,12 +5,11 @@ import { Bar, BarChart, CartesianGrid, ReferenceDot, ResponsiveContainer, XAxis,
 
 import type { ComparisonCard, ComparisonInstance } from "@/data/comparisons";
 import {
-  coveragePrecision,
-  f1,
   formatLanguageLabel,
   getComparisonPair,
   sortBench,
 } from "@/components/comparison/format";
+import { coveragePrecisionOrNull, f1, hasValidEvaluation, instanceContextAggregate } from "@/data/instance-metrics";
 import {
   formatPValue,
   formatSignificanceEffect,
@@ -472,10 +471,6 @@ function metricGroupValue(
   return repositorySizeBuckets.find((bucket) => trackedFiles >= bucket.min && trackedFiles < bucket.max)?.key ?? null;
 }
 
-function hasValidEvaluation(instance: ComparisonInstance): boolean {
-  return !instance.artifacts?.evaluationStatus || instance.artifacts.evaluationStatus === "valid";
-}
-
 function formatMetricGroupLabel(value: string, groupKey: MetricGroupKey): string {
   if (groupKey === "language") return formatLanguageLabel(value);
   if (groupKey === "repositorySize") {
@@ -557,6 +552,7 @@ type QualityTotals = {
   span: QualityBucket;
   line: QualityBucket;
   contextF1Sum: number;
+  contextF1Count: number;
   total: number;
 };
 
@@ -607,6 +603,7 @@ function getContextStatsByGroup(
       span: { intersection: 0, goldSize: 0, predSize: 0 },
       line: { intersection: 0, goldSize: 0, predSize: 0 },
       contextF1Sum: 0,
+      contextF1Count: 0,
       total: 0,
     };
     for (const level of ["file", "span", "line", "symbol"] as const) {
@@ -614,7 +611,11 @@ function getContextStatsByGroup(
       stats[level].goldSize += instance.quality[level].goldSize;
       stats[level].predSize += instance.quality[level].predSize;
     }
-    stats.contextF1Sum += contextF1ForInstance(instance);
+    const instanceContextF1 = instanceContextAggregate(instance, "f1");
+    if (instanceContextF1 !== null) {
+      stats.contextF1Sum += instanceContextF1;
+      stats.contextF1Count += 1;
+    }
     stats.total += 1;
     byGroup.set(group, stats);
   }
@@ -622,30 +623,13 @@ function getContextStatsByGroup(
 }
 
 function contextF1FromTotals(totals: QualityTotals): number {
-  if (totals.total > 0) return totals.contextF1Sum / totals.total;
-  const fileMetrics = coveragePrecision(totals.file.predSize, totals.file.goldSize, totals.file.intersection);
-  const spanMetrics = coveragePrecision(totals.span.predSize, totals.span.goldSize, totals.span.intersection);
-  const lineMetrics = coveragePrecision(totals.line.predSize, totals.line.goldSize, totals.line.intersection);
-  const symbolMetrics = coveragePrecision(totals.symbol.predSize, totals.symbol.goldSize, totals.symbol.intersection);
-  return (
-    f1(fileMetrics.coverage, fileMetrics.precision) +
-    f1(spanMetrics.coverage, spanMetrics.precision) +
-    f1(lineMetrics.coverage, lineMetrics.precision) +
-    f1(symbolMetrics.coverage, symbolMetrics.precision)
-  ) / 4;
-}
-
-function contextF1ForInstance(instance: ComparisonInstance): number {
-  const fileMetrics = coveragePrecision(instance.quality.file.predSize, instance.quality.file.goldSize, instance.quality.file.intersection);
-  const spanMetrics = coveragePrecision(instance.quality.span.predSize, instance.quality.span.goldSize, instance.quality.span.intersection);
-  const lineMetrics = coveragePrecision(instance.quality.line.predSize, instance.quality.line.goldSize, instance.quality.line.intersection);
-  const symbolMetrics = coveragePrecision(instance.quality.symbol.predSize, instance.quality.symbol.goldSize, instance.quality.symbol.intersection);
-  return (
-    f1(fileMetrics.coverage, fileMetrics.precision) +
-    f1(spanMetrics.coverage, spanMetrics.precision) +
-    f1(lineMetrics.coverage, lineMetrics.precision) +
-    f1(symbolMetrics.coverage, symbolMetrics.precision)
-  ) / 4;
+  if (totals.contextF1Count > 0) return totals.contextF1Sum / totals.contextF1Count;
+  const levelF1Values = (["file", "span", "line", "symbol"] as const)
+    .map((level) => coveragePrecisionOrNull(totals[level].predSize, totals[level].goldSize, totals[level].intersection))
+    .filter((values): values is NonNullable<typeof values> => values !== null)
+    .map((values) => f1(values.coverage, values.precision));
+  if (levelF1Values.length === 0) return 0;
+  return levelF1Values.reduce((sum, value) => sum + value, 0) / levelF1Values.length;
 }
 
 type UsageKind = "skills" | "tools";

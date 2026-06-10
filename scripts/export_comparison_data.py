@@ -166,12 +166,12 @@ def _format_duration_ms(value: float) -> str:
     return f"{minutes}m {seconds:02d}s"
 
 
-def _format_tokens(value: int) -> str:
+def _format_tokens(value: float) -> str:
     if value >= 1_000_000:
         return f"{value / 1_000_000:.2f}M"
     if value >= 1_000:
         return f"{value / 1_000:.0f}K"
-    return str(value)
+    return str(int(round(value)))
 
 
 def _format_currency(value: float) -> str:
@@ -2656,18 +2656,34 @@ def _aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         raise ComparisonExportError("Evaluation file contained no valid rows")
     summary = aggregate_results(rows)
 
-    file_cov = float(((summary.get("final_file") or {}).get("coverage")) or 0.0)
-    file_prec = float(((summary.get("final_file") or {}).get("precision")) or 0.0)
-    symbol_cov = float(((summary.get("final_symbol") or {}).get("coverage")) or 0.0)
-    symbol_prec = float(((summary.get("final_symbol") or {}).get("precision")) or 0.0)
-    span_cov = float(((summary.get("final_span") or {}).get("coverage")) or 0.0)
-    span_prec = float(((summary.get("final_span") or {}).get("precision")) or 0.0)
-    line_cov = float(((summary.get("final_line") or {}).get("coverage")) or 0.0)
-    line_prec = float(((summary.get("final_line") or {}).get("precision")) or 0.0)
-    file_f1 = float(((summary.get("final_file") or {}).get("f1")) or _f1(file_cov, file_prec))
-    symbol_f1 = float(((summary.get("final_symbol") or {}).get("f1")) or _f1(symbol_cov, symbol_prec))
-    span_f1 = float(((summary.get("final_span") or {}).get("f1")) or _f1(span_cov, span_prec))
-    line_f1 = float(((summary.get("final_line") or {}).get("f1")) or _f1(line_cov, line_prec))
+    def _summary_level_value(granularity: str, field: str) -> float | None:
+        value = (summary.get(f"final_{granularity}") or {}).get(field)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        return None
+
+    def _summary_level_f1(granularity: str, coverage: float, precision: float) -> float:
+        # Fall back to F1-of-means only when the summary omits f1 entirely;
+        # a reported f1 of 0.0 is a legitimate value, not a missing one.
+        value = _summary_level_value(granularity, "f1")
+        return value if value is not None else _f1(coverage, precision)
+
+    def _summary_level_instances(granularity: str) -> int | None:
+        value = _summary_level_value(granularity, "num_instances")
+        return int(value) if value is not None else None
+
+    file_cov = _summary_level_value("file", "coverage") or 0.0
+    file_prec = _summary_level_value("file", "precision") or 0.0
+    symbol_cov = _summary_level_value("symbol", "coverage") or 0.0
+    symbol_prec = _summary_level_value("symbol", "precision") or 0.0
+    span_cov = _summary_level_value("span", "coverage") or 0.0
+    span_prec = _summary_level_value("span", "precision") or 0.0
+    line_cov = _summary_level_value("line", "coverage") or 0.0
+    line_prec = _summary_level_value("line", "precision") or 0.0
+    file_f1 = _summary_level_f1("file", file_cov, file_prec)
+    symbol_f1 = _summary_level_f1("symbol", symbol_cov, symbol_prec)
+    span_f1 = _summary_level_f1("span", span_cov, span_prec)
+    line_f1 = _summary_level_f1("line", line_cov, line_prec)
     trajectory_auc_values = _summary_metric_values(
         summary,
         ("traj_auc_file", "traj_auc_span", "traj_auc_line", "traj_auc_symbol"),
@@ -2696,21 +2712,25 @@ def _aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "recall": _format_metric(file_cov),
                 "precision": _format_metric(file_prec),
                 "f1": _format_metric(file_f1),
+                "n": _summary_level_instances("file"),
             },
             "symbol": {
                 "recall": _format_metric(symbol_cov),
                 "precision": _format_metric(symbol_prec),
                 "f1": _format_metric(symbol_f1),
+                "n": _summary_level_instances("symbol"),
             },
             "block": {
                 "recall": _format_metric(span_cov),
                 "precision": _format_metric(span_prec),
                 "f1": _format_metric(span_f1),
+                "n": _summary_level_instances("span"),
             },
             "line": {
                 "recall": _format_metric(line_cov),
                 "precision": _format_metric(line_prec),
                 "f1": _format_metric(line_f1),
+                "n": _summary_level_instances("line"),
             },
         },
         "pooledContextLevels": {
@@ -2879,6 +2899,14 @@ def _load_variant_payload(
     edit_tool_calls = sum(int((row.get("resources") or {}).get("editToolCalls") or 0) for row in instance_rows)
     raw_trace_events = sum(int((row.get("resources") or {}).get("rawTraceEvents") or 0) for row in instance_rows)
     raw_agent_actions = sum(int((row.get("resources") or {}).get("rawAgentActions") or 0) for row in instance_rows)
+    instance_count = len(instance_rows)
+    avg_total_tokens = total_tokens / instance_count if instance_count > 0 else 0
+    avg_input_tokens = input_tokens / instance_count if instance_count > 0 else 0
+    avg_output_tokens = output_tokens / instance_count if instance_count > 0 else 0
+    avg_cached_input_tokens = cached_input_tokens / instance_count if instance_count > 0 else 0
+    avg_non_cached_input_tokens = non_cached_input_tokens / instance_count if instance_count > 0 else 0
+    avg_raw_trace_events = raw_trace_events / instance_count if instance_count > 0 else 0
+    avg_raw_agent_actions = raw_agent_actions / instance_count if instance_count > 0 else 0
     retry_attempts = sum(int((row.get("resources") or {}).get("retryAttempts") or 1) for row in instance_rows)
     retried_runs = sum(1 for row in instance_rows if (row.get("resources") or {}).get("retried"))
     retry_suppressed_runs = sum(1 for row in instance_rows if (row.get("resources") or {}).get("retrySuppressed"))
@@ -2971,11 +2999,11 @@ def _load_variant_payload(
                 "excludedDurationValues": invalid_duration_count,
                 "averageSteps": pattern_metrics.get("averageSteps"),
                 "avgLinesPerStep": pattern_metrics.get("avgLinesPerStep"),
-                "totalTokens": _format_tokens(total_tokens),
-                "inputTokens": _format_tokens(input_tokens),
-                "outputTokens": _format_tokens(output_tokens),
-                "cachedInputTokens": _format_tokens(cached_input_tokens),
-                "nonCachedInputTokens": _format_tokens(non_cached_input_tokens),
+                "totalTokens": _format_tokens(avg_total_tokens),
+                "inputTokens": _format_tokens(avg_input_tokens),
+                "outputTokens": _format_tokens(avg_output_tokens),
+                "cachedInputTokens": _format_tokens(avg_cached_input_tokens),
+                "nonCachedInputTokens": _format_tokens(avg_non_cached_input_tokens),
                 "cachedInputShare": _format_percent(cached_input_tokens / input_tokens) if input_tokens > 0 else None,
                 "toolCalls": str(tool_calls),
                 "mcpToolCalls": str(mcp_tool_calls),
@@ -2983,8 +3011,8 @@ def _load_variant_payload(
                 "commandExecutions": str(command_executions),
                 "readToolCalls": str(read_tool_calls),
                 "editToolCalls": str(edit_tool_calls),
-                "rawTraceEvents": str(raw_trace_events),
-                "rawAgentActions": str(raw_agent_actions),
+                "rawTraceEvents": _format_pattern_metric(avg_raw_trace_events),
+                "rawAgentActions": _format_pattern_metric(avg_raw_agent_actions),
                 "cost": cost_metric,
             },
             "retries": {

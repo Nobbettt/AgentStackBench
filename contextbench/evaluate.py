@@ -712,6 +712,11 @@ def aggregate_results(results: list) -> dict:
                 metric = row.get("final", {}).get(gran, {})
                 if not metric:
                     continue
+                # Instances without gold at this granularity have no defined
+                # coverage/precision (0/0 would score 1.0); exclude them from
+                # the macro mean instead of letting them inflate it.
+                if metric.get("gold_size", 0) <= 0:
+                    continue
                 cov, prec = coverage_precision(
                     metric.get("pred_size", 0),
                     metric.get("gold_size", 0),
@@ -724,6 +729,7 @@ def aggregate_results(results: list) -> dict:
                     "precision": sum(item["precision"] for item in level_values) / len(level_values),
                     "f1": sum(item["f1"] for item in level_values) / len(level_values),
                     "aggregation": "macro",
+                    "num_instances": len(level_values),
                 }
 
                 intersection = sum(r.get("final", {}).get(gran, {}).get("intersection", 0) for r in valid)

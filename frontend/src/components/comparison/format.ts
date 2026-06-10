@@ -104,7 +104,7 @@ export function formatDurationDelta(value: number): string {
 export function formatTokens(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(0)}K`;
-  return String(value);
+  return String(Math.round(value));
 }
 
 export function formatCurrency(value: number): string {

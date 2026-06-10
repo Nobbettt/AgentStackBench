@@ -29,6 +29,7 @@ import {
   resolutionMetricDefinitions,
 } from "@/components/comparison/metrics";
 import { getMetricSignificance, type PairedSignificance } from "@/components/comparison/significance";
+import { terminalTrajectoryCoverage } from "@/data/instance-metrics";
 import { ComparisonSectionShell, DeltaIndicator, HelpIcon, MetricDirectionBadge, SignificanceBadge } from "@/components/comparison/shared";
 import type { ComparisonResultsViewMode, DeltaDisplayMode, MetricDefinition } from "@/components/comparison/types";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
@@ -654,7 +655,11 @@ export function FixOverlapVsGoldSection({
           <FixOverlapVariantGrid variants={comparison.variants} />
         )}
         {showDeltas && !showVersus ? (
-          <FixOverlapDumbbellChart baseline={comparisonPair.baseline} treatment={comparisonPair.treatment} />
+          <FixOverlapDumbbellChart
+            baseline={comparisonPair.baseline}
+            treatment={comparisonPair.treatment}
+            deltaDisplayMode={deltaDisplayMode}
+          />
         ) : null}
       </div>
     </ComparisonSectionShell>
@@ -748,9 +753,11 @@ function fixOverlapMetricKey(measure: FixOverlapMeasureKey): string {
 function FixOverlapDumbbellChart({
   baseline,
   treatment,
+  deltaDisplayMode,
 }: {
   baseline: ComparisonCard["variants"][number];
   treatment: ComparisonCard["variants"][number];
+  deltaDisplayMode: DeltaDisplayMode;
 }) {
   return (
     <div>
@@ -786,8 +793,8 @@ function FixOverlapDumbbellChart({
                 />
               </div>
               <FixOverlapDumbbellValues
-                baselineLabel={fixOverlapMeasureValue(baseline, measure.key)}
-                treatmentLabel={fixOverlapMeasureValue(treatment, measure.key)}
+                baselineLabel={formatFixOverlapChartValue(baselineValue, deltaDisplayMode)}
+                treatmentLabel={formatFixOverlapChartValue(treatmentValue, deltaDisplayMode)}
                 baselineValue={baselineValue}
                 treatmentValue={treatmentValue}
               />
@@ -797,6 +804,10 @@ function FixOverlapDumbbellChart({
       </div>
     </div>
   );
+}
+
+function formatFixOverlapChartValue(value: number, displayMode: DeltaDisplayMode): string {
+  return displayMode === "percent" ? `${value.toFixed(1)}%` : value.toFixed(1);
 }
 
 function FixOverlapDumbbellValues({
@@ -991,6 +1002,36 @@ const contextLevelRows: Array<{ key: ContextLevelKey; label: string; explanation
   },
 ];
 
+function ContextLevelSampleSize({
+  variants,
+  level,
+  taskCount,
+}: {
+  variants: ComparisonCard["variants"];
+  level: ContextLevelKey;
+  taskCount: number;
+}) {
+  const sampleSizes = Array.from(
+    new Set(
+      variants
+        .map((variant) => variant.results.quality.contextLevels?.[level]?.n)
+        .filter((value): value is number => typeof value === "number"),
+    ),
+  ).sort((left, right) => left - right);
+  if (sampleSizes.length === 0) return null;
+  // Only call out levels where instances were excluded for having no gold.
+  if (sampleSizes.every((value) => value >= taskCount)) return null;
+  const label = sampleSizes.length === 1 ? `n=${sampleSizes[0]}` : `n=${sampleSizes[0]}–${sampleSizes[sampleSizes.length - 1]}`;
+  return (
+    <span
+      className="text-xs font-normal text-muted-foreground"
+      title="Number of tasks with gold context at this granularity; tasks without gold are excluded from the macro average."
+    >
+      {label}
+    </span>
+  );
+}
+
 function contextMeasureValue(
   variant: ComparisonCard["variants"][number],
   level: ContextLevelKey,
@@ -1095,13 +1136,8 @@ function terminalContextTrajectoryCoveragePercent(
 ): number | null {
   const trajectoryLevel = level === "block" ? "span" : level;
   const values = (variant.instances ?? [])
-    .map((instance) => {
-      if (instance.artifacts?.evaluationStatus && instance.artifacts.evaluationStatus !== "valid") return null;
-      if (!instance.evaluatedTrajectory) return null;
-      const series = contextTrajectoryCoverageSeries(instance.evaluatedTrajectory?.steps ?? [], trajectoryLevel);
-      return series.length > 0 ? series[series.length - 1] : 0;
-    })
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    .map((instance) => terminalTrajectoryCoverage(instance, trajectoryLevel))
+    .filter((value): value is number => value !== null);
   if (values.length === 0) return null;
   const average = values.reduce((sum, value) => sum + value, 0) / values.length;
   return Math.min(Math.max(average, 0), 1);
@@ -1403,6 +1439,7 @@ function ContextEfficiencyByLevelTable({
                 <span className="inline-flex items-center gap-2">
                   {row.label}
                   <HelpIcon label={row.label} explanation={row.explanation} />
+                  <ContextLevelSampleSize variants={variants} level={row.key} taskCount={comparison.tasks} />
                 </span>
               </th>
               {showPairwiseTable ? (

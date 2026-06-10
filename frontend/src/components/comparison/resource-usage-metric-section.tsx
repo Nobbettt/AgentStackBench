@@ -351,6 +351,7 @@ function ResourceUsageSummary({
 }
 
 type TokenUsageBreakdown = {
+  runCount: number;
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
@@ -371,9 +372,17 @@ function tokenUsageBreakdown(variant: ComparisonCard["variants"][number]): Token
       sum.nonCachedInputTokens += resources.nonCachedInputTokens ?? 0;
       return sum;
     },
-    { totalTokens: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, nonCachedInputTokens: 0 },
+    { runCount: instances.length, totalTokens: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, nonCachedInputTokens: 0 },
   );
-  return breakdown.totalTokens > 0 || breakdown.inputTokens > 0 || breakdown.outputTokens > 0 ? breakdown : null;
+  if (breakdown.totalTokens <= 0 && breakdown.inputTokens <= 0 && breakdown.outputTokens <= 0) return null;
+  return {
+    runCount: breakdown.runCount,
+    totalTokens: breakdown.totalTokens / breakdown.runCount,
+    inputTokens: breakdown.inputTokens / breakdown.runCount,
+    outputTokens: breakdown.outputTokens / breakdown.runCount,
+    cachedInputTokens: breakdown.cachedInputTokens / breakdown.runCount,
+    nonCachedInputTokens: breakdown.nonCachedInputTokens / breakdown.runCount,
+  };
 }
 
 type TokenMetricDelta = {
@@ -457,7 +466,7 @@ function TokenUsageSection({
       headerInline={
         <HelpIcon
           label="Token Usage"
-          explanation="Provider-reported cumulative token usage across included runs. Cached input tokens are counted by the provider and can make totals exceed any single model context window."
+          explanation="Average provider-reported token usage per included run. Cached input tokens are counted by the provider and can make per-run totals exceed any single model context window."
         />
       }
     >
@@ -527,7 +536,7 @@ function TokenUsageDiffCard({
           <div className="mt-1 text-xs text-muted-foreground">Compared with {baseline.variant.name}</div>
         </div>
         <div className="text-right">
-          <div className="text-xs uppercase tracking-wide text-muted-foreground">Total token delta</div>
+          <div className="text-xs uppercase tracking-wide text-muted-foreground">Avg token delta</div>
           <div className="mt-1 flex justify-end">
             <DeltaIndicator label={totalDelta.label} delta={totalDelta.delta} tone={totalDelta.tone} />
           </div>
@@ -566,11 +575,11 @@ function TokenUsageVariantCard({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-sm font-medium">{variant.name}</div>
-          <div className="mt-1 text-xs text-muted-foreground">Cumulative provider-reported tokens</div>
+          <div className="mt-1 text-xs text-muted-foreground">Average provider-reported tokens per run</div>
         </div>
         <div className="text-right">
           <div className="text-xl font-semibold tabular-nums">{formatTokens(breakdown.totalTokens)}</div>
-          <div className="text-xs text-muted-foreground">total</div>
+          <div className="text-xs text-muted-foreground">avg / run</div>
         </div>
       </div>
 

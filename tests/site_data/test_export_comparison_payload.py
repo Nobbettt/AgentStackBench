@@ -447,10 +447,10 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
     assert payload["comparisonCards"][0]["variants"][0]["results"]["quality"]["spanF1"] == "0.667"
     assert payload["comparisonCards"][0]["variants"][0]["results"]["quality"]["avgLineF1"] == "0.600"
     assert payload["comparisonCards"][0]["variants"][0]["results"]["quality"]["contextLevels"] == {
-        "file": {"recall": "0.750", "precision": "0.750", "f1": "0.750"},
-        "block": {"recall": "0.600", "precision": "0.750", "f1": "0.667"},
-        "line": {"recall": "0.750", "precision": "0.500", "f1": "0.600"},
-        "symbol": {"recall": "0.500", "precision": "0.500", "f1": "0.500"},
+        "file": {"recall": "0.750", "precision": "0.750", "f1": "0.750", "n": 1},
+        "block": {"recall": "0.600", "precision": "0.750", "f1": "0.667", "n": 1},
+        "line": {"recall": "0.750", "precision": "0.500", "f1": "0.600", "n": 1},
+        "symbol": {"recall": "0.500", "precision": "0.500", "f1": "0.500", "n": 1},
     }
     assert payload["comparisonCards"][0]["variants"][0]["results"]["quality"]["trajectoryGoldFound"] == "0.625"
     assert payload["comparisonCards"][0]["variants"][0]["results"]["quality"]["trajectoryContextLevels"] == {
@@ -512,13 +512,14 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
     assert payload["comparisonCards"][0]["variants"][0]["instances"][1]["resources"]["rawDurationMs"] == 2_500_000
     assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["averageDuration"] == "0m 01s"
     assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["excludedDurationValues"] == 1
-    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["inputTokens"] == "2K"
-    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["outputTokens"] == "500"
-    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["cachedInputTokens"] == "1K"
-    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["nonCachedInputTokens"] == "600"
+    # Token and trace metrics are per-run averages over the 2 included runs.
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["inputTokens"] == "950"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["outputTokens"] == "250"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["cachedInputTokens"] == "650"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["nonCachedInputTokens"] == "300"
     assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["cachedInputShare"] == "68.4%"
-    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["rawTraceEvents"] == "5"
-    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["rawAgentActions"] == "3"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["rawTraceEvents"] == "2.50"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["rawAgentActions"] == "1.50"
     assert payload["comparisonCards"][0]["variants"][0]["notes"]
     assert any("excluded 1 scored-task duration value" in note for note in payload["comparisonCards"][0]["variants"][0]["notes"])
     assert any("Context F1 is macro-averaged across valid evaluations" in note for note in payload["comparisonCards"][0]["notes"])
@@ -652,10 +653,10 @@ def test_build_comparison_payload_can_export_aligned_postprocess_artifacts(tmp_p
     assert variant["results"]["quality"]["fileF1"] == "0.500"
     assert variant["results"]["quality"]["contextF1"] == "0.500"
     assert variant["results"]["quality"]["contextLevels"] == {
-        "file": {"recall": "0.500", "precision": "0.500", "f1": "0.500"},
-        "block": {"recall": "0.500", "precision": "0.500", "f1": "0.500"},
-        "line": {"recall": "0.500", "precision": "0.500", "f1": "0.500"},
-        "symbol": {"recall": "0.500", "precision": "0.500", "f1": "0.500"},
+        "file": {"recall": "0.500", "precision": "0.500", "f1": "0.500", "n": 1},
+        "block": {"recall": "0.500", "precision": "0.500", "f1": "0.500", "n": 1},
+        "line": {"recall": "0.500", "precision": "0.500", "f1": "0.500", "n": 1},
+        "symbol": {"recall": "0.500", "precision": "0.500", "f1": "0.500", "n": 1},
     }
     assert any("aligned postprocess artifacts" in note for note in payload["comparisonCards"][0]["notes"])
 

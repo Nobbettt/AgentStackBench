@@ -2,6 +2,15 @@
 // Summary of changes: aggregate fork-specific execution completion and integrity counters separately from official Pass@1.
 
 import type { ComparisonCard, ComparisonInstance } from "@/data/comparisons";
+import {
+  type ContextLevel,
+  CONTEXT_LEVELS,
+  contextLevelMetric,
+  f1,
+  hasValidEvaluation,
+  mean,
+  terminalTrajectoryCoverage,
+} from "@/data/instance-metrics";
 
 export type ComparisonFilters = {
   benches: string[];
@@ -57,7 +66,7 @@ function formatTokens(value: number): string {
   if (value >= 1_000) {
     return `${(value / 1_000).toFixed(0)}K`;
   }
-  return String(value);
+  return String(Math.round(value));
 }
 
 function formatCurrency(value: number): string {
@@ -71,55 +80,29 @@ function coveragePrecision(predSize: number, goldSize: number, intersection: num
   };
 }
 
-function f1(coverage: number, precision: number): number {
-  const denominator = coverage + precision;
-  return denominator === 0 ? 0 : (2 * coverage * precision) / denominator;
-}
-
-function formatContextLevelMetrics(metrics: { coverage: number; precision: number }) {
+function formatContextLevelMetrics(metrics: { coverage: number; precision: number; f1?: number; n?: number }) {
   return {
     recall: formatMetric(metrics.coverage),
     precision: formatMetric(metrics.precision),
-    f1: formatMetric(f1(metrics.coverage, metrics.precision)),
-  };
-}
-
-type ContextLevel = "file" | "symbol" | "span" | "line";
-
-const CONTEXT_LEVELS: ContextLevel[] = ["file", "span", "line", "symbol"];
-
-function mean(values: number[]): number | null {
-  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
-}
-
-function contextLevelMetricsForInstance(instance: ComparisonInstance, level: ContextLevel) {
-  const metric = instance.quality[level];
-  const values = coveragePrecision(metric.predSize, metric.goldSize, metric.intersection);
-  return {
-    recall: values.coverage,
-    precision: values.precision,
-    f1: f1(values.coverage, values.precision),
+    // Macro levels carry their own mean-of-f1s; recomputing from mean
+    // coverage/precision (F1-of-means) is only correct for pooled totals.
+    f1: formatMetric(metrics.f1 ?? f1(metrics.coverage, metrics.precision)),
+    ...(metrics.n !== undefined ? { n: metrics.n } : {}),
   };
 }
 
 function macroContextLevelMetrics(instances: ComparisonInstance[], level: ContextLevel) {
-  const values = instances.map((instance) => contextLevelMetricsForInstance(instance, level));
+  const values = (measure: "recall" | "precision" | "f1") =>
+    instances
+      .map((instance) => contextLevelMetric(instance, level, measure))
+      .filter((value): value is number => value !== null);
+  const f1Values = values("f1");
   return {
-    coverage: mean(values.map((value) => value.recall)) ?? 0,
-    precision: mean(values.map((value) => value.precision)) ?? 0,
-    f1: mean(values.map((value) => value.f1)) ?? 0,
+    coverage: mean(values("recall")) ?? 0,
+    precision: mean(values("precision")) ?? 0,
+    f1: mean(f1Values) ?? 0,
+    n: f1Values.length,
   };
-}
-
-function terminalTrajectoryCoverage(instance: ComparisonInstance, level: ContextLevel): number | null {
-  if (instance.artifacts?.evaluationStatus && instance.artifacts.evaluationStatus !== "valid") return null;
-  if (!instance.evaluatedTrajectory) return null;
-  const steps = (instance.evaluatedTrajectory?.steps ?? []).filter((step) => !step.isSkillRead);
-  const values = steps
-    .map((step) => step.coverage[level])
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  if (values.length === 0) return 0;
-  return Math.min(Math.max(values[values.length - 1], 0), 1);
 }
 
 function macroTrajectoryContextLevel(instances: ComparisonInstance[], level: ContextLevel): number | null {
@@ -138,10 +121,6 @@ function formatTrajectoryContextLevel(value: number | null) {
 
 function variantInstances(variant: ComparisonCard["variants"][number]): ComparisonInstance[] {
   return variant.instances ?? [];
-}
-
-function hasValidEvaluation(instance: ComparisonInstance): boolean {
-  return !instance.artifacts?.evaluationStatus || instance.artifacts.evaluationStatus === "valid";
 }
 
 function countCompletedRuns(instances: ComparisonInstance[]): number {
@@ -329,6 +308,11 @@ function aggregateVariant(
   const outputTokens = filteredInstances.reduce((sum, instance) => sum + (instance.resources.outputTokens ?? 0), 0);
   const cachedInputTokens = filteredInstances.reduce((sum, instance) => sum + (instance.resources.cachedInputTokens ?? 0), 0);
   const nonCachedInputTokens = filteredInstances.reduce((sum, instance) => sum + (instance.resources.nonCachedInputTokens ?? 0), 0);
+  const averageTotalTokens = taskCount > 0 ? totalTokens / taskCount : 0;
+  const averageInputTokens = taskCount > 0 ? inputTokens / taskCount : 0;
+  const averageOutputTokens = taskCount > 0 ? outputTokens / taskCount : 0;
+  const averageCachedInputTokens = taskCount > 0 ? cachedInputTokens / taskCount : 0;
+  const averageNonCachedInputTokens = taskCount > 0 ? nonCachedInputTokens / taskCount : 0;
   const toolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.toolCalls ?? 0), 0);
   const mcpToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.mcpToolCalls ?? 0), 0);
   const successfulMcpToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.successfulMcpToolCalls ?? 0), 0);
@@ -337,6 +321,8 @@ function aggregateVariant(
   const editToolCalls = filteredInstances.reduce((sum, instance) => sum + (instance.resources.editToolCalls ?? 0), 0);
   const rawTraceEvents = filteredInstances.reduce((sum, instance) => sum + (instance.resources.rawTraceEvents ?? 0), 0);
   const rawAgentActions = filteredInstances.reduce((sum, instance) => sum + (instance.resources.rawAgentActions ?? 0), 0);
+  const averageRawTraceEvents = taskCount > 0 ? rawTraceEvents / taskCount : 0;
+  const averageRawAgentActions = taskCount > 0 ? rawAgentActions / taskCount : 0;
   const costValues = filteredInstances
     .map((instance) => instance.resources.costUsd)
     .filter((value): value is number => typeof value === "number");
@@ -436,11 +422,11 @@ function aggregateVariant(
         excludedDurationValues,
         averageSteps: averageSteps !== null ? formatPatternMetric(averageSteps) : undefined,
         avgLinesPerStep: avgLinesPerStep !== null ? formatPatternMetric(avgLinesPerStep) : undefined,
-        totalTokens: totalTokens > 0 ? formatTokens(totalTokens) : undefined,
-        inputTokens: inputTokens > 0 ? formatTokens(inputTokens) : undefined,
-        outputTokens: outputTokens > 0 ? formatTokens(outputTokens) : undefined,
-        cachedInputTokens: cachedInputTokens > 0 ? formatTokens(cachedInputTokens) : undefined,
-        nonCachedInputTokens: nonCachedInputTokens > 0 ? formatTokens(nonCachedInputTokens) : undefined,
+        totalTokens: averageTotalTokens > 0 ? formatTokens(averageTotalTokens) : undefined,
+        inputTokens: averageInputTokens > 0 ? formatTokens(averageInputTokens) : undefined,
+        outputTokens: averageOutputTokens > 0 ? formatTokens(averageOutputTokens) : undefined,
+        cachedInputTokens: averageCachedInputTokens > 0 ? formatTokens(averageCachedInputTokens) : undefined,
+        nonCachedInputTokens: averageNonCachedInputTokens > 0 ? formatTokens(averageNonCachedInputTokens) : undefined,
         cachedInputShare: inputTokens > 0 ? formatPercent(cachedInputTokens / inputTokens) : null,
         toolCalls: String(toolCalls),
         mcpToolCalls: String(mcpToolCalls),
@@ -448,8 +434,8 @@ function aggregateVariant(
         commandExecutions: String(commandExecutions),
         readToolCalls: String(readToolCalls),
         editToolCalls: String(editToolCalls),
-        rawTraceEvents: String(rawTraceEvents),
-        rawAgentActions: String(rawAgentActions),
+        rawTraceEvents: formatPatternMetric(averageRawTraceEvents),
+        rawAgentActions: formatPatternMetric(averageRawAgentActions),
         cost: taskCount > 0 && costValues.length === taskCount ? formatCurrency(costValues.reduce((sum, value) => sum + value, 0) / costValues.length) : undefined,
       },
       skills: {
