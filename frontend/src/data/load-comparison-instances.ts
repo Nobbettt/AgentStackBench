@@ -6,9 +6,12 @@ export async function loadComparisonInstances(
   comparisonId: string,
   bundle: ComparisonInstanceBundle,
 ): Promise<ComparisonInstancesPayload> {
+  // "no-cache" revalidates with the server (via ETag/Last-Modified) before
+  // using a cached copy; "force-cache" would serve stale bundles after a
+  // redeploy and silently disagree with the freshly fetched comparison.json.
   const response = await fetch(
     `${import.meta.env.BASE_URL}comparison-data/${encodeURIComponent(comparisonId)}/${bundle}.json`,
-    { cache: import.meta.env.DEV ? "no-store" : "force-cache" },
+    { cache: import.meta.env.DEV ? "no-store" : "no-cache" },
   );
 
   if (!response.ok) {

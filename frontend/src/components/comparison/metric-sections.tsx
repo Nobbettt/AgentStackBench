@@ -29,6 +29,7 @@ import {
   resolutionMetricDefinitions,
 } from "@/components/comparison/metrics";
 import { getMetricSignificance, type PairedSignificance } from "@/components/comparison/significance";
+import { terminalTrajectoryCoverage } from "@/data/instance-metrics";
 import { ComparisonSectionShell, DeltaIndicator, HelpIcon, MetricDirectionBadge, SignificanceBadge } from "@/components/comparison/shared";
 import type { ComparisonResultsViewMode, DeltaDisplayMode, MetricDefinition } from "@/components/comparison/types";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
@@ -1095,13 +1096,8 @@ function terminalContextTrajectoryCoveragePercent(
 ): number | null {
   const trajectoryLevel = level === "block" ? "span" : level;
   const values = (variant.instances ?? [])
-    .map((instance) => {
-      if (instance.artifacts?.evaluationStatus && instance.artifacts.evaluationStatus !== "valid") return null;
-      if (!instance.evaluatedTrajectory) return null;
-      const series = contextTrajectoryCoverageSeries(instance.evaluatedTrajectory?.steps ?? [], trajectoryLevel);
-      return series.length > 0 ? series[series.length - 1] : 0;
-    })
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    .map((instance) => terminalTrajectoryCoverage(instance, trajectoryLevel))
+    .filter((value): value is number => value !== null);
   if (values.length === 0) return null;
   const average = values.reduce((sum, value) => sum + value, 0) / values.length;
   return Math.min(Math.max(average, 0), 1);

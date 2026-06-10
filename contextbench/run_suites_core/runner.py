@@ -26,7 +26,6 @@ from ..artifact_sanitization import (
     assert_paths_have_no_private_artifacts,
     sanitize_artifact_tree,
     sanitize_json_value,
-    sanitize_text,
 )
 from ..coding_agents.constants import DEFAULT_SUBSET_CSV
 from ..coding_agents.files import append_jsonl, ensure_dir, read_json, safe_path_component, write_json
@@ -638,61 +637,6 @@ class RunSuiteRunner:
                 target_path = variant_dir / f"{stem}.{extension}"
                 shutil.copy2(source_path, target_path)
 
-    def _write_public_artifact_file(self, source_path: Path, target_path: Path) -> None:
-        context = SanitizationContext(
-            repo_root=Path.cwd().resolve(),
-            suite_dir=self.experiment_dir.resolve(),
-            task_dir=source_path.parent.resolve(),
-        )
-        ensure_dir(target_path.parent)
-        suffix = source_path.suffix.lower()
-        if suffix == ".json":
-            payload = read_json(source_path)
-            sanitized = sanitize_json_value(payload, context=context)
-            assert_no_private_paths(sanitized, label=str(source_path))
-            write_json(target_path, sanitized)
-            return
-        if suffix == ".jsonl":
-            lines: list[str] = []
-            for raw_line in source_path.read_text(encoding="utf-8").splitlines():
-                if not raw_line.strip():
-                    continue
-                try:
-                    payload = json.loads(raw_line)
-                except json.JSONDecodeError:
-                    sanitized_line = sanitize_text(raw_line, context=context)
-                    assert_no_private_paths(sanitized_line, label=str(source_path))
-                    lines.append(sanitized_line)
-                    continue
-                sanitized = sanitize_json_value(payload, context=context)
-                assert_no_private_paths(sanitized, label=str(source_path))
-                lines.append(json.dumps(sanitized, ensure_ascii=False))
-            target_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-            return
-        sanitized_text = sanitize_text(source_path.read_text(encoding="utf-8"), context=context)
-        assert_no_private_paths(sanitized_text, label=str(source_path))
-        target_path.write_text(sanitized_text, encoding="utf-8")
-
-    def _write_public_suffix_artifacts(self, artifact_suffix: str | None) -> None:
-        suffix = str(artifact_suffix or "").strip().strip(".")
-        if not suffix:
-            return
-        for variant_dir in sorted((self.experiment_dir / "variants").glob("*")):
-            if not variant_dir.is_dir():
-                continue
-            public_variant_dir = self.public_artifacts_dir / variant_dir.relative_to(self.experiment_dir)
-            for stem, extension in (
-                ("pred", "jsonl"),
-                ("eval", "jsonl"),
-                ("conversion-summary", "json"),
-                ("eval-summary", "json"),
-            ):
-                source_path = variant_dir / f"{stem}.{suffix}.{extension}"
-                if not source_path.exists():
-                    continue
-                self._write_public_artifact_file(source_path, public_variant_dir / source_path.name)
-                self._write_public_artifact_file(source_path, public_variant_dir / f"{stem}.{extension}")
-
     def _write_public_artifacts(self, *, artifact_suffix: str | None = None) -> None:
         repo_root = Path.cwd().resolve()
         sanitize_artifact_tree(
@@ -703,44 +647,6 @@ class RunSuiteRunner:
         )
         self._canonicalize_public_suffix_artifacts(artifact_suffix)
         assert_paths_have_no_private_artifacts([self.public_artifacts_dir])
-
-    def _write_public_rollup_artifacts(self, *, artifact_suffix: str | None = None) -> None:
-        context = SanitizationContext(
-            repo_root=Path.cwd().resolve(),
-            suite_dir=self.experiment_dir.resolve(),
-        )
-        ensure_dir(self.public_artifacts_dir)
-
-        for source_path in (self.manifest_path, self.summary_json_path):
-            payload = read_json(source_path)
-            sanitized = sanitize_json_value(payload, context=context)
-            assert_no_private_paths(sanitized, label=str(source_path))
-            write_json(self.public_artifacts_dir / source_path.name, sanitized)
-
-        summary_csv = sanitize_text(self.summary_csv_path.read_text(encoding="utf-8"), context=context)
-        assert_no_private_paths(summary_csv, label=str(self.summary_csv_path))
-        (self.public_artifacts_dir / self.summary_csv_path.name).write_text(summary_csv, encoding="utf-8")
-        refreshed_paths = [
-            self.public_artifacts_dir / "manifest.json",
-            self.public_artifacts_dir / "summary.json",
-            self.public_artifacts_dir / "summary.csv",
-        ]
-
-        for source_path in sorted((self.experiment_dir / "variants").glob("*/integrity.json")):
-            payload = read_json(source_path)
-            variant_context = SanitizationContext(
-                repo_root=Path.cwd().resolve(),
-                suite_dir=self.experiment_dir.resolve(),
-                task_dir=source_path.parent.resolve(),
-            )
-            sanitized = sanitize_json_value(payload, context=variant_context)
-            assert_no_private_paths(sanitized, label=str(source_path))
-            target_path = self.public_artifacts_dir / source_path.relative_to(self.experiment_dir)
-            ensure_dir(target_path.parent)
-            write_json(target_path, sanitized)
-            refreshed_paths.append(target_path)
-
-        assert_paths_have_no_private_artifacts(refreshed_paths)
 
     def _sanitize_experiment_artifact(self, value: dict[str, object], *, label: str) -> dict[str, object]:
         context = SanitizationContext(
@@ -1890,8 +1796,10 @@ class RunSuiteRunner:
                 manifest["postprocess_artifact_suffix"] = artifact_suffix
                 write_json(self.manifest_path, manifest)
         self._write_summary(variant_entries)
-        self._write_public_rollup_artifacts(artifact_suffix=artifact_suffix)
-        self._write_public_suffix_artifacts(artifact_suffix)
+        # Re-sanitize the full artifact tree so refreshed rollups and the
+        # public per-variant copies (eval-summary.json, conversion-summary.json,
+        # resolution-summary.json, ...) cannot drift apart.
+        self._write_public_artifacts(artifact_suffix=artifact_suffix)
 
         bad_statuses = {"failed", "completed_with_failures", "postprocess_failed"}
         return 0 if all(entry["status"] not in bad_statuses for entry in variant_entries) else 1

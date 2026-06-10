@@ -290,6 +290,7 @@ class ClaudeAgentParser(BaseCodingAgentParser):
                     output_text = _bounded_tool_output_text(output_text, meta=meta)
                     step = infer_search_file_step_from_path(
                         str(tool_input.get("path") or "").strip(),
+                        output_text=output_text,
                         workspace_path=workspace_path,
                     )
                     if step:

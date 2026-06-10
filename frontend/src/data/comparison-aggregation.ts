@@ -2,6 +2,15 @@
 // Summary of changes: aggregate fork-specific execution completion and integrity counters separately from official Pass@1.
 
 import type { ComparisonCard, ComparisonInstance } from "@/data/comparisons";
+import {
+  type ContextLevel,
+  CONTEXT_LEVELS,
+  contextLevelMetric,
+  f1,
+  hasValidEvaluation,
+  mean,
+  terminalTrajectoryCoverage,
+} from "@/data/instance-metrics";
 
 export type ComparisonFilters = {
   benches: string[];
@@ -71,11 +80,6 @@ function coveragePrecision(predSize: number, goldSize: number, intersection: num
   };
 }
 
-function f1(coverage: number, precision: number): number {
-  const denominator = coverage + precision;
-  return denominator === 0 ? 0 : (2 * coverage * precision) / denominator;
-}
-
 function formatContextLevelMetrics(metrics: { coverage: number; precision: number }) {
   return {
     recall: formatMetric(metrics.coverage),
@@ -84,42 +88,18 @@ function formatContextLevelMetrics(metrics: { coverage: number; precision: numbe
   };
 }
 
-type ContextLevel = "file" | "symbol" | "span" | "line";
-
-const CONTEXT_LEVELS: ContextLevel[] = ["file", "span", "line", "symbol"];
-
-function mean(values: number[]): number | null {
-  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
-}
-
-function contextLevelMetricsForInstance(instance: ComparisonInstance, level: ContextLevel) {
-  const metric = instance.quality[level];
-  const values = coveragePrecision(metric.predSize, metric.goldSize, metric.intersection);
-  return {
-    recall: values.coverage,
-    precision: values.precision,
-    f1: f1(values.coverage, values.precision),
-  };
-}
-
 function macroContextLevelMetrics(instances: ComparisonInstance[], level: ContextLevel) {
-  const values = instances.map((instance) => contextLevelMetricsForInstance(instance, level));
+  const metricFor = (measure: "recall" | "precision" | "f1") =>
+    mean(
+      instances
+        .map((instance) => contextLevelMetric(instance, level, measure))
+        .filter((value): value is number => value !== null),
+    ) ?? 0;
   return {
-    coverage: mean(values.map((value) => value.recall)) ?? 0,
-    precision: mean(values.map((value) => value.precision)) ?? 0,
-    f1: mean(values.map((value) => value.f1)) ?? 0,
+    coverage: metricFor("recall"),
+    precision: metricFor("precision"),
+    f1: metricFor("f1"),
   };
-}
-
-function terminalTrajectoryCoverage(instance: ComparisonInstance, level: ContextLevel): number | null {
-  if (instance.artifacts?.evaluationStatus && instance.artifacts.evaluationStatus !== "valid") return null;
-  if (!instance.evaluatedTrajectory) return null;
-  const steps = (instance.evaluatedTrajectory?.steps ?? []).filter((step) => !step.isSkillRead);
-  const values = steps
-    .map((step) => step.coverage[level])
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  if (values.length === 0) return 0;
-  return Math.min(Math.max(values[values.length - 1], 0), 1);
 }
 
 function macroTrajectoryContextLevel(instances: ComparisonInstance[], level: ContextLevel): number | null {
@@ -138,10 +118,6 @@ function formatTrajectoryContextLevel(value: number | null) {
 
 function variantInstances(variant: ComparisonCard["variants"][number]): ComparisonInstance[] {
   return variant.instances ?? [];
-}
-
-function hasValidEvaluation(instance: ComparisonInstance): boolean {
-  return !instance.artifacts?.evaluationStatus || instance.artifacts.evaluationStatus === "valid";
 }
 
 function countCompletedRuns(instances: ComparisonInstance[]): number {

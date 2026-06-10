@@ -2656,18 +2656,30 @@ def _aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         raise ComparisonExportError("Evaluation file contained no valid rows")
     summary = aggregate_results(rows)
 
-    file_cov = float(((summary.get("final_file") or {}).get("coverage")) or 0.0)
-    file_prec = float(((summary.get("final_file") or {}).get("precision")) or 0.0)
-    symbol_cov = float(((summary.get("final_symbol") or {}).get("coverage")) or 0.0)
-    symbol_prec = float(((summary.get("final_symbol") or {}).get("precision")) or 0.0)
-    span_cov = float(((summary.get("final_span") or {}).get("coverage")) or 0.0)
-    span_prec = float(((summary.get("final_span") or {}).get("precision")) or 0.0)
-    line_cov = float(((summary.get("final_line") or {}).get("coverage")) or 0.0)
-    line_prec = float(((summary.get("final_line") or {}).get("precision")) or 0.0)
-    file_f1 = float(((summary.get("final_file") or {}).get("f1")) or _f1(file_cov, file_prec))
-    symbol_f1 = float(((summary.get("final_symbol") or {}).get("f1")) or _f1(symbol_cov, symbol_prec))
-    span_f1 = float(((summary.get("final_span") or {}).get("f1")) or _f1(span_cov, span_prec))
-    line_f1 = float(((summary.get("final_line") or {}).get("f1")) or _f1(line_cov, line_prec))
+    def _summary_level_value(granularity: str, field: str) -> float | None:
+        value = (summary.get(f"final_{granularity}") or {}).get(field)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        return None
+
+    def _summary_level_f1(granularity: str, coverage: float, precision: float) -> float:
+        # Fall back to F1-of-means only when the summary omits f1 entirely;
+        # a reported f1 of 0.0 is a legitimate value, not a missing one.
+        value = _summary_level_value(granularity, "f1")
+        return value if value is not None else _f1(coverage, precision)
+
+    file_cov = _summary_level_value("file", "coverage") or 0.0
+    file_prec = _summary_level_value("file", "precision") or 0.0
+    symbol_cov = _summary_level_value("symbol", "coverage") or 0.0
+    symbol_prec = _summary_level_value("symbol", "precision") or 0.0
+    span_cov = _summary_level_value("span", "coverage") or 0.0
+    span_prec = _summary_level_value("span", "precision") or 0.0
+    line_cov = _summary_level_value("line", "coverage") or 0.0
+    line_prec = _summary_level_value("line", "precision") or 0.0
+    file_f1 = _summary_level_f1("file", file_cov, file_prec)
+    symbol_f1 = _summary_level_f1("symbol", symbol_cov, symbol_prec)
+    span_f1 = _summary_level_f1("span", span_cov, span_prec)
+    line_f1 = _summary_level_f1("line", line_cov, line_prec)
     trajectory_auc_values = _summary_metric_values(
         summary,
         ("traj_auc_file", "traj_auc_span", "traj_auc_line", "traj_auc_symbol"),

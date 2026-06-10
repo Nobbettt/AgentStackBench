@@ -551,6 +551,88 @@ def test_claude_parser_ignores_directory_scoped_grep_output_as_context() -> None
     assert parser.infer_trajectory_data(raw_response, record={"workspace_path": "/tmp/workspace"}) is None
 
 
+def test_claude_parser_ignores_grep_without_matches() -> None:
+    parser = ClaudeAgentParser()
+    raw_response = {
+        "agent": "claude",
+        "response_format": "json",
+        "response": [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "grep-1",
+                            "name": "Grep",
+                            "input": {
+                                "pattern": "fill_value",
+                                "path": "/tmp/workspace/sklearn/impute/_iterative.py",
+                                "output_mode": "content",
+                            },
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "grep-1",
+                            "content": "No matches found\n",
+                        }
+                    ]
+                },
+            },
+        ],
+    }
+
+    assert parser.infer_trajectory_data(raw_response, record={"workspace_path": "/tmp/workspace"}) is None
+
+
+def test_claude_parser_ignores_grep_scoped_to_dotted_directory() -> None:
+    parser = ClaudeAgentParser()
+    raw_response = {
+        "agent": "claude",
+        "response_format": "json",
+        "response": [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "grep-1",
+                            "name": "Grep",
+                            "input": {
+                                "pattern": "deploy",
+                                "path": "/tmp/workspace/.github",
+                                "output_mode": "content",
+                            },
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "grep-1",
+                            "content": ".github/workflows/ci.yml:12: deploy\n",
+                        }
+                    ]
+                },
+            },
+        ],
+    }
+
+    assert parser.infer_trajectory_data(raw_response, record={"workspace_path": "/tmp/workspace"}) is None
+
+
 def test_claude_parser_infers_trajectory_from_generic_mcp_tool_result() -> None:
     parser = ClaudeAgentParser()
     raw_response = {

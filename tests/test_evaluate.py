@@ -96,6 +96,48 @@ def test_aggregate_results_uses_macro_final_context_metrics() -> None:
     assert aggregate["pooled_final_file"]["precision"] == pytest.approx(2 / 101)
 
 
+def test_aggregate_results_excludes_empty_gold_instances_from_macro_average() -> None:
+    rows = [
+        {
+            "final": {
+                "file": {"intersection": 1, "gold_size": 2, "pred_size": 2},
+            },
+            "trajectory": {"auc_coverage": {}, "redundancy": {}},
+        },
+        {
+            # No gold at this granularity: 0/0 would score a perfect 1.0 and
+            # must not be counted in the macro mean.
+            "final": {
+                "file": {"intersection": 0, "gold_size": 0, "pred_size": 0},
+            },
+            "trajectory": {"auc_coverage": {}, "redundancy": {}},
+        },
+    ]
+
+    aggregate = evaluate.aggregate_results(rows)
+
+    assert aggregate["final_file"]["coverage"] == pytest.approx(0.5)
+    assert aggregate["final_file"]["precision"] == pytest.approx(0.5)
+    assert aggregate["final_file"]["f1"] == pytest.approx(0.5)
+
+
+def test_aggregate_results_omits_level_when_no_instance_has_gold() -> None:
+    rows = [
+        {
+            "final": {
+                "file": {"intersection": 1, "gold_size": 1, "pred_size": 1},
+                "symbol": {"intersection": 0, "gold_size": 0, "pred_size": 3},
+            },
+            "trajectory": {"auc_coverage": {}, "redundancy": {}},
+        },
+    ]
+
+    aggregate = evaluate.aggregate_results(rows)
+
+    assert "final_symbol" not in aggregate
+    assert aggregate["final_file"]["f1"] == pytest.approx(1.0)
+
+
 def test_aggregate_results_excludes_missing_trajectory_levels() -> None:
     aggregate = evaluate.aggregate_results(
         [

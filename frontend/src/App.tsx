@@ -8,6 +8,7 @@ import { Github } from "lucide-react";
 import { ComparisonInstanceDetailPage } from "@/components/comparison-results";
 import { ComparisonPage } from "@/components/pages/comparison-page";
 import { OverviewPage } from "@/components/pages/overview-page";
+import { comparisonHasInstanceData } from "@/data/comparison-aggregation";
 import { type ComparisonData, type ComparisonInstanceDetail, type ComparisonInstancesPayload, findComparisonById, withComparisonInstances } from "@/data/comparisons";
 import { loadComparisonData } from "@/data/load-comparison-data";
 import { loadComparisonInstances } from "@/data/load-comparison-instances";
@@ -51,29 +52,32 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    if (route.page !== "instanceDetail") {
-      setInstanceDetail(undefined);
-      setInstanceDetailError(null);
-      setInstanceComparisonPayload(undefined);
-      setInstanceComparisonPayloadError(null);
+    setInstanceDetail(undefined);
+    setInstanceDetailError(null);
+    setInstanceComparisonPayload(undefined);
+    setInstanceComparisonPayloadError(null);
+    if (route.page !== "instanceDetail" || !data) {
       return () => {
         active = false;
       };
     }
 
-    setInstanceDetail(undefined);
-    setInstanceDetailError(null);
-    setInstanceComparisonPayload(undefined);
-    setInstanceComparisonPayloadError(null);
-    void loadComparisonInstances(route.comparisonId, "metrics")
-      .then((payload) => {
-        if (active) setInstanceComparisonPayload(payload);
-      })
-      .catch((error: unknown) => {
-        if (!active) return;
-        setInstanceComparisonPayload(null);
-        setInstanceComparisonPayloadError(error instanceof Error ? error.message : "Failed to load instance comparison metrics.");
-      });
+    const routeComparison = findComparisonById(data, route.comparisonId);
+    if (routeComparison && comparisonHasInstanceData(routeComparison)) {
+      // The comparison card already embeds per-instance data (legacy export
+      // format), so there is no instance bundle to fetch.
+      setInstanceComparisonPayload(null);
+    } else {
+      void loadComparisonInstances(route.comparisonId, "metrics")
+        .then((payload) => {
+          if (active) setInstanceComparisonPayload(payload);
+        })
+        .catch((error: unknown) => {
+          if (!active) return;
+          setInstanceComparisonPayload(null);
+          setInstanceComparisonPayloadError(error instanceof Error ? error.message : "Failed to load instance comparison metrics.");
+        });
+    }
     void loadInstanceDetail(route.comparisonId, route.instanceId)
       .then((nextDetail) => {
         if (active) setInstanceDetail(nextDetail);
@@ -86,7 +90,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [route]);
+  }, [route, data]);
 
   if (loadError) {
     return (

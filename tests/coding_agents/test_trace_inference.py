@@ -314,13 +314,50 @@ def test_infer_retrieval_step_uses_numbered_output_for_nl_without_sed(tmp_path) 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     command = "/bin/bash -lc 'nl -ba src/a.py'"
-    output = "     1\tdef first():\n    42\t    return value\n"
+    output = "     1\tdef first():\n     2\t    return value\n     3\t# done\n"
 
     step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
 
     assert step == {
         "files": ["src/a.py"],
-        "spans": {"src/a.py": [{"start": 1, "end": 42}]},
+        "spans": {"src/a.py": [{"start": 1, "end": 3}]},
+        "symbols": {},
+    }
+
+
+def test_infer_retrieval_step_rejects_non_contiguous_numbered_output(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc 'cat logs/server.log'"
+    output = "1718012345  GET /index\n1718012399  GET /health\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step == {"files": ["logs/server.log"], "spans": {}, "symbols": {}}
+
+
+def test_infer_retrieval_step_ignores_sed_filtering_program_output(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc \"python scripts/run_tests.py | sed -n '1,50p'\""
+    output = "collected 12 items\nall passed\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step is None
+
+
+def test_infer_retrieval_step_keeps_sed_range_for_piped_cat(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/bash -lc \"cat src/a.py | sed -n '5,10p'\""
+    output = "def first():\n    return value\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step == {
+        "files": ["src/a.py"],
+        "spans": {"src/a.py": [{"start": 5, "end": 10}]},
         "symbols": {},
     }
 

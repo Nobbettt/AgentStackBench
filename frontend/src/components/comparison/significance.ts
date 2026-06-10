@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ComparisonCard, ComparisonInstance } from "@/data/comparisons";
-import { coveragePrecision, f1, formatCompactMagnitude, formatDurationDelta, formatSignedFixed, getComparisonPair } from "@/components/comparison/format";
+import { formatCompactMagnitude, formatDurationDelta, formatSignedFixed, getComparisonPair } from "@/components/comparison/format";
+import {
+  type ContextLevel,
+  type ContextMeasure,
+  contextLevelMetric,
+  f1,
+  instanceContextAggregate,
+  instanceTrajectoryGoldFound,
+} from "@/data/instance-metrics";
 
 type PairedValue = {
   baseline: number;
@@ -107,34 +115,6 @@ const metricSpecs: MetricSpec[] = [
   ...contextLevelSpecs("block", "span"),
   ...contextLevelSpecs("line", "line"),
   {
-    key: "fileF1",
-    test: "permutation",
-    unit: "number",
-    value: (instance) => contextLevelMetric(instance, "file", "f1"),
-    aggregateValue: (instances) => contextLevelMetricPooled(instances, "file", "f1"),
-  },
-  {
-    key: "symbolF1",
-    test: "permutation",
-    unit: "number",
-    value: (instance) => contextLevelMetric(instance, "symbol", "f1"),
-    aggregateValue: (instances) => contextLevelMetricPooled(instances, "symbol", "f1"),
-  },
-  {
-    key: "spanF1",
-    test: "permutation",
-    unit: "number",
-    value: (instance) => contextLevelMetric(instance, "span", "f1"),
-    aggregateValue: (instances) => contextLevelMetricPooled(instances, "span", "f1"),
-  },
-  {
-    key: "avgLineF1",
-    test: "permutation",
-    unit: "number",
-    value: (instance) => contextLevelMetric(instance, "line", "f1"),
-    aggregateValue: (instances) => contextLevelMetricPooled(instances, "line", "f1"),
-  },
-  {
     key: "fixOverlapVsGoldRecall",
     test: "permutation",
     unit: "percent-point",
@@ -171,7 +151,7 @@ const metricSpecs: MetricSpec[] = [
     key: "totalTokens",
     test: "permutation",
     unit: "tokens",
-    value: (instance) => finiteOrZero(instance.resources.totalTokens),
+    value: (instance) => finiteOrNull(instance.resources.totalTokens),
   },
   {
     key: "estimatedCost",
@@ -183,60 +163,73 @@ const metricSpecs: MetricSpec[] = [
     key: "mcpToolCalls",
     test: "permutation",
     unit: "number",
-    value: (instance) => finiteOrZero(instance.resources.mcpToolCalls),
+    value: (instance) => finiteOrNull(instance.resources.mcpToolCalls),
   },
   {
     key: "toolCalls",
     test: "permutation",
     unit: "number",
-    value: (instance) => finiteOrZero(instance.resources.toolCalls),
+    value: (instance) => finiteOrNull(instance.resources.toolCalls),
   },
   {
     key: "commandExecutions",
     test: "permutation",
     unit: "number",
-    value: (instance) => finiteOrZero(instance.resources.commandExecutions),
+    value: (instance) => finiteOrNull(instance.resources.commandExecutions),
   },
   {
     key: "rawTraceEvents",
     test: "permutation",
     unit: "number",
-    value: (instance) => finiteOrZero(instance.resources.rawTraceEvents),
+    value: (instance) => finiteOrNull(instance.resources.rawTraceEvents),
   },
   {
     key: "rawAgentActions",
     test: "permutation",
     unit: "number",
-    value: (instance) => finiteOrZero(instance.resources.rawAgentActions),
+    value: (instance) => finiteOrNull(instance.resources.rawAgentActions),
   },
   {
     key: "readToolCalls",
     test: "permutation",
     unit: "number",
-    value: (instance) => finiteOrZero(instance.resources.readToolCalls),
+    value: (instance) => finiteOrNull(instance.resources.readToolCalls),
   },
   {
     key: "editToolCalls",
     test: "permutation",
     unit: "number",
-    value: (instance) => finiteOrZero(instance.resources.editToolCalls),
+    value: (instance) => finiteOrNull(instance.resources.editToolCalls),
   },
   {
     key: "skillInvocations",
     test: "permutation",
     unit: "number",
-    value: (instance) => finiteOrZero(instance.skills?.totalInvocations),
+    value: (instance) => finiteOrNull(instance.skills?.totalInvocations),
   },
   {
     key: "toolInvocations",
     test: "permutation",
     unit: "number",
-    value: (instance) => finiteOrZero(instance.tools?.totalInvocations),
+    value: (instance) => finiteOrNull(instance.tools?.totalInvocations),
   },
 ];
 
+// Legacy metric keys map onto the canonical per-level specs so the same
+// statistic is computed (and counted in the multiple-testing family) once.
+const metricKeyAliases: Record<string, string> = {
+  fileF1: "context.file.f1",
+  symbolF1: "context.symbol.f1",
+  spanF1: "context.block.f1",
+  avgLineF1: "context.line.f1",
+};
+
+function canonicalMetricKey(metricKey: string): string {
+  return metricKeyAliases[metricKey] ?? metricKey;
+}
+
 export function getMetricSignificance(comparison: ComparisonCard, metricKey: string): PairedSignificance | null {
-  return buildSignificanceLookup(comparison).get(metricKey) ?? null;
+  return buildSignificanceLookup(comparison).get(canonicalMetricKey(metricKey)) ?? null;
 }
 
 export function getGroupedMetricSignificance(
@@ -246,7 +239,7 @@ export function getGroupedMetricSignificance(
   groupValue: string | null | undefined,
 ): PairedSignificance | null {
   if (!groupValue) return null;
-  return buildGroupedSignificanceLookup(comparison, metricKey, groupKey).get(groupValue) ?? null;
+  return buildGroupedSignificanceLookup(comparison, canonicalMetricKey(metricKey), groupKey).get(groupValue) ?? null;
 }
 
 export function formatSignificanceEffect(stat: PairedSignificance): string {
@@ -672,7 +665,7 @@ function hashSeed(value: string): number {
   return hash >>> 0;
 }
 
-function contextLevelSpecs(label: string, level: "file" | "symbol" | "span" | "line"): MetricSpec[] {
+function contextLevelSpecs(label: string, level: ContextLevel): MetricSpec[] {
   return (["f1", "recall", "precision"] as const).map((measure) => ({
     key: `context.${label}.${measure}`,
     test: "permutation",
@@ -682,29 +675,11 @@ function contextLevelSpecs(label: string, level: "file" | "symbol" | "span" | "l
   }));
 }
 
-function contextAggregate(instance: ComparisonInstance, measure: "f1" | "recall" | "precision"): number | null {
-  const file = contextLevelMetric(instance, "file", measure);
-  const span = contextLevelMetric(instance, "span", measure);
-  const line = contextLevelMetric(instance, "line", measure);
-  const symbol = contextLevelMetric(instance, "symbol", measure);
-  if (file === null || span === null || line === null || symbol === null) return null;
-  return (file + span + line + symbol) / 4;
+function contextAggregate(instance: ComparisonInstance, measure: ContextMeasure): number | null {
+  return instanceContextAggregate(instance, measure);
 }
 
-function contextLevelMetric(
-  instance: ComparisonInstance,
-  level: "file" | "symbol" | "span" | "line",
-  measure: "f1" | "recall" | "precision",
-): number | null {
-  if (instance.artifacts?.evaluationStatus && instance.artifacts.evaluationStatus !== "valid") return null;
-  const metric = instance.quality[level];
-  const values = coveragePrecision(metric.predSize, metric.goldSize, metric.intersection);
-  if (measure === "recall") return values.coverage;
-  if (measure === "precision") return values.precision;
-  return f1(values.coverage, values.precision);
-}
-
-function contextAggregatePooled(instances: ComparisonInstance[], measure: "f1" | "recall" | "precision"): number | null {
+function contextAggregatePooled(instances: ComparisonInstance[], measure: ContextMeasure): number | null {
   if (instances.length === 0) return null;
   const values = instances
     .map((instance) => contextAggregate(instance, measure))
@@ -714,8 +689,8 @@ function contextAggregatePooled(instances: ComparisonInstance[], measure: "f1" |
 
 function contextLevelMetricPooled(
   instances: ComparisonInstance[],
-  level: "file" | "symbol" | "span" | "line",
-  measure: "f1" | "recall" | "precision",
+  level: ContextLevel,
+  measure: ContextMeasure,
 ): number | null {
   if (instances.length === 0) return null;
   const values = instances
@@ -724,22 +699,8 @@ function contextLevelMetricPooled(
   return values.length > 0 ? mean(values) : null;
 }
 
-function trajectoryLevelMetric(instance: ComparisonInstance, level: "file" | "symbol" | "span" | "line"): number | null {
-  if (instance.artifacts?.evaluationStatus && instance.artifacts.evaluationStatus !== "valid") return null;
-  if (!instance.evaluatedTrajectory) return null;
-  const steps = (instance.evaluatedTrajectory?.steps ?? []).filter((step) => !step.isSkillRead);
-  const values = steps
-    .map((step) => step.coverage[level])
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  if (values.length === 0) return 0;
-  return Math.min(Math.max(values[values.length - 1], 0), 1);
-}
-
 function trajectoryGoldFoundAggregate(instance: ComparisonInstance): number | null {
-  const values = (["file", "span", "line", "symbol"] as const)
-    .map((level) => trajectoryLevelMetric(instance, level))
-    .filter((value): value is number => value !== null);
-  return values.length > 0 ? mean(values) : null;
+  return instanceTrajectoryGoldFound(instance);
 }
 
 function trajectoryGoldFoundAggregatePooled(instances: ComparisonInstance[]): number | null {
@@ -778,10 +739,6 @@ function finiteOrNull(value: number | null | undefined): number | null {
 
 function positiveFiniteOrNull(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
-}
-
-function finiteOrZero(value: number | null | undefined): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function formatSignificanceValue(value: number, unit: SignificanceUnit): string {

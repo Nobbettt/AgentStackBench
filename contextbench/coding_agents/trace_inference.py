@@ -84,9 +84,25 @@ def infer_read_span_from_text(text: str) -> tuple[int, int] | None:
     matches = [int(match.group("line")) for match in _LINE_ARROW_RE.finditer(text)]
     if not matches:
         matches = [int(match.group("line")) for match in _NUMBERED_LINE_RE.finditer(text)]
+        if not _looks_like_line_numbering(matches):
+            return None
     if not matches:
         return None
     return min(matches), max(matches)
+
+
+def _looks_like_line_numbering(matches: list[int]) -> bool:
+    """Accept numeric prefixes only when they form a contiguous line counter.
+
+    Timestamped logs, data tables, and other numeric-prefixed output match
+    _NUMBERED_LINE_RE too; requiring consecutive +1 increments keeps those
+    from being scored as fabricated read spans.
+    """
+    if not matches:
+        return False
+    if len(matches) == 1:
+        return matches[0] == 1
+    return all(later - earlier == 1 for earlier, later in zip(matches, matches[1:]))
 
 
 def infer_grep_spans_from_text(
@@ -509,7 +525,15 @@ def _read_segment_step(segment: str, output_text: str, workspace_path: Path) -> 
 
     if "sed" in tokens:
         sed_range = _sed_range_from_tokens(tokens)
-        file_path = _file_before_pipe(tokens, workspace_path) if "|" in tokens else _file_after_command(tokens, "sed", workspace_path)
+        if "|" in tokens:
+            # Only credit the file left of the pipe when a read-like command
+            # produced the piped text; `python script.py | sed -n '1,50p'`
+            # filters program output, not file content.
+            before_pipe = tokens[: tokens.index("|")]
+            read_like = {"sed", "cat", "head", "tail", "nl"}
+            file_path = _file_before_pipe(tokens, workspace_path) if any(token in read_like for token in before_pipe) else None
+        else:
+            file_path = _file_after_command(tokens, "sed", workspace_path)
         if sed_range and file_path:
             files.add(file_path)
             spans.setdefault(file_path, []).append({"start": sed_range[0], "end": sed_range[1]})
@@ -602,11 +626,37 @@ def infer_search_file_step_from_command(command: str, *, output_text: str, works
     return {"files": sorted(files), "spans": {}, "symbols": {}}
 
 
-def infer_search_file_step_from_path(path_value: str, *, workspace_path: Path) -> RetrievalStep | None:
+_GREP_NO_MATCH_MARKERS = ("no matches found", "no files found")
+
+
+def grep_output_indicates_match(output_text: str) -> bool:
+    text = output_text.strip()
+    if not text:
+        return False
+    return not text.lower().startswith(_GREP_NO_MATCH_MARKERS)
+
+
+def _looks_like_single_search_file(name: str) -> bool:
+    if not _looks_like_repo_filename(name):
+        return False
+    # Hidden directories ('.github') and version-suffixed directories
+    # ('jquery-3.6') pass the generic filename heuristic but are not files.
+    if name.startswith(".") and "." not in name[1:]:
+        return False
+    if "." in name and name.rsplit(".", 1)[-1].isdigit():
+        return False
+    return True
+
+
+def infer_search_file_step_from_path(path_value: str, *, output_text: str, workspace_path: Path) -> RetrievalStep | None:
     """Infer file-only context when a search tool was explicitly scoped to one file."""
 
+    if not grep_output_indicates_match(output_text):
+        return None
     normalized, _ = _normalize_inferred_file_path(path_value, workspace_path)
     if not normalized:
+        return None
+    if not _looks_like_single_search_file(normalized.rsplit("/", 1)[-1]):
         return None
     return {"files": [normalized], "spans": {}, "symbols": {}}
 
