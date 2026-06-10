@@ -192,6 +192,7 @@ const comparisonTabs: Array<{ id: ComparisonPageTab; label: string }> = [
   { id: "execution", label: "Resource Usage" },
   { id: "resolution", label: "Resolution" },
   { id: "context", label: "Context" },
+  { id: "correlations", label: "Correlations" },
   { id: "languages", label: "Metric Breakdowns" },
   { id: "usage", label: "Skills" },
   { id: "tools", label: "Tools" },
@@ -203,7 +204,7 @@ const comparisonBundleLoadOrder: ComparisonInstanceBundle[] = ["index", "metrics
 export function bundlesForTab(tab: ComparisonPageTab): ComparisonInstanceBundle[] {
   if (tab === "overview") return [];
   if (tab === "setup") return ["index"];
-  if (tab === "context") return ["index", "metrics", "trajectory"];
+  if (tab === "context" || tab === "correlations") return ["index", "metrics", "trajectory"];
   return ["index", "metrics"];
 }
 

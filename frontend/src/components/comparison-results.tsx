@@ -13,6 +13,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { getComparisonPair } from "@/components/comparison/format";
 import { InstanceResultsSection } from "@/components/comparison/instance-results-section";
 import { ComparisonInstanceDetailPage } from "@/components/comparison/instance-detail-page";
+import { CorrelationSection } from "@/components/comparison/correlation-section";
 import {
   contextRetrievalMetricDefinitions,
   executionMetricDefinitions,
@@ -38,7 +39,7 @@ import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartToo
 
 export { ComparisonInstanceDetailPage };
 
-export type ComparisonResultsTab = "overview" | "execution" | "resolution" | "context" | "languages" | "resources" | "usage" | "tools" | "issues";
+export type ComparisonResultsTab = "overview" | "execution" | "resolution" | "context" | "correlations" | "languages" | "resources" | "usage" | "tools" | "issues";
 
 export function ComparisonResults({
   comparison,
@@ -73,6 +74,9 @@ export function ComparisonResults({
         ) : null}
         {activeTab === "context" ? (
           <ContextRetrievalMetricSection comparison={comparison} viewMode={viewMode} deltaDisplayMode={deltaDisplayMode} />
+        ) : null}
+        {activeTab === "correlations" ? (
+          <CorrelationSection comparison={comparison} />
         ) : null}
         {activeTab === "languages" ? (
           <LanguageMetricsSection comparison={comparison} />
