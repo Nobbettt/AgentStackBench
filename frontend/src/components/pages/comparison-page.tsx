@@ -1,5 +1,5 @@
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Columns2, Percent, SlidersHorizontal, TrendingUpDown } from "lucide-react";
 import { Label, Pie, PieChart } from "recharts";
 
@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { buildFilteredComparison, comparisonHasInstanceData, getAvailableBenches, getAvailableLanguages } from "@/data/comparison-aggregation";
-import type { ComparisonCard } from "@/data/comparisons";
+import { type ComparisonCard, type ComparisonInstanceBundle, type ComparisonInstancesPayload, withComparisonInstances } from "@/data/comparisons";
+import { loadComparisonInstances } from "@/data/load-comparison-instances";
 import { formatLanguageLabel } from "@/components/comparison/format";
 import type { ComparisonResultsViewMode, DeltaDisplayMode } from "@/components/comparison/types";
 
@@ -184,7 +185,7 @@ function getComparisonPair(comparison: ComparisonCard) {
 
 const segmentedControlClassName = "gap-0 rounded-md shadow-lg backdrop-blur";
 const segmentedControlItemClassName = "w-14 rounded-none bg-background px-0 data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
-type ComparisonPageTab = "setup" | ComparisonResultsTab;
+export type ComparisonPageTab = "setup" | ComparisonResultsTab;
 const comparisonTabs: Array<{ id: ComparisonPageTab; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "setup", label: "Setup & Dataset" },
@@ -197,33 +198,175 @@ const comparisonTabs: Array<{ id: ComparisonPageTab; label: string }> = [
   { id: "issues", label: "All Tasks" },
 ];
 
+const comparisonBundleLoadOrder: ComparisonInstanceBundle[] = ["index", "metrics", "trajectory"];
+
+export function bundlesForTab(tab: ComparisonPageTab): ComparisonInstanceBundle[] {
+  if (tab === "overview") return [];
+  if (tab === "setup") return ["index"];
+  if (tab === "context") return ["index", "metrics", "trajectory"];
+  return ["index", "metrics"];
+}
+
+function buildFilteredTaskIndexComparison(
+  comparison: ComparisonCard,
+  filters: { languages: string[]; benches: string[] },
+): ComparisonCard {
+  if (!comparisonHasInstanceData(comparison)) return comparison;
+
+  const idSets = comparison.variants.map((variant) =>
+    new Set(
+      (variant.instances ?? [])
+        .filter((instance) => filters.languages.includes(instance.language) && filters.benches.includes(instance.bench))
+        .map((instance) => instance.instanceId),
+    ),
+  );
+  const [firstSet, ...restSets] = idSets;
+  const selectedIds = new Set(firstSet ?? []);
+  for (const idSet of restSets) {
+    for (const instanceId of Array.from(selectedIds)) {
+      if (!idSet.has(instanceId)) selectedIds.delete(instanceId);
+    }
+  }
+
+  const filteredVariants = comparison.variants.map((variant) => ({
+    ...variant,
+    instances: (variant.instances ?? []).filter((instance) => selectedIds.has(instance.instanceId)),
+  }));
+  const benchCounts = Object.fromEntries(
+    Object.entries(
+      filteredVariants[0]?.instances?.reduce<Record<string, number>>((counts, instance) => {
+        counts[instance.bench] = (counts[instance.bench] ?? 0) + 1;
+        return counts;
+      }, {}) ?? {},
+    ).sort((left, right) => left[0].localeCompare(right[0])),
+  );
+
+  return {
+    ...comparison,
+    tasks: selectedIds.size,
+    taskSet: {
+      count: selectedIds.size,
+      benchCounts,
+      hash: selectedIds.size === comparison.tasks ? comparison.taskSet?.hash : undefined,
+      sourceDatasetCount: selectedIds.size === comparison.tasks ? comparison.taskSet?.sourceDatasetCount : undefined,
+      selectionKind: selectedIds.size === comparison.tasks ? comparison.taskSet?.selectionKind : undefined,
+    },
+    variants: filteredVariants,
+  };
+}
+
 export function ComparisonPage({ comparison }: { comparison: ComparisonCard }) {
-  const hasInstanceFilters = comparisonHasInstanceData(comparison);
-  const availableLanguages = useMemo(() => (hasInstanceFilters ? getAvailableLanguages(comparison) : []), [comparison, hasInstanceFilters]);
-  const availableBenches = useMemo(() => (hasInstanceFilters ? getAvailableBenches(comparison) : []), [comparison, hasInstanceFilters]);
-  const [selectedLanguages, setSelectedLanguages] = useState<string[]>(availableLanguages);
-  const [selectedBenches, setSelectedBenches] = useState<string[]>(availableBenches);
+  const [instancePayloads, setInstancePayloads] = useState<Partial<Record<ComparisonInstanceBundle, ComparisonInstancesPayload>>>({});
+  const [instanceLoadError, setInstanceLoadError] = useState<string | null>(null);
+  const loadedBundlesRef = useRef<Set<ComparisonInstanceBundle>>(new Set());
+  const loadingBundlesRef = useRef<Set<ComparisonInstanceBundle>>(new Set());
+  const [selectedLanguages, setSelectedLanguages] = useState<string[]>([]);
+  const [selectedBenches, setSelectedBenches] = useState<string[]>([]);
   const [viewMode, setViewMode] = useState<ComparisonResultsViewMode>("treatment-delta");
-  const [deltaDisplayMode, setDeltaDisplayMode] = useState<DeltaDisplayMode>("percent");
+  const [deltaDisplayMode, setDeltaDisplayMode] = useState<DeltaDisplayMode>("absolute");
   const [activeTab, setActiveTab] = useState<ComparisonPageTab>("overview");
+  const loadingPromisesRef = useRef<Map<ComparisonInstanceBundle, Promise<ComparisonInstancesPayload>>>(new Map());
+  const requiredBundles = useMemo(() => bundlesForTab(activeTab), [activeTab]);
+  const requiredBundleKey = requiredBundles.join(",");
+  const comparisonWithInstances = useMemo(
+    () =>
+      comparisonBundleLoadOrder.reduce(
+        (nextComparison, bundle) => {
+          const payload = instancePayloads[bundle];
+          return payload ? withComparisonInstances(nextComparison, payload) : nextComparison;
+        },
+        comparison,
+      ),
+    [comparison, instancePayloads],
+  );
+  const hasEmbeddedInstanceData = comparisonHasInstanceData(comparison);
+  const hasInstanceFilters = comparisonHasInstanceData(comparisonWithInstances);
+  const metricsBundleLoaded = hasEmbeddedInstanceData || Boolean(instancePayloads.metrics);
+  const instanceDataLoading = !hasEmbeddedInstanceData && requiredBundles.some((bundle) => !instancePayloads[bundle]) && !instanceLoadError;
+  const availableLanguages = useMemo(
+    () => (hasInstanceFilters ? getAvailableLanguages(comparisonWithInstances) : []),
+    [comparisonWithInstances, hasInstanceFilters],
+  );
+  const availableBenches = useMemo(
+    () => (hasInstanceFilters ? getAvailableBenches(comparisonWithInstances) : []),
+    [comparisonWithInstances, hasInstanceFilters],
+  );
   const activeComparison = useMemo(
-    () => hasInstanceFilters
-      ? buildFilteredComparison(comparison, { languages: selectedLanguages, benches: selectedBenches })
-      : comparison,
-    [comparison, hasInstanceFilters, selectedBenches, selectedLanguages],
+    () => {
+      if (!hasInstanceFilters) return comparisonWithInstances;
+      const filters = {
+        languages: selectedLanguages.length > 0 ? selectedLanguages : availableLanguages,
+        benches: selectedBenches.length > 0 ? selectedBenches : availableBenches,
+      };
+      return metricsBundleLoaded
+        ? buildFilteredComparison(comparisonWithInstances, filters)
+        : buildFilteredTaskIndexComparison(comparisonWithInstances, filters);
+    },
+    [availableBenches, availableLanguages, comparisonWithInstances, hasInstanceFilters, metricsBundleLoaded, selectedBenches, selectedLanguages],
   );
   const runDate = formatComparisonRunDate(comparison);
-  const datasetSliceData = getDatasetSliceData(activeComparison);
-  const languageSliceData = getLanguageSliceData(activeComparison);
-  const repositorySliceData = getRepositorySliceData(activeComparison);
-  const repositorySizeSliceData = getRepositorySizeSliceData(activeComparison);
+  const datasetSliceData = activeTab === "setup" ? getDatasetSliceData(activeComparison) : [];
+  const languageSliceData = activeTab === "setup" ? getLanguageSliceData(activeComparison) : [];
+  const repositorySliceData = activeTab === "setup" ? getRepositorySliceData(activeComparison) : { slices: [], distinctCount: 0 };
+  const repositorySizeSliceData = activeTab === "setup" ? getRepositorySizeSliceData(activeComparison) : [];
   const comparisonPair = getComparisonPair(activeComparison);
+  const showComparisonControls = hasInstanceFilters || Boolean(comparisonPair);
+
+  useEffect(() => {
+    setInstancePayloads({});
+    setInstanceLoadError(null);
+    loadedBundlesRef.current.clear();
+    loadingBundlesRef.current.clear();
+    loadingPromisesRef.current.clear();
+    setSelectedLanguages([]);
+    setSelectedBenches([]);
+  }, [comparison.id]);
+
+  useEffect(() => {
+    let active = true;
+    setInstanceLoadError(null);
+
+    if (comparisonHasInstanceData(comparison) || requiredBundles.length === 0) {
+      return () => {
+        active = false;
+      };
+    }
+
+    for (const bundle of requiredBundles) {
+      if (instancePayloads[bundle] || loadedBundlesRef.current.has(bundle)) continue;
+      let loadPromise = loadingPromisesRef.current.get(bundle);
+      if (!loadPromise) {
+        loadingBundlesRef.current.add(bundle);
+        loadPromise = loadComparisonInstances(comparison.id, bundle);
+        loadingPromisesRef.current.set(bundle, loadPromise);
+      }
+      void loadPromise
+        .then((payload) => {
+          if (!active) return;
+          loadedBundlesRef.current.add(bundle);
+          setInstancePayloads((currentPayloads) => ({ ...currentPayloads, [bundle]: payload }));
+          setInstanceLoadError(null);
+        })
+        .catch((error: unknown) => {
+          if (!active) return;
+          setInstanceLoadError(error instanceof Error ? error.message : `Failed to load ${bundle} comparison data.`);
+        })
+        .finally(() => {
+          loadingBundlesRef.current.delete(bundle);
+          loadingPromisesRef.current.delete(bundle);
+        });
+    }
+
+    return () => {
+      active = false;
+    };
+  }, [comparison, instancePayloads, requiredBundleKey, requiredBundles]);
 
   useEffect(() => {
     if (!hasInstanceFilters) return;
     setSelectedLanguages(availableLanguages);
     setSelectedBenches(availableBenches);
-  }, [comparison.id, hasInstanceFilters, availableLanguages, availableBenches]);
+  }, [comparison.id, hasInstanceFilters]);
 
   return (
     <main className="mx-auto flex max-w-[88rem] flex-col gap-4 px-4 pb-40 pt-4">
@@ -238,7 +381,7 @@ export function ComparisonPage({ comparison }: { comparison: ComparisonCard }) {
         </div>
       </section>
       <ComparisonTabs activeTab={activeTab} onChange={setActiveTab} />
-      {(hasInstanceFilters || comparisonPair) ? (
+      {showComparisonControls ? (
         <ComparisonControls
           comparisonPair={comparisonPair}
           viewMode={viewMode}
@@ -251,7 +394,11 @@ export function ComparisonPage({ comparison }: { comparison: ComparisonCard }) {
           hasInstanceFilters={hasInstanceFilters}
         />
       ) : null}
-      {activeTab === "setup" ? (
+      {instanceDataLoading ? (
+        <InstanceDataStatus bundles={requiredBundles.filter((bundle) => !instancePayloads[bundle])} />
+      ) : instanceLoadError ? (
+        <InstanceDataStatus error={instanceLoadError} />
+      ) : activeTab === "setup" ? (
         <SetupParameters
           comparison={activeComparison}
           comparisonPair={comparisonPair}
@@ -267,6 +414,15 @@ export function ComparisonPage({ comparison }: { comparison: ComparisonCard }) {
         <section className="rounded-lg bg-background p-6 text-sm text-muted-foreground">No tasks match the selected language and dataset filters.</section>
       )}
     </main>
+  );
+}
+
+function InstanceDataStatus({ error, bundles = [] }: { error?: string; bundles?: ComparisonInstanceBundle[] }) {
+  const bundleLabel = bundles.length > 0 ? ` (${bundles.join(", ")})` : "";
+  return (
+    <section className="rounded-lg border bg-background p-4 text-sm text-muted-foreground">
+      {error ? `Unable to load task-level comparison data: ${error}` : `Loading task-level comparison data${bundleLabel}…`}
+    </section>
   );
 }
 
@@ -370,20 +526,20 @@ function ComparisonControls({
                 className={segmentedControlClassName}
               >
                 <ToggleGroupItem
-                  value="percent"
-                  aria-label="Percent diff"
-                  title="Percent diff"
-                  className={`${segmentedControlItemClassName} rounded-l-md border-r-0`}
-                >
-                  <Percent className="h-4 w-4" />
-                </ToggleGroupItem>
-                <ToggleGroupItem
                   value="absolute"
                   aria-label="Numerical diff"
                   title="Numerical diff"
-                  className={`${segmentedControlItemClassName} rounded-r-md`}
+                  className={`${segmentedControlItemClassName} rounded-l-md border-r-0`}
                 >
                   <span className="font-semibold tabular-nums">1.2→</span>
+                </ToggleGroupItem>
+                <ToggleGroupItem
+                  value="percent"
+                  aria-label="Percent diff"
+                  title="Percent diff"
+                  className={`${segmentedControlItemClassName} rounded-r-md`}
+                >
+                  <Percent className="h-4 w-4" />
                 </ToggleGroupItem>
               </ToggleGroup>
             </div>
@@ -595,8 +751,22 @@ function DistributionDonutChart({
     return config;
   }, {});
   const chartSize = variant === "label"
-    ? { width: 360, height: 220, className: "mx-auto h-[13.75rem] w-[22.5rem] max-w-full", outerRadius: 66 }
-    : { width: 192, height: 192, className: "mx-auto aspect-square h-52 w-52", outerRadius: 84 };
+    ? {
+        width: 320,
+        height: 208,
+        className: "mx-auto h-[13rem] w-full max-w-[20rem] overflow-visible",
+        outerRadius: 54,
+        innerRadius: 0,
+        labelOffset: 22,
+      }
+    : {
+        width: 208,
+        height: 208,
+        className: "mx-auto h-[13rem] w-[13rem] overflow-visible",
+        outerRadius: 58,
+        innerRadius: 40,
+        labelOffset: 0,
+      };
 
   return (
     <div className="flex min-w-0 flex-col p-4">
@@ -604,9 +774,9 @@ function DistributionDonutChart({
         <div className="text-xs uppercase tracking-wide text-muted-foreground">{title}</div>
         <div className="mt-1 text-sm text-muted-foreground">{description}</div>
       </div>
-      <div className="mt-3">
+      <div className="mt-3 flex flex-1 flex-col items-center">
         <ChartContainer config={chartConfig} className={chartSize.className}>
-          <PieChart width={chartSize.width} height={chartSize.height}>
+          <PieChart width={chartSize.width} height={chartSize.height} style={{ overflow: "visible" }}>
             <ChartTooltip
               content={
                 <ChartTooltipContent
@@ -624,14 +794,14 @@ function DistributionDonutChart({
               data={data}
               dataKey="count"
               nameKey="id"
-              innerRadius={variant === "donut" ? 58 : 0}
+              innerRadius={variant === "donut" ? chartSize.innerRadius : 0}
               outerRadius={chartSize.outerRadius}
               cx={chartSize.width / 2}
               cy={chartSize.height / 2}
               stroke="none"
               strokeWidth={0}
               labelLine={false}
-              label={variant === "label" ? renderPieLabel : false}
+              label={variant === "label" ? (props) => renderPieLabel(props, chartSize.labelOffset) : false}
             >
               {variant === "donut" ? (
                 <Label
@@ -639,10 +809,10 @@ function DistributionDonutChart({
                     if (!viewBox || !("cx" in viewBox) || !("cy" in viewBox)) return null;
                     return (
                       <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle" dominantBaseline="middle">
-                        <tspan x={viewBox.cx} y={viewBox.cy} className="fill-foreground text-3xl font-semibold">
+                        <tspan x={viewBox.cx} y={viewBox.cy} className="fill-foreground text-2xl font-semibold">
                           {displayedCenterValue.toLocaleString()}
                         </tspan>
-                        <tspan x={viewBox.cx} y={(viewBox.cy ?? 0) + 23} className="fill-muted-foreground text-xs">
+                        <tspan x={viewBox.cx} y={(viewBox.cy ?? 0) + 20} className="fill-muted-foreground text-xs">
                           {displayedCenterLabel}
                         </tspan>
                       </text>
@@ -680,7 +850,7 @@ function renderPieLabel({
   midAngle?: number;
   outerRadius?: number;
   payload?: DistributionSliceEntry;
-}) {
+}, labelOffset: number) {
   if (
     !payload ||
     typeof cx !== "number" ||
@@ -691,7 +861,7 @@ function renderPieLabel({
     return null;
   }
 
-  const radius = outerRadius + 26;
+  const radius = outerRadius + labelOffset;
   const angle = -midAngle * (Math.PI / 180);
   const x = cx + radius * Math.cos(angle);
   const y = cy + radius * Math.sin(angle);

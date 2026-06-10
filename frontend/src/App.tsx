@@ -8,8 +8,9 @@ import { Github } from "lucide-react";
 import { ComparisonInstanceDetailPage } from "@/components/comparison-results";
 import { ComparisonPage } from "@/components/pages/comparison-page";
 import { OverviewPage } from "@/components/pages/overview-page";
-import { type ComparisonData, type ComparisonInstanceDetail, findComparisonById } from "@/data/comparisons";
+import { type ComparisonData, type ComparisonInstanceDetail, type ComparisonInstancesPayload, findComparisonById, withComparisonInstances } from "@/data/comparisons";
 import { loadComparisonData } from "@/data/load-comparison-data";
+import { loadComparisonInstances } from "@/data/load-comparison-instances";
 import { loadInstanceDetail } from "@/data/load-instance-detail";
 import { parseRoute, type Route } from "@/routes";
 
@@ -23,6 +24,8 @@ export default function App() {
   );
   const [instanceDetail, setInstanceDetail] = useState<ComparisonInstanceDetail | null | undefined>(undefined);
   const [instanceDetailError, setInstanceDetailError] = useState<string | null>(null);
+  const [instanceComparisonPayload, setInstanceComparisonPayload] = useState<ComparisonInstancesPayload | null | undefined>(undefined);
+  const [instanceComparisonPayloadError, setInstanceComparisonPayloadError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -51,6 +54,8 @@ export default function App() {
     if (route.page !== "instanceDetail") {
       setInstanceDetail(undefined);
       setInstanceDetailError(null);
+      setInstanceComparisonPayload(undefined);
+      setInstanceComparisonPayloadError(null);
       return () => {
         active = false;
       };
@@ -58,6 +63,17 @@ export default function App() {
 
     setInstanceDetail(undefined);
     setInstanceDetailError(null);
+    setInstanceComparisonPayload(undefined);
+    setInstanceComparisonPayloadError(null);
+    void loadComparisonInstances(route.comparisonId, "metrics")
+      .then((payload) => {
+        if (active) setInstanceComparisonPayload(payload);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setInstanceComparisonPayload(null);
+        setInstanceComparisonPayloadError(error instanceof Error ? error.message : "Failed to load instance comparison metrics.");
+      });
     void loadInstanceDetail(route.comparisonId, route.instanceId)
       .then((nextDetail) => {
         if (active) setInstanceDetail(nextDetail);
@@ -90,6 +106,10 @@ export default function App() {
 
   const comparison = route.page === "comparison" ? findComparisonById(data, route.id) : undefined;
   const detailComparison = route.page === "instanceDetail" ? findComparisonById(data, route.comparisonId) : undefined;
+  const detailComparisonWithInstances =
+    detailComparison && instanceComparisonPayload
+      ? withComparisonInstances(detailComparison, instanceComparisonPayload)
+      : detailComparison;
 
   return (
     <AppShell>
@@ -98,12 +118,22 @@ export default function App() {
       ) : route.page === "instanceDetail" ? (
         <main className="mx-auto flex max-w-[96rem] flex-col gap-4 px-4 pb-8 pt-4">
           {detailComparison ? (
-            <ComparisonInstanceDetailPage
-              comparison={detailComparison}
-              instanceId={route.instanceId}
-              detail={instanceDetail}
-              detailError={instanceDetailError}
-            />
+            instanceComparisonPayloadError ? (
+              <section className="rounded-lg border bg-background p-6 text-sm text-rose-700">
+                Unable to load instance comparison metrics: {instanceComparisonPayloadError}
+              </section>
+            ) : instanceComparisonPayload === undefined ? (
+              <section className="rounded-lg border bg-background p-6 text-sm text-muted-foreground">
+                Loading instance comparison metrics…
+              </section>
+            ) : (
+              <ComparisonInstanceDetailPage
+                comparison={detailComparisonWithInstances ?? detailComparison}
+                instanceId={route.instanceId}
+                detail={instanceDetail}
+                detailError={instanceDetailError}
+              />
+            )
           ) : (
             <section className="rounded-lg border bg-background p-6 text-sm text-muted-foreground">
               Loading instance detail…

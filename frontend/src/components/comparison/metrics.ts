@@ -83,10 +83,34 @@ export const resolutionMetricDefinitions: MetricDefinition[] = [
 export const contextRetrievalMetricDefinitions: MetricDefinition[] = [
   {
     key: "contextF1",
-    label: "Context F1",
-    explanation: "Balanced file/symbol/span F1 score.",
+    label: "Macro Context F1",
+    explanation: "Macro-average final-context file/block/line/symbol F1 score, balancing final retained gold context and final viewed-context relevance.",
     direction: "higher",
     value: (variant) => variant.contextF1 ?? variant.score ?? "—",
+    parse: parseFloatMetric,
+  },
+  {
+    key: "trajectoryGoldFound",
+    label: "Gold Found",
+    explanation: "Macro-average terminal cumulative trajectory coverage across file/block/line/symbol levels.",
+    direction: "higher",
+    value: (variant) => variant.results.quality.trajectoryGoldFound ?? "—",
+    parse: parseFloatMetric,
+  },
+  {
+    key: "contextRecall",
+    label: "Final Retained",
+    explanation: "Macro-average file/block/line/symbol final-context recall: of the gold context, how much remained in the final retrieved context.",
+    direction: "higher",
+    value: (variant) => variant.results.quality.contextRecall ?? "—",
+    parse: parseFloatMetric,
+  },
+  {
+    key: "contextPrecision",
+    label: "Viewed Gold",
+    explanation: "Macro-average file/block/line/symbol retrieval precision: of the viewed context, how much was gold.",
+    direction: "higher",
+    value: (variant) => variant.results.quality.contextPrecision ?? "—",
     parse: parseFloatMetric,
   },
   {
@@ -126,8 +150,8 @@ export const contextRetrievalMetricDefinitions: MetricDefinition[] = [
 export const resourceMetricDefinitions: MetricDefinition[] = [
   {
     key: "averageSteps",
-    label: "Average Steps",
-    explanation: "Average inferred retrieval steps per run.",
+    label: "Average Scored Retrieval Steps",
+    explanation: "Average number of inferred context retrieval steps scored by the evaluator per run.",
     direction: "lower",
     value: (variant) => variant.results.efficiency.averageSteps ?? "—",
     parse: parseFloatMetric,
@@ -135,7 +159,7 @@ export const resourceMetricDefinitions: MetricDefinition[] = [
   {
     key: "averageDuration",
     label: "Average Scored Task Duration",
-    explanation: "Average scored agent task runtime per run; excludes setup, bootstrap, and validation.",
+    explanation: "Average scored agent task runtime per run; excludes setup, bootstrap, validation, timed-out rows, and duration values that exceed the configured agent timeout.",
     direction: "lower",
     value: (variant) => variant.results.efficiency.averageDuration ?? variant.results.efficiency.avgDuration ?? "—",
     parse: parseDurationMetric,
@@ -147,6 +171,22 @@ export const resourceMetricDefinitions: MetricDefinition[] = [
     direction: "lower",
     value: (variant) => variant.results.efficiency.totalTokens ?? "—",
     parse: parseCompactNumberMetric,
+  },
+  {
+    key: "rawTraceEvents",
+    label: "Raw Trace Events",
+    explanation: "Total normalized trace rows exported to the per-instance Trace timeline, including commands, tool uses, file changes, assistant messages, and todo updates.",
+    direction: "neutral",
+    value: (variant) => variant.results.efficiency.rawTraceEvents ?? "—",
+    parse: parseFloatMetric,
+  },
+  {
+    key: "rawAgentActions",
+    label: "Raw Agent Actions",
+    explanation: "Total concrete agent actions in the normalized trace: command executions, tool invocations, and file changes. Assistant messages, todo updates, and tool-result-only rows are excluded.",
+    direction: "neutral",
+    value: (variant) => variant.results.efficiency.rawAgentActions ?? "—",
+    parse: parseFloatMetric,
   },
   {
     key: "mcpToolCalls",

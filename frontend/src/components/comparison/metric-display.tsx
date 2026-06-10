@@ -5,7 +5,8 @@ import { Minus, TrendingDown, TrendingUp } from "lucide-react";
 import type { ComparisonCard } from "@/data/comparisons";
 import { deltaIndicatorClassName, getComparisonPair } from "@/components/comparison/format";
 import { metricDelta } from "@/components/comparison/metrics";
-import { ComparisonSectionShell, DeltaIndicator, HelpIcon, MetricDirectionBadge } from "@/components/comparison/shared";
+import { getMetricSignificance, type PairedSignificance } from "@/components/comparison/significance";
+import { ComparisonSectionShell, DeltaIndicator, HelpIcon, MetricDirectionBadge, SignificanceBadge } from "@/components/comparison/shared";
 import type { ComparisonResultsViewMode, DeltaDisplayMode, MetricDefinition } from "@/components/comparison/types";
 import { cn } from "@/lib/utils";
 
@@ -50,13 +51,20 @@ export function MetricSection({
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {visibleMetrics.map((metric) => (
               showVersus ? (
-                <MetricVersusCard key={metric.key} metric={metric} baseline={baseline} treatment={treatment} />
+                <MetricVersusCard
+                  key={metric.key}
+                  metric={metric}
+                  baseline={baseline}
+                  treatment={treatment}
+                  significance={getMetricSignificance(comparison, metric.key)}
+                />
               ) : (
                 <MetricCard
                   key={metric.key}
                   metric={metric}
                   value={metric.value(treatment)}
                   delta={metricDelta(metric, baseline, treatment, deltaDisplayMode)}
+                  significance={getMetricSignificance(comparison, metric.key)}
                 />
               )
             ))}
@@ -90,10 +98,12 @@ function MetricCard({
   metric,
   value,
   delta,
+  significance,
 }: {
   metric: MetricDefinition;
   value: string;
   delta?: ReturnType<typeof metricDelta>;
+  significance?: PairedSignificance | null;
 }) {
   return (
     <div className="rounded-md border p-4">
@@ -104,7 +114,12 @@ function MetricCard({
       </div>
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
         <div className="font-medium">{value}</div>
-        {delta ? <DeltaIndicator label={delta.label} delta={delta.delta} tone={delta.tone} /> : null}
+        {delta ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <DeltaIndicator label={delta.label} delta={delta.delta} tone={delta.tone} />
+            <SignificanceBadge stat={significance} />
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -114,10 +129,12 @@ function MetricVersusCard({
   metric,
   baseline,
   treatment,
+  significance,
 }: {
   metric: MetricDefinition;
   baseline: ComparisonCard["variants"][number];
   treatment: ComparisonCard["variants"][number];
+  significance?: PairedSignificance | null;
 }) {
   const baselineValue = metric.value(baseline);
   const treatmentValue = metric.value(treatment);
@@ -135,6 +152,9 @@ function MetricVersusCard({
         baselineNumericValue={metric.parse(baselineValue)}
         treatmentNumericValue={metric.parse(treatmentValue)}
       />
+      <div className="mt-3 flex justify-end">
+        <SignificanceBadge stat={significance} />
+      </div>
     </div>
   );
 }

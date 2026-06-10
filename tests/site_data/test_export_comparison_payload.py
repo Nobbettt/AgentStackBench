@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
 
@@ -11,6 +12,41 @@ import scripts.export_comparison_data as export_comparison_data
 from scripts.export_comparison_data import ComparisonExportError, build_comparison_export, build_comparison_payload
 
 from .helpers import _record, _write
+
+
+def test_trajectory_gold_found_counts_valid_empty_trajectory_as_zero() -> None:
+    rows = [
+        {
+            "artifacts": {"evaluationStatus": "valid"},
+            "evaluatedTrajectory": {
+                "steps": [
+                    {"coverage": {"file": 1.0, "span": 1.0, "line": 1.0, "symbol": 1.0}},
+                ],
+            },
+        },
+        {
+            "artifacts": {"evaluationStatus": "valid"},
+            "evaluatedTrajectory": {"steps": []},
+        },
+        {
+            "artifacts": {"evaluationStatus": "error"},
+            "evaluatedTrajectory": {
+                "steps": [
+                    {"coverage": {"file": 1.0, "span": 1.0, "line": 1.0, "symbol": 1.0}},
+                ],
+            },
+        },
+    ]
+
+    payload = export_comparison_data._aggregate_trajectory_context_levels(rows)
+
+    assert payload["trajectoryGoldFound"] == "0.500"
+    assert payload["trajectoryContextLevels"] == {
+        "file": {"goldFound": "0.500"},
+        "block": {"goldFound": "0.500"},
+        "line": {"goldFound": "0.500"},
+        "symbol": {"goldFound": "0.500"},
+    }
 
 
 def test_repository_size_line_counts_are_opt_in_and_local_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -88,6 +124,36 @@ def test_repository_size_cache_is_commit_specific(tmp_path: Path, monkeypatch: p
         "status": "available",
         "repo": "example/repo",
         "trackedFiles": 2,
+    }
+
+
+def test_duration_resource_payload_excludes_timeout_inconsistent_completed_runs() -> None:
+    effective_config = {"timeout": 2700}
+
+    assert export_comparison_data._duration_resource_payload(
+        {"duration_ms": 2_700_000, "timeout": False},
+        effective_config,
+    ) == {
+        "durationMs": 2_700_000,
+        "durationStatus": "available",
+    }
+    assert export_comparison_data._duration_resource_payload(
+        {"duration_ms": 8_604_073, "timeout": False},
+        effective_config,
+    ) == {
+        "durationMs": None,
+        "durationStatus": "unavailable",
+        "durationUnavailableReason": "exceeds_configured_timeout",
+        "rawDurationMs": 8_604_073,
+    }
+    assert export_comparison_data._duration_resource_payload(
+        {"duration_ms": 600_000, "timeout": True},
+        effective_config,
+    ) == {
+        "durationMs": None,
+        "durationStatus": "unavailable",
+        "durationUnavailableReason": "timed_out",
+        "rawDurationMs": 600_000,
     }
 
 
@@ -200,14 +266,35 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
             ]
         ),
     )
-    baseline_record = _record(baseline_task_dir, 1000, 1200, 2, model_patch=baseline_patch)
-    baseline_partial_record = _record(baseline_partial_task_dir, 1000, 1200, 2, status="partial")
+    baseline_record = _record(
+        baseline_task_dir,
+        1000,
+        1200,
+        2,
+        model_patch=baseline_patch,
+        input_tokens=1000,
+        output_tokens=200,
+        cached_input_tokens=700,
+    )
+    baseline_partial_record = _record(
+        baseline_partial_task_dir,
+        2_500_000,
+        1200,
+        2,
+        status="partial",
+        input_tokens=900,
+        output_tokens=300,
+        cached_input_tokens=600,
+    )
     treatment_record = _record(
         treatment_task_dir,
         2000,
         1500,
         3,
         model_patch=treatment_patch,
+        input_tokens=1200,
+        output_tokens=300,
+        cached_input_tokens=900,
         retry={
             "attempts": 2,
             "max_attempts": 3,
@@ -216,6 +303,34 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
             "events": [{"attempt": 1, "action": "retry", "reason": "transient_failure"}],
         },
     )
+    baseline_raw_response_path = baseline_task_dir / "raw-response.json"
+    _write(
+        baseline_raw_response_path,
+        json.dumps(
+            {
+                "agent": "codex",
+                "events": [
+                    {"type": "item.completed", "item": {"type": "agent_message", "text": "Inspecting the repo"}},
+                    {"type": "item.updated", "item": {"type": "todo_list", "items": [{"text": "inspect", "completed": False}]}},
+                    {"type": "item.completed", "item": {"type": "command_execution", "command": "rg bug", "status": "completed"}},
+                    {"type": "item.completed", "item": {"type": "file_change", "path": "src/a.py", "status": "completed"}},
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "mcp_tool_call",
+                            "server": "cortex",
+                            "name": "context_search",
+                            "input": {"query": "bug"},
+                            "status": "completed",
+                        },
+                    },
+                ],
+            }
+        ),
+    )
+    baseline_record_payload = json.loads(Path(baseline_record).read_text(encoding="utf-8"))
+    baseline_record_payload["raw_response_path"] = str(baseline_raw_response_path)
+    _write(Path(baseline_record), json.dumps(baseline_record_payload))
 
     _write(
         baseline_dir / "task-results.jsonl",
@@ -238,6 +353,7 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
 
     eval_row = json.dumps(
         {
+            "instance_id": "task-a",
             "final": {
                 "file": {"intersection": 3, "gold_size": 4, "pred_size": 4},
                 "symbol": {"intersection": 1, "gold_size": 2, "pred_size": 2},
@@ -246,13 +362,34 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
             },
             "editloc": {"intersection": 2, "gold_size": 4, "pred_size": 2},
             "trajectory": {
-                "auc_coverage": {"file": 0.8, "symbol": 0.5, "span": 0.6},
-                "redundancy": {"file": 0.2, "symbol": 0.1, "span": 0.3},
+                "steps": [
+                    {"coverage": {"file": 0.25, "symbol": 0.5, "span": 0.75, "line": 1.0}},
+                    {"coverage": {"file": 0.5, "symbol": 0.75, "span": 1.0, "line": 0.25}},
+                ],
+                "auc_coverage": {"file": 0.8, "symbol": 0.5, "span": 0.6, "line": 0.7},
+                "redundancy": {"file": 0.2, "symbol": 0.1, "span": 0.3, "line": 0.4},
+            },
+            "predicted_context_path_diagnostics": {
+                "missing_final_paths": ["missing.py"],
+                "missing_trajectory_paths": ["missing.py", "tmp/generated.py"],
+                "missing_final_path_count": 1,
+                "missing_trajectory_path_count": 2,
             },
         }
     )
-    _write(baseline_dir / "eval.jsonl", eval_row)
-    _write(treatment_dir / "eval.jsonl", eval_row)
+    error_eval_row = json.dumps(
+        {
+            "instance_id": "task-b",
+            "error": "evaluation failed",
+            "trajectory": {
+                "steps": [
+                    {"coverage": {"file": 1.0, "symbol": 1.0, "span": 1.0, "line": 1.0}},
+                ],
+            },
+        }
+    )
+    _write(baseline_dir / "eval.jsonl", "\n".join([eval_row, error_eval_row]))
+    _write(treatment_dir / "eval.jsonl", "\n".join([eval_row, error_eval_row]))
     _write(
         baseline_dir / "resolution-summary.json",
         json.dumps({"pass_at_1": 0.1, "resolved_count": 1, "resolved_ids": ["task-a"], "unresolved_ids": ["task-b"]}),
@@ -315,6 +452,19 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
         "line": {"recall": "0.750", "precision": "0.500", "f1": "0.600"},
         "symbol": {"recall": "0.500", "precision": "0.500", "f1": "0.500"},
     }
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["quality"]["trajectoryGoldFound"] == "0.625"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["quality"]["trajectoryContextLevels"] == {
+        "file": {"goldFound": "0.500"},
+        "block": {"goldFound": "1.000"},
+        "line": {"goldFound": "0.250"},
+        "symbol": {"goldFound": "0.750"},
+    }
+    assert payload["comparisonCards"][0]["variants"][0]["instances"][0]["artifacts"]["predictedContextPathDiagnostics"] == {
+        "missingFinalPaths": ["missing.py"],
+        "missingTrajectoryPaths": ["missing.py", "tmp/generated.py"],
+        "missingFinalPathCount": 1,
+        "missingTrajectoryPathCount": 2,
+    }
     assert payload["comparisonCards"][0]["variants"][0]["results"]["quality"]["fixOverlapVsGold"] == {
         "status": "available",
         "recall": "50.0%",
@@ -334,7 +484,7 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
         "availableInstances": 1,
         "unavailableInstances": 1,
     }
-    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["efficiency"] == "0.633"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["efficiency"] == "0.650"
     assert payload["comparisonCards"][0]["variants"][1]["results"]["retries"] == {
         "totalAttempts": 4,
         "retriedRuns": 2,
@@ -345,22 +495,77 @@ def test_build_comparison_payload_happy_path(tmp_path: Path) -> None:
     assert payload["comparisonCards"][0]["variants"][0]["results"]["outcome"]["officialPassAt1"] == "10.0%"
     assert payload["comparisonCards"][0]["variants"][0]["results"]["outcome"]["comparableToOfficialLeaderboard"] is False
     assert payload["comparisonCards"][0]["variants"][0]["results"]["integrity"]["resolvedTasks"] == 1
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["integrity"]["validEvaluations"] == 1
     assert payload["comparisonCards"][0]["variants"][0]["results"]["integrity"]["postprocessPartial"] is True
     assert payload["comparisonCards"][0]["variants"][0]["instances"][0]["artifacts"]["resolutionStatus"] == "resolved"
     assert payload["comparisonCards"][0]["variants"][0]["instances"][1]["artifacts"]["resolutionStatus"] == "unresolved"
+    assert payload["comparisonCards"][0]["variants"][0]["instances"][0]["resources"]["durationStatus"] == "available"
+    assert payload["comparisonCards"][0]["variants"][0]["instances"][0]["resources"]["inputTokens"] == 1000
+    assert payload["comparisonCards"][0]["variants"][0]["instances"][0]["resources"]["outputTokens"] == 200
+    assert payload["comparisonCards"][0]["variants"][0]["instances"][0]["resources"]["cachedInputTokens"] == 700
+    assert payload["comparisonCards"][0]["variants"][0]["instances"][0]["resources"]["nonCachedInputTokens"] == 300
+    assert payload["comparisonCards"][0]["variants"][0]["instances"][0]["resources"]["rawTraceEvents"] == 5
+    assert payload["comparisonCards"][0]["variants"][0]["instances"][0]["resources"]["rawAgentActions"] == 3
+    assert payload["comparisonCards"][0]["variants"][0]["instances"][1]["resources"]["durationMs"] is None
+    assert payload["comparisonCards"][0]["variants"][0]["instances"][1]["resources"]["durationStatus"] == "unavailable"
+    assert payload["comparisonCards"][0]["variants"][0]["instances"][1]["resources"]["durationUnavailableReason"] == "exceeds_configured_timeout"
+    assert payload["comparisonCards"][0]["variants"][0]["instances"][1]["resources"]["rawDurationMs"] == 2_500_000
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["averageDuration"] == "0m 01s"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["excludedDurationValues"] == 1
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["inputTokens"] == "2K"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["outputTokens"] == "500"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["cachedInputTokens"] == "1K"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["nonCachedInputTokens"] == "600"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["cachedInputShare"] == "68.4%"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["rawTraceEvents"] == "5"
+    assert payload["comparisonCards"][0]["variants"][0]["results"]["efficiency"]["rawAgentActions"] == "3"
     assert payload["comparisonCards"][0]["variants"][0]["notes"]
+    assert any("excluded 1 scored-task duration value" in note for note in payload["comparisonCards"][0]["variants"][0]["notes"])
+    assert any("Context F1 is macro-averaged across valid evaluations" in note for note in payload["comparisonCards"][0]["notes"])
     assert any("partial conversion, evaluation coverage" in note for note in payload["comparisonCards"][0]["notes"])
     assert payload["leaderboardRows"][0]["model"] == "gpt-5.4"
     assert payload["leaderboardRows"][0]["suite"] == "Baseline"
     assert payload["leaderboardRows"][0]["completedRunRate"] == "10.0%"
     assert payload["leaderboardRows"][0]["officialPassAt1"] == "10.0%"
     assert payload["leaderboardRows"][0]["passAt1"] == "10.0%"
-    assert payload["leaderboardRows"][0]["contextF1"] == "0.639"
+    assert payload["leaderboardRows"][0]["contextF1"] == "0.629"
     assert payload["comparisonCards"][0]["variants"][1]["instances"][0]["resources"]["retryAttempts"] == 2
     assert payload["comparisonCards"][0]["variants"][1]["instances"][0]["resources"]["retried"] is True
     assert payload["comparisonCards"][0]["variants"][1]["instances"][0]["resources"]["retrySuppressed"] is False
+    assert len(detail_payloads["task-a"]["variants"][0]["traceEntries"]) == 5
     assert detail_payloads["task-a"]["variants"][1]["retry"]["attempts"] == 2
     assert detail_payloads["task-a"]["variants"][1]["retry"]["events"][0]["action"] == "retry"
+
+    summary_payload, instance_payloads = export_comparison_data.split_comparison_instance_payloads(payload)
+    assert "instances" not in summary_payload["comparisonCards"][0]["variants"][0]
+    assert "instances" not in summary_payload["comparisonCards"][0]["variants"][1]
+    assert payload["comparisonCards"][0]["variants"][0]["instances"][0]["instanceId"] == "task-a"
+    assert set(instance_payloads["demo-suite"]) == {"index", "metrics", "trajectory"}
+    index_payload = instance_payloads["demo-suite"]["index"]
+    metrics_payload = instance_payloads["demo-suite"]["metrics"]
+    trajectory_payload = instance_payloads["demo-suite"]["trajectory"]
+    assert index_payload["bundle"] == "index"
+    assert metrics_payload["bundle"] == "metrics"
+    assert trajectory_payload["bundle"] == "trajectory"
+    assert index_payload["variants"][0]["instances"][0]["instanceId"] == "task-a"
+    assert set(index_payload["variants"][0]["instances"][0]) <= {
+        "instanceId",
+        "originalInstanceId",
+        "bench",
+        "language",
+        "repositorySize",
+    }
+    assert "evaluatedTrajectory" not in metrics_payload["variants"][0]["instances"][0]
+    assert metrics_payload["variants"][0]["instances"][0]["resources"]["durationStatus"] == "available"
+    assert metrics_payload["variants"][0]["instances"][1]["resources"]["durationStatus"] == "unavailable"
+    assert set(trajectory_payload["variants"][0]["instances"][0]) == {
+        "instanceId",
+        "bench",
+        "language",
+        "artifacts",
+        "evaluatedTrajectory",
+    }
+    assert trajectory_payload["variants"][0]["instances"][0]["evaluatedTrajectory"]["steps"][0]["coverage"]["file"] == 0.25
 
 
 def test_build_comparison_payload_can_export_aligned_postprocess_artifacts(tmp_path: Path) -> None:
@@ -453,3 +658,29 @@ def test_build_comparison_payload_can_export_aligned_postprocess_artifacts(tmp_p
         "symbol": {"recall": "0.500", "precision": "0.500", "f1": "0.500"},
     }
     assert any("aligned postprocess artifacts" in note for note in payload["comparisonCards"][0]["notes"])
+
+
+def test_build_comparison_payload_requires_explicit_suffix_when_aligned_artifacts_exist(tmp_path: Path) -> None:
+    suite_dir = tmp_path / "results" / "run_suites" / "demo-suite"
+    variant_dir = suite_dir / "variants" / "baseline"
+    _write(suite_dir / "experiment.json", json.dumps({"experiment_name": "demo-suite"}))
+    _write(suite_dir / "summary.json", json.dumps([{"variant": "baseline", "total_tasks": 1}]))
+    _write(
+        suite_dir / "manifest.json",
+        json.dumps(
+            {
+                "variants": [
+                    {
+                        "name": "baseline",
+                        "effective_config_path": str(variant_dir / "effective-config.json"),
+                        "task_results_path": str(variant_dir / "task-results.jsonl"),
+                        "output_dir": str(variant_dir),
+                    }
+                ],
+            }
+        ),
+    )
+    _write(variant_dir / "eval.aligned.jsonl", "{}\n")
+
+    with pytest.raises(ComparisonExportError, match="--artifact-suffix aligned"):
+        build_comparison_payload(suite_dir, variant_name="baseline")

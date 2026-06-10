@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-08T22:41:47Z",
       "completedAt": "2026-05-08T22:46:15Z",
       "durationMs": 267784,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 729616,
@@ -25,66 +40,88 @@
         "total_tokens": 741806,
         "cache_read_input_tokens": 675328
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 36,
+        "readToolCalls": 0,
+        "editToolCalls": 1
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/django/template/defaultfilters.py b/django/template/defaultfilters.py\nindex 5ccef38048..12f0d4caaa 100644\n--- a/django/template/defaultfilters.py\n+++ b/django/template/defaultfilters.py\n@@ -83,7 +83,7 @@ def escapejs_filter(value):\n \n \n @register.filter(is_safe=True)\n-def json_script(value, element_id):\n+def json_script(value, element_id=None):\n     \"\"\"\n     Output value JSON-encoded, wrapped in a <script type=\"application/json\">\n     tag.\ndiff --git a/django/utils/html.py b/django/utils/html.py\nindex da1b5675ec..967157e974 100644\n--- a/django/utils/html.py\n+++ b/django/utils/html.py\n@@ -61,7 +61,7 @@ _json_script_escapes = {\n }\n \n \n-def json_script(value, element_id):\n+def json_script(value, element_id=None):\n     \"\"\"\n     Escape all the HTML/XML special characters with their unicode escapes, so\n     value is safe to be output anywhere except for inside a tag attribute. Wrap\n@@ -69,9 +69,14 @@ def json_script(value, element_id):\n     \"\"\"\n     from django.core.serializers.json import DjangoJSONEncoder\n     json_str = json.dumps(value, cls=DjangoJSONEncoder).translate(_json_script_escapes)\n+    if element_id is None:\n+        return format_html(\n+            '<script type=\"application/json\">{}</script>',\n+            mark_safe(json_str),\n+        )\n     return format_html(\n         '<script id=\"{}\" type=\"application/json\">{}</script>',\n-        element_id, mark_safe(json_str)\n+        element_id, mark_safe(json_str),\n     )\n \n \ndiff --git a/docs/ref/templates/builtins.txt b/docs/ref/templates/builtins.txt\nindex 2edfd65c7b..c9dc170e01 100644\n--- a/docs/ref/templates/builtins.txt\n+++ b/docs/ref/templates/builtins.txt\n@@ -1832,7 +1832,7 @@ If ``value`` is the list ``['a', 'b', 'c']``, the output will be the string\n Safely outputs a Python object as JSON, wrapped in a ``<script>`` tag, ready\n for use with JavaScript.\n \n-**Argument:** HTML \"id\" of the ``<script>`` tag.\n+**Argument:** Optional HTML \"id\" of the ``<script>`` tag.\n \n For example::\n \n@@ -1844,6 +1844,12 @@ If ``value`` is the dictionary ``{'hello': 'world'}``, the output will be:\n \n     <script id=\"hello-data\" type=\"application/json\">{\"hello\": \"world\"}</script>\n \n+Without an ``id`` argument, the ``id`` attribute is omitted:\n+\n+.. code-block:: html\n+\n+    <script type=\"application/json\">{\"hello\": \"world\"}</script>\n+\n The resulting data can be accessed in JavaScript like this:\n \n .. code-block:: javascript\ndiff --git a/docs/releases/4.1.txt b/docs/releases/4.1.txt\nindex 7bfb527104..da1e88f59e 100644\n--- a/docs/releases/4.1.txt\n+++ b/docs/releases/4.1.txt\n@@ -210,7 +210,9 @@ Signals\n Templates\n ~~~~~~~~~\n \n-* ...\n+* The :tfilter:`json_script` filter now accepts an optional ``id`` argument and\n+  omits the ``id`` attribute on the rendered ``<script>`` tag when not\n+  provided.\n \n Tests\n ~~~~~\ndiff --git a/tests/template_tests/filter_tests/test_json_script.py b/tests/template_tests/filter_tests/test_json_script.py\nindex 061fe32c12..89247c145e 100644\n--- a/tests/template_tests/filter_tests/test_json_script.py\n+++ b/tests/template_tests/filter_tests/test_json_script.py\n@@ -17,3 +17,16 @@ class JsonScriptTests(SimpleTestCase):\n             '{\"a\": \"testing\\\\r\\\\njson \\'string\\\\\" \\\\u003Cb\\\\u003Eescaping\\\\u003C/b\\\\u003E\"}'\n             '</script>'\n         )\n+\n+    @setup({'json-tag02': '{{ value|json_script }}'})\n+    def test_without_element_id(self):\n+        output = self.engine.render_to_string(\n+            'json-tag02',\n+            {'value': {'a': 'testing\\r\\njson \\'string\" <b>escaping</b>'}}\n+        )\n+        self.assertEqual(\n+            output,\n+            '<script type=\"application/json\">'\n+            '{\"a\": \"testing\\\\r\\\\njson \\'string\\\\\" \\\\u003Cb\\\\u003Eescaping\\\\u003C/b\\\\u003E\"}'\n+            '</script>'\n+        )\ndiff --git a/tests/utils_tests/test_html.py b/tests/utils_tests/test_html.py\nindex 909620ea3f..0ef1370661 100644\n--- a/tests/utils_tests/test_html.py\n+++ b/tests/utils_tests/test_html.py\n@@ -173,6 +173,14 @@ class TestUtilsHtml(SimpleTestCase):\n             with self.subTest(arg=arg):\n                 self.assertEqual(json_script(arg, 'test_id'), expected)\n \n+    def test_json_script_without_element_id(self):\n+        self.assertEqual(\n+            json_script({'a': '<script>test&ing</script>'}),\n+            '<script type=\"application/json\">'\n+            '{\"a\": \"\\\\u003Cscript\\\\u003Etest\\\\u0026ing\\\\u003C/script\\\\u003E\"}'\n+            '</script>',\n+        )\n+\n     def test_smart_urlquote(self):\n         items = (\n             ('http://\u00f6\u00e4\u00fc.com/', 'http://xn--4ca9at.com/'),\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Implemented optional `element_id` support for `json_script` in both the HTML utility and the template filter. When `element_id` is omitted, the rendered `<script>` tag now leaves out the `id` attribute; existing behavior is unchanged when an ID is provided. I added regression coverage for the direct utility and template filter forms, and updated the builtins docs plus the 4.1 release notes.\n\nVerification: `python3 -m compileall django/utils/html.py django/template/defaultfilters.py tests/utils_tests/test_html.py tests/template_tests/filter_tests/test_json_script.py` succeeded. I also ran focused manual assertions under `python3` to verify `json_script()` and `{{ value|json_script }}` both render correctly with and without an ID. Full targeted Django test execution via `PYTHONPATH=. python3 tests/runtests.py utils_tests.test_html template_tests.filter_tests.test_json_script` could not run in this environment because required local dependencies are missing (`asgiref`; `sqlparse` is also absent locally).",
         "notes": "Implementation is complete. Full repo-native targeted tests were attempted but `tests/runtests.py` could not start because this workspace lacks required test dependencies (`asgiref`; `sqlparse` also not installed locally). Offline-safe verification therefore used bytecode compilation and focused manual runtime assertions against the updated helper and template filter behavior.",
         "retrievedContextFiles": [
-          "<worktree>/django/utils/html.py",
-          "<worktree>/django/template/defaultfilters.py",
-          "<worktree>/tests/utils_tests/test_html.py",
-          "<worktree>/tests/template_tests/filter_tests/test_json_script.py",
-          "<worktree>/docs/ref/templates/builtins.txt",
-          "<worktree>/docs/releases/4.1.txt"
+          "django/utils/html.py",
+          "django/template/defaultfilters.py",
+          "tests/utils_tests/test_html.py",
+          "tests/template_tests/filter_tests/test_json_script.py",
+          "docs/ref/templates/builtins.txt",
+          "docs/releases/4.1.txt"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/django/utils/html.py",
+            "file": "django/utils/html.py",
             "start": 64,
             "end": 80
           },
           {
-            "file": "<worktree>/django/template/defaultfilters.py",
+            "file": "django/template/defaultfilters.py",
             "start": 85,
             "end": 91
           },
           {
-            "file": "<worktree>/tests/utils_tests/test_html.py",
+            "file": "tests/utils_tests/test_html.py",
             "start": 154,
             "end": 182
           },
           {
-            "file": "<worktree>/tests/template_tests/filter_tests/test_json_script.py",
+            "file": "tests/template_tests/filter_tests/test_json_script.py",
             "start": 6,
             "end": 32
           },
           {
-            "file": "<worktree>/docs/ref/templates/builtins.txt",
+            "file": "docs/ref/templates/builtins.txt",
             "start": 1829,
             "end": 1855
           },
           {
-            "file": "<worktree>/docs/releases/4.1.txt",
+            "file": "docs/releases/4.1.txt",
             "start": 210,
             "end": 215
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/django/utils/html.py",
+            "file": "django/utils/html.py",
             "name": "json_script"
           },
           {
-            "file": "<worktree>/django/template/defaultfilters.py",
+            "file": "django/template/defaultfilters.py",
             "name": "json_script"
           },
           {
-            "file": "<worktree>/tests/template_tests/filter_tests/test_json_script.py",
+            "file": "tests/template_tests/filter_tests/test_json_script.py",
             "name": "JsonScriptTests"
           },
           {
-            "file": "<worktree>/tests/utils_tests/test_html.py",
+            "file": "tests/utils_tests/test_html.py",
             "name": "TestUtilsHtml"
           }
         ]
@@ -95,175 +132,32 @@
             "files": [
               "django/template/defaultfilters.py",
               "django/utils/html.py",
-              "tests/admin_inlines/tests.py",
               "tests/template_tests/filter_tests/test_json_script.py",
               "tests/utils_tests/test_html.py"
             ],
             "spans": {
-              "tests/admin_inlines/tests.py": [
-                {
-                  "start": 1598,
-                  "end": 1598
-                },
-                {
-                  "start": 1600,
-                  "end": 1600
-                }
-              ],
-              "tests/utils_tests/test_html.py": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 154,
-                  "end": 154
-                },
-                {
-                  "start": 174,
-                  "end": 174
-                }
-              ],
-              "tests/template_tests/filter_tests/test_json_script.py": [
-                {
-                  "start": 8,
-                  "end": 8
-                }
-              ],
               "django/utils/html.py": [
                 {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 64,
-                  "end": 64
-                },
-                {
-                  "start": 71,
-                  "end": 71
-                },
-                {
-                  "start": 74,
-                  "end": 74
+                  "start": 1,
+                  "end": 140
                 }
               ],
               "django/template/defaultfilters.py": [
                 {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                }
-              ]
-            },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/template_tests/filter_tests/test_json_script.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "django/template/base.py",
-              "django/template/library.py"
-            ],
-            "spans": {
-              "django/template/base.py": [
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 688,
-                  "end": 688
-                },
-                {
-                  "start": 735,
-                  "end": 735
-                },
-                {
-                  "start": 740,
-                  "end": 740
-                },
-                {
-                  "start": 742,
-                  "end": 742
-                },
-                {
-                  "start": 744,
-                  "end": 744
-                },
-                {
-                  "start": 751,
-                  "end": 751
-                },
-                {
-                  "start": 893,
-                  "end": 893
+                  "start": 1,
+                  "end": 130
                 }
               ],
-              "django/template/library.py": [
+              "tests/utils_tests/test_html.py": [
                 {
-                  "start": 3,
-                  "end": 3
-                },
+                  "start": 140,
+                  "end": 220
+                }
+              ],
+              "tests/template_tests/filter_tests/test_json_script.py": [
                 {
-                  "start": 109,
-                  "end": 109
-                },
-                {
-                  "start": 120,
+                  "start": 1,
                   "end": 120
-                },
-                {
-                  "start": 121,
-                  "end": 121
-                },
-                {
-                  "start": 146,
-                  "end": 146
-                },
-                {
-                  "start": 153,
-                  "end": 153
-                },
-                {
-                  "start": 154,
-                  "end": 154
-                },
-                {
-                  "start": 238,
-                  "end": 238
-                },
-                {
-                  "start": 239,
-                  "end": 239
-                },
-                {
-                  "start": 257,
-                  "end": 257
-                },
-                {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 303,
-                  "end": 303
-                },
-                {
-                  "start": 304,
-                  "end": 304
                 }
               ]
             },
@@ -273,48 +167,11 @@
             "files": [
               "django/template/base.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/template_tests/filter_tests/test_default.py",
-              "tests/template_tests/filter_tests/test_default_if_none.py",
-              "tests/template_tests/syntax_tests/test_filter_syntax.py"
-            ],
             "spans": {
-              "tests/template_tests/syntax_tests/test_filter_syntax.py": [
+              "django/template/base.py": [
                 {
-                  "start": 96,
-                  "end": 96
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                },
-                {
-                  "start": 141,
-                  "end": 141
-                },
-                {
-                  "start": 173,
-                  "end": 173
-                }
-              ],
-              "tests/template_tests/filter_tests/test_default.py": [
-                {
-                  "start": 1,
-                  "end": 1
-                }
-              ],
-              "tests/template_tests/filter_tests/test_default_if_none.py": [
-                {
-                  "start": 1,
-                  "end": 1
+                  "start": 680,
+                  "end": 760
                 }
               ]
             },
@@ -324,92 +181,25 @@
             "files": [
               "tests/template_tests/filter_tests/__init__.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/template_tests/filter_tests/__init__.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "docs/releases"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "django/template/defaultfilters.py",
-              "django/utils/html.py",
-              "docs/ref/templates/builtins.txt",
-              "docs/releases/2.1.txt",
-              "tests/template_tests/filter_tests/test_json_script.py",
-              "tests/utils_tests/test_html.py"
+              "tests/template_tests/filter_tests/test_json_script.py"
             ],
             "spans": {
-              "tests/utils_tests/test_html.py": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 154,
-                  "end": 154
-                },
-                {
-                  "start": 174,
-                  "end": 174
-                }
-              ],
               "tests/template_tests/filter_tests/test_json_script.py": [
                 {
-                  "start": 8,
-                  "end": 8
-                }
-              ],
-              "docs/releases/2.1.txt": [
-                {
-                  "start": 216,
-                  "end": 216
-                }
-              ],
-              "docs/ref/templates/builtins.txt": [
-                {
-                  "start": 1827,
-                  "end": 1827
-                },
-                {
-                  "start": 1829,
-                  "end": 1829
-                },
-                {
-                  "start": 1839,
-                  "end": 1839
-                }
-              ],
-              "django/template/defaultfilters.py": [
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                }
-              ],
-              "django/utils/html.py": [
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 64,
-                  "end": 64
-                },
-                {
-                  "start": 71,
-                  "end": 71
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -419,7 +209,28 @@
             "files": [
               "docs/ref/templates/builtins.txt"
             ],
-            "spans": {},
+            "spans": {
+              "docs/ref/templates/builtins.txt": [
+                {
+                  "start": 1820,
+                  "end": 1865
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "docs/releases/4.1.txt"
+            ],
+            "spans": {
+              "docs/releases/4.1.txt": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -431,878 +242,143 @@
           },
           {
             "files": [
-              "django/contrib/staticfiles/handlers.py",
-              "django/core/cache/backends/base.py",
-              "django/core/handlers/asgi.py",
-              "django/core/handlers/base.py",
-              "django/core/handlers/exception.py",
-              "django/test/client.py",
-              "django/test/signals.py",
-              "django/test/testcases.py",
-              "django/urls/base.py",
-              "django/urls/resolvers.py",
-              "django/utils/connection.py",
-              "django/utils/deprecation.py",
-              "django/utils/timezone.py",
-              "django/utils/translation/reloader.py",
-              "django/utils/translation/trans_real.py",
-              "tests/asgi/tests.py",
-              "tests/async/tests.py",
-              "tests/requirements/py3.txt",
-              "tests/template_tests/syntax_tests/i18n/test_blocktranslate.py",
-              "tests/template_tests/syntax_tests/i18n/test_translate.py"
+              "docs/releases/4.1.txt"
             ],
             "spans": {
-              "tests/requirements/py3.txt": [
+              "docs/releases/4.1.txt": [
                 {
-                  "start": 2,
-                  "end": 2
-                }
-              ],
-              "tests/async/tests.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "tests/template_tests/syntax_tests/i18n/test_translate.py": [
-                {
-                  "start": 4,
-                  "end": 4
-                }
-              ],
-              "tests/template_tests/syntax_tests/i18n/test_blocktranslate.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "tests/asgi/tests.py": [
-                {
-                  "start": 7,
-                  "end": 7
-                }
-              ],
-              "django/urls/base.py": [
-                {
-                  "start": 3,
-                  "end": 3
-                }
-              ],
-              "django/urls/resolvers.py": [
-                {
-                  "start": 16,
-                  "end": 16
-                }
-              ],
-              "django/utils/connection.py": [
-                {
-                  "start": 1,
-                  "end": 1
-                }
-              ],
-              "django/utils/timezone.py": [
-                {
-                  "start": 17,
-                  "end": 17
-                }
-              ],
-              "django/utils/deprecation.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/contrib/staticfiles/handlers.py": [
-                {
-                  "start": 4,
-                  "end": 4
-                }
-              ],
-              "django/utils/translation/reloader.py": [
-                {
-                  "start": 3,
-                  "end": 3
-                }
-              ],
-              "django/utils/translation/trans_real.py": [
-                {
-                  "start": 9,
-                  "end": 9
-                }
-              ],
-              "django/test/testcases.py": [
-                {
-                  "start": 21,
-                  "end": 21
-                }
-              ],
-              "django/test/signals.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/test/client.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "django/core/handlers/base.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/core/handlers/asgi.py": [
-                {
-                  "start": 6,
-                  "end": 6
-                }
-              ],
-              "django/core/handlers/exception.py": [
-                {
-                  "start": 6,
-                  "end": 6
-                }
-              ],
-              "django/core/cache/backends/base.py": [
-                {
-                  "start": 5,
-                  "end": 5
+                  "start": 200,
+                  "end": 235
                 }
               ]
             },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "django/db/backends/base/operations.py",
-              "django/db/backends/mysql/introspection.py",
-              "django/db/backends/sqlite3/introspection.py",
-              "tests/backends/sqlite/test_introspection.py",
-              "tests/requirements/py3.txt"
-            ],
-            "spans": {
-              "django/db/backends/mysql/introspection.py": [
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 188,
-                  "end": 188
-                },
-                {
-                  "start": 192,
-                  "end": 192
-                }
-              ],
-              "django/db/backends/sqlite3/introspection.py": [
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 151,
-                  "end": 151
-                },
-                {
-                  "start": 153,
-                  "end": 153
-                },
-                {
-                  "start": 158,
-                  "end": 158
-                },
-                {
-                  "start": 163,
-                  "end": 163
-                },
-                {
-                  "start": 169,
-                  "end": 169
-                },
-                {
-                  "start": 171,
-                  "end": 171
-                },
-                {
-                  "start": 174,
-                  "end": 174
-                },
-                {
-                  "start": 183,
-                  "end": 183
-                },
-                {
-                  "start": 185,
-                  "end": 185
-                },
-                {
-                  "start": 190,
-                  "end": 190
-                },
-                {
-                  "start": 192,
-                  "end": 192
-                },
-                {
-                  "start": 194,
-                  "end": 194
-                },
-                {
-                  "start": 197,
-                  "end": 197
-                },
-                {
-                  "start": 206,
-                  "end": 206
-                },
-                {
-                  "start": 209,
-                  "end": 209
-                },
-                {
-                  "start": 233,
-                  "end": 233
-                },
-                {
-                  "start": 239,
-                  "end": 239
-                },
-                {
-                  "start": 256,
-                  "end": 256
-                },
-                {
-                  "start": 351,
-                  "end": 351
-                },
-                {
-                  "start": 353,
-                  "end": 353
-                },
-                {
-                  "start": 368,
-                  "end": 368
-                }
-              ],
-              "django/db/backends/base/operations.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 313,
-                  "end": 313
-                },
-                {
-                  "start": 314,
-                  "end": 314
-                }
-              ],
-              "tests/requirements/py3.txt": [
-                {
-                  "start": 21,
-                  "end": 21
-                }
-              ],
-              "tests/backends/sqlite/test_introspection.py": [
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                }
-              ]
-            },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "<script>test&ing</script>}}))"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "<script>test&ing</script>}))"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "<script>test&ing</script>}})"
-            ],
-            "spans": {},
             "symbols": {}
           },
           {
             "files": [
               "django/utils/html.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/utils/html.py": [
+                {
+                  "start": 60,
+                  "end": 82
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "django/template/defaultfilters.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/template/defaultfilters.py": [
+                {
+                  "start": 82,
+                  "end": 94
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/template_tests/filter_tests/test_json_script.py"
+            ],
+            "spans": {
+              "tests/template_tests/filter_tests/test_json_script.py": [
+                {
+                  "start": 1,
+                  "end": 40
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/utils_tests/test_html.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/utils_tests/test_html.py": [
+                {
+                  "start": 154,
+                  "end": 188
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "docs/ref/templates/builtins.txt"
+            ],
+            "spans": {
+              "docs/ref/templates/builtins.txt": [
+                {
+                  "start": 1828,
+                  "end": 1855
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "docs/releases/4.1.txt"
+            ],
+            "spans": {
+              "docs/releases/4.1.txt": [
+                {
+                  "start": 208,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "<script>test&ing</script>}))",
-          "<script>test&ing</script>}})",
-          "<script>test&ing</script>}}))",
-          "<worktree>/django/template/defaultfilters.py",
-          "<worktree>/django/utils/html.py",
-          "<worktree>/docs/ref/templates/builtins.txt",
-          "<worktree>/docs/releases/4.1.txt",
-          "<worktree>/tests/template_tests/filter_tests/test_json_script.py",
-          "<worktree>/tests/utils_tests/test_html.py",
-          "django/contrib/staticfiles/handlers.py",
-          "django/core/cache/backends/base.py",
-          "django/core/handlers/asgi.py",
-          "django/core/handlers/base.py",
-          "django/core/handlers/exception.py",
-          "django/db/backends/base/operations.py",
-          "django/db/backends/mysql/introspection.py",
-          "django/db/backends/sqlite3/introspection.py",
-          "django/template/base.py",
           "django/template/defaultfilters.py",
-          "django/template/library.py",
-          "django/test/client.py",
-          "django/test/signals.py",
-          "django/test/testcases.py",
-          "django/urls/base.py",
-          "django/urls/resolvers.py",
-          "django/utils/connection.py",
-          "django/utils/deprecation.py",
           "django/utils/html.py",
-          "django/utils/timezone.py",
-          "django/utils/translation/reloader.py",
-          "django/utils/translation/trans_real.py",
           "docs/ref/templates/builtins.txt",
-          "docs/releases",
-          "docs/releases/2.1.txt",
           "docs/releases/4.1.txt",
-          "tests/admin_inlines/tests.py",
-          "tests/asgi/tests.py",
-          "tests/async/tests.py",
-          "tests/backends/sqlite/test_introspection.py",
-          "tests/requirements/py3.txt",
-          "tests/template_tests/filter_tests/__init__.py",
-          "tests/template_tests/filter_tests/test_default.py",
-          "tests/template_tests/filter_tests/test_default_if_none.py",
           "tests/template_tests/filter_tests/test_json_script.py",
-          "tests/template_tests/syntax_tests/i18n/test_blocktranslate.py",
-          "tests/template_tests/syntax_tests/i18n/test_translate.py",
-          "tests/template_tests/syntax_tests/test_filter_syntax.py",
           "tests/utils_tests/test_html.py"
         ],
         "predSpans": {
-          "tests/admin_inlines/tests.py": [
-            {
-              "start": 1598,
-              "end": 1598
-            },
-            {
-              "start": 1600,
-              "end": 1600
-            }
-          ],
-          "tests/utils_tests/test_html.py": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 154,
-              "end": 154
-            },
-            {
-              "start": 174,
-              "end": 174
-            }
-          ],
-          "tests/template_tests/filter_tests/test_json_script.py": [
-            {
-              "start": 8,
-              "end": 8
-            }
-          ],
           "django/utils/html.py": [
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 64,
-              "end": 64
-            },
-            {
-              "start": 71,
-              "end": 71
-            },
-            {
-              "start": 74,
-              "end": 74
-            }
-          ],
-          "django/template/defaultfilters.py": [
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 86,
-              "end": 86
-            },
-            {
-              "start": 91,
-              "end": 91
-            }
-          ],
-          "django/template/base.py": [
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 688,
-              "end": 688
-            },
-            {
-              "start": 735,
-              "end": 735
-            },
-            {
-              "start": 740,
-              "end": 740
-            },
-            {
-              "start": 742,
-              "end": 742
-            },
-            {
-              "start": 744,
-              "end": 744
-            },
-            {
-              "start": 751,
-              "end": 751
-            },
-            {
-              "start": 893,
-              "end": 893
-            }
-          ],
-          "django/template/library.py": [
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 109,
-              "end": 109
-            },
-            {
-              "start": 120,
-              "end": 120
-            },
-            {
-              "start": 121,
-              "end": 121
-            },
-            {
-              "start": 146,
-              "end": 146
-            },
-            {
-              "start": 153,
-              "end": 153
-            },
-            {
-              "start": 154,
-              "end": 154
-            },
-            {
-              "start": 238,
-              "end": 238
-            },
-            {
-              "start": 239,
-              "end": 239
-            },
-            {
-              "start": 257,
-              "end": 257
-            },
-            {
-              "start": 301,
-              "end": 301
-            },
-            {
-              "start": 303,
-              "end": 303
-            },
-            {
-              "start": 304,
-              "end": 304
-            }
-          ],
-          "tests/template_tests/syntax_tests/test_filter_syntax.py": [
-            {
-              "start": 96,
-              "end": 96
-            },
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 133,
-              "end": 133
-            },
-            {
-              "start": 141,
-              "end": 141
-            },
-            {
-              "start": 173,
-              "end": 173
-            }
-          ],
-          "tests/template_tests/filter_tests/test_default.py": [
-            {
-              "start": 1,
-              "end": 1
-            }
-          ],
-          "tests/template_tests/filter_tests/test_default_if_none.py": [
-            {
-              "start": 1,
-              "end": 1
-            }
-          ],
-          "docs/releases/2.1.txt": [
-            {
-              "start": 216,
-              "end": 216
-            }
-          ],
-          "docs/ref/templates/builtins.txt": [
-            {
-              "start": 1827,
-              "end": 1827
-            },
-            {
-              "start": 1829,
-              "end": 1829
-            },
-            {
-              "start": 1839,
-              "end": 1839
-            }
-          ],
-          "tests/requirements/py3.txt": [
-            {
-              "start": 2,
-              "end": 2
-            },
-            {
-              "start": 21,
-              "end": 21
-            }
-          ],
-          "tests/async/tests.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "tests/template_tests/syntax_tests/i18n/test_translate.py": [
-            {
-              "start": 4,
-              "end": 4
-            }
-          ],
-          "tests/template_tests/syntax_tests/i18n/test_blocktranslate.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "tests/asgi/tests.py": [
-            {
-              "start": 7,
-              "end": 7
-            }
-          ],
-          "django/urls/base.py": [
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "django/urls/resolvers.py": [
-            {
-              "start": 16,
-              "end": 16
-            }
-          ],
-          "django/utils/connection.py": [
-            {
-              "start": 1,
-              "end": 1
-            }
-          ],
-          "django/utils/timezone.py": [
-            {
-              "start": 17,
-              "end": 17
-            }
-          ],
-          "django/utils/deprecation.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/contrib/staticfiles/handlers.py": [
-            {
-              "start": 4,
-              "end": 4
-            }
-          ],
-          "django/utils/translation/reloader.py": [
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "django/utils/translation/trans_real.py": [
-            {
-              "start": 9,
-              "end": 9
-            }
-          ],
-          "django/test/testcases.py": [
-            {
-              "start": 21,
-              "end": 21
-            }
-          ],
-          "django/test/signals.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/test/client.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "django/core/handlers/base.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/core/handlers/asgi.py": [
-            {
-              "start": 6,
-              "end": 6
-            }
-          ],
-          "django/core/handlers/exception.py": [
-            {
-              "start": 6,
-              "end": 6
-            }
-          ],
-          "django/core/cache/backends/base.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/db/backends/mysql/introspection.py": [
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 188,
-              "end": 188
-            },
-            {
-              "start": 192,
-              "end": 192
-            }
-          ],
-          "django/db/backends/sqlite3/introspection.py": [
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 151,
-              "end": 151
-            },
-            {
-              "start": 153,
-              "end": 153
-            },
-            {
-              "start": 158,
-              "end": 158
-            },
-            {
-              "start": 163,
-              "end": 163
-            },
-            {
-              "start": 169,
-              "end": 169
-            },
-            {
-              "start": 171,
-              "end": 171
-            },
-            {
-              "start": 174,
-              "end": 174
-            },
-            {
-              "start": 183,
-              "end": 183
-            },
-            {
-              "start": 185,
-              "end": 185
-            },
-            {
-              "start": 190,
-              "end": 190
-            },
-            {
-              "start": 192,
-              "end": 192
-            },
-            {
-              "start": 194,
-              "end": 194
-            },
-            {
-              "start": 197,
-              "end": 197
-            },
-            {
-              "start": 206,
-              "end": 206
-            },
-            {
-              "start": 209,
-              "end": 209
-            },
-            {
-              "start": 233,
-              "end": 233
-            },
-            {
-              "start": 239,
-              "end": 239
-            },
-            {
-              "start": 256,
-              "end": 256
-            },
-            {
-              "start": 351,
-              "end": 351
-            },
-            {
-              "start": 353,
-              "end": 353
-            },
-            {
-              "start": 368,
-              "end": 368
-            }
-          ],
-          "django/db/backends/base/operations.py": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 313,
-              "end": 313
-            },
-            {
-              "start": 314,
-              "end": 314
-            }
-          ],
-          "tests/backends/sqlite/test_introspection.py": [
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 55,
-              "end": 55
-            }
-          ],
-          "<worktree>/django/utils/html.py": [
             {
               "start": 64,
               "end": 80
             }
           ],
-          "<worktree>/django/template/defaultfilters.py": [
+          "django/template/defaultfilters.py": [
             {
               "start": 85,
               "end": 91
             }
           ],
-          "<worktree>/tests/utils_tests/test_html.py": [
+          "tests/utils_tests/test_html.py": [
             {
               "start": 154,
               "end": 182
             }
           ],
-          "<worktree>/tests/template_tests/filter_tests/test_json_script.py": [
+          "tests/template_tests/filter_tests/test_json_script.py": [
             {
               "start": 6,
               "end": 32
             }
           ],
-          "<worktree>/docs/ref/templates/builtins.txt": [
+          "docs/ref/templates/builtins.txt": [
             {
               "start": 1829,
               "end": 1855
             }
           ],
-          "<worktree>/docs/releases/4.1.txt": [
+          "docs/releases/4.1.txt": [
             {
               "start": 210,
               "end": 215
@@ -1310,16 +386,16 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/django/utils/html.py": [
+          "django/utils/html.py": [
             "json_script"
           ],
-          "<worktree>/django/template/defaultfilters.py": [
+          "django/template/defaultfilters.py": [
             "json_script"
           ],
-          "<worktree>/tests/template_tests/filter_tests/test_json_script.py": [
+          "tests/template_tests/filter_tests/test_json_script.py": [
             "JsonScriptTests"
           ],
-          "<worktree>/tests/utils_tests/test_html.py": [
+          "tests/utils_tests/test_html.py": [
             "TestUtilsHtml"
           ]
         }
@@ -1330,176 +406,140 @@
             "step": 1,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 2,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 3,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 4,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 5,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 14,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
-            }
-          },
-          {
-            "step": 15,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
-            }
-          },
-          {
-            "step": 16,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
-            }
-          },
-          {
-            "step": 17,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
-            }
-          },
-          {
-            "step": 18,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
           "file": 1.0,
-          "symbol": 0.6666666666666665,
-          "span": 0.17459080280592365,
-          "line": 0.13432835820895522
+          "symbol": 1.0,
+          "span": 1.0,
+          "line": 1.0
         },
         "redundancy": {
-          "file": 0.22448979591836737,
-          "symbol": 0.1351351351351351,
-          "span": 0.09592618384401119,
-          "line": 0.09433962264150941
+          "file": 0.5294117647058824,
+          "symbol": 0.22916666666666663,
+          "span": 0.19360072444628906,
+          "line": 0.18622100954979537
         }
       },
       "fixOverlap": {
@@ -1651,7 +691,34 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/django/template/defaultfilters.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/django/utils/html.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/docs/ref/templates/builtins.txt",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/docs/releases/4.1.txt",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/tests/template_tests/filter_tests/test_json_script.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/tests/utils_tests/test_html.py",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "todo_list",
@@ -1846,9 +913,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-08T22:41:51Z",
       "completedAt": "2026-05-08T22:46:31Z",
       "durationMs": 280196,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1033793,
@@ -1857,6 +939,28 @@
         "total_tokens": 1046637,
         "cache_read_input_tokens": 971392
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 41,
+        "readToolCalls": 0,
+        "editToolCalls": 6
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/django/template/defaultfilters.py b/django/template/defaultfilters.py\nindex 5ccef38048..12f0d4caaa 100644\n--- a/django/template/defaultfilters.py\n+++ b/django/template/defaultfilters.py\n@@ -83,7 +83,7 @@ def escapejs_filter(value):\n \n \n @register.filter(is_safe=True)\n-def json_script(value, element_id):\n+def json_script(value, element_id=None):\n     \"\"\"\n     Output value JSON-encoded, wrapped in a <script type=\"application/json\">\n     tag.\ndiff --git a/django/utils/html.py b/django/utils/html.py\nindex da1b5675ec..d602080c5b 100644\n--- a/django/utils/html.py\n+++ b/django/utils/html.py\n@@ -61,7 +61,7 @@ _json_script_escapes = {\n }\n \n \n-def json_script(value, element_id):\n+def json_script(value, element_id=None):\n     \"\"\"\n     Escape all the HTML/XML special characters with their unicode escapes, so\n     value is safe to be output anywhere except for inside a tag attribute. Wrap\n@@ -69,6 +69,11 @@ def json_script(value, element_id):\n     \"\"\"\n     from django.core.serializers.json import DjangoJSONEncoder\n     json_str = json.dumps(value, cls=DjangoJSONEncoder).translate(_json_script_escapes)\n+    if element_id is None:\n+        return format_html(\n+            '<script type=\"application/json\">{}</script>',\n+            mark_safe(json_str),\n+        )\n     return format_html(\n         '<script id=\"{}\" type=\"application/json\">{}</script>',\n         element_id, mark_safe(json_str)\ndiff --git a/docs/ref/templates/builtins.txt b/docs/ref/templates/builtins.txt\nindex 2edfd65c7b..101ce12c73 100644\n--- a/docs/ref/templates/builtins.txt\n+++ b/docs/ref/templates/builtins.txt\n@@ -1832,7 +1832,7 @@ If ``value`` is the list ``['a', 'b', 'c']``, the output will be the string\n Safely outputs a Python object as JSON, wrapped in a ``<script>`` tag, ready\n for use with JavaScript.\n \n-**Argument:** HTML \"id\" of the ``<script>`` tag.\n+**Argument:** Optional HTML \"id\" of the ``<script>`` tag.\n \n For example::\n \n@@ -1850,6 +1850,12 @@ The resulting data can be accessed in JavaScript like this:\n \n     const value = JSON.parse(document.getElementById('hello-data').textContent);\n \n+If no ``id`` is needed, the argument can be omitted:\n+\n+.. code-block:: django\n+\n+    {{ value|json_script }}\n+\n XSS attacks are mitigated by escaping the characters \"<\", \">\" and \"&\". For\n example if ``value`` is ``{'hello': 'world</script>&amp;'}``, the output is:\n \ndiff --git a/docs/releases/4.1.txt b/docs/releases/4.1.txt\nindex 7bfb527104..6a3c376c86 100644\n--- a/docs/releases/4.1.txt\n+++ b/docs/releases/4.1.txt\n@@ -210,7 +210,8 @@ Signals\n Templates\n ~~~~~~~~~\n \n-* ...\n+* The :tfilter:`json_script` filter no longer requires the ``id`` attribute on\n+  the rendered ``<script>`` tag.\n \n Tests\n ~~~~~\ndiff --git a/tests/template_tests/filter_tests/test_json_script.py b/tests/template_tests/filter_tests/test_json_script.py\nindex 061fe32c12..89247c145e 100644\n--- a/tests/template_tests/filter_tests/test_json_script.py\n+++ b/tests/template_tests/filter_tests/test_json_script.py\n@@ -17,3 +17,16 @@ class JsonScriptTests(SimpleTestCase):\n             '{\"a\": \"testing\\\\r\\\\njson \\'string\\\\\" \\\\u003Cb\\\\u003Eescaping\\\\u003C/b\\\\u003E\"}'\n             '</script>'\n         )\n+\n+    @setup({'json-tag02': '{{ value|json_script }}'})\n+    def test_without_element_id(self):\n+        output = self.engine.render_to_string(\n+            'json-tag02',\n+            {'value': {'a': 'testing\\r\\njson \\'string\" <b>escaping</b>'}}\n+        )\n+        self.assertEqual(\n+            output,\n+            '<script type=\"application/json\">'\n+            '{\"a\": \"testing\\\\r\\\\njson \\'string\\\\\" \\\\u003Cb\\\\u003Eescaping\\\\u003C/b\\\\u003E\"}'\n+            '</script>'\n+        )\ndiff --git a/tests/utils_tests/test_html.py b/tests/utils_tests/test_html.py\nindex 909620ea3f..8793451eb4 100644\n--- a/tests/utils_tests/test_html.py\n+++ b/tests/utils_tests/test_html.py\n@@ -173,6 +173,12 @@ class TestUtilsHtml(SimpleTestCase):\n             with self.subTest(arg=arg):\n                 self.assertEqual(json_script(arg, 'test_id'), expected)\n \n+    def test_json_script_without_element_id(self):\n+        self.assertEqual(\n+            json_script({'a': 'testing'}),\n+            '<script type=\"application/json\">{\"a\": \"testing\"}</script>',\n+        )\n+\n     def test_smart_urlquote(self):\n         items = (\n             ('http://\u00f6\u00e4\u00fc.com/', 'http://xn--4ca9at.com/'),\n",
       "finalOutput": {
         "status": "completed",
@@ -1921,153 +1025,27 @@
         "predSteps": [
           {
             "files": [
-              "django/template/defaultfilters.py",
-              "django/utils/html.py",
-              "tests/admin_inlines/tests.py",
-              "tests/template_tests/filter_tests/test_json_script.py",
-              "tests/utils_tests/test_html.py"
+              "django/template/defaultfilters.py"
             ],
             "spans": {
-              "django/utils/html.py": [
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 64,
-                  "end": 64
-                },
-                {
-                  "start": 71,
-                  "end": 71
-                },
-                {
-                  "start": 74,
-                  "end": 74
-                }
-              ],
               "django/template/defaultfilters.py": [
                 {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                }
-              ],
-              "tests/admin_inlines/tests.py": [
-                {
-                  "start": 1598,
-                  "end": 1598
-                },
-                {
-                  "start": 1600,
-                  "end": 1600
-                }
-              ],
-              "tests/utils_tests/test_html.py": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 154,
-                  "end": 154
-                },
-                {
-                  "start": 174,
-                  "end": 174
-                }
-              ],
-              "tests/template_tests/filter_tests/test_json_script.py": [
-                {
-                  "start": 8,
-                  "end": 8
+                  "start": 1,
+                  "end": 140
                 }
               ]
             },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "django/template/defaultfilters.py"
-            ],
-            "spans": {},
             "symbols": {}
           },
           {
             "files": [
               "tests/template_tests/filter_tests/test_json_script.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "django/utils/html.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/utils_tests/test_html.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "django/template/defaultfilters.py",
-              "django/utils/html.py",
-              "docs/ref/templates/builtins.txt"
-            ],
             "spans": {
-              "docs/ref/templates/builtins.txt": [
+              "tests/template_tests/filter_tests/test_json_script.py": [
                 {
-                  "start": 1827,
-                  "end": 1827
-                },
-                {
-                  "start": 1829,
-                  "end": 1829
-                },
-                {
-                  "start": 1839,
-                  "end": 1839
-                }
-              ],
-              "django/template/defaultfilters.py": [
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                }
-              ],
-              "django/utils/html.py": [
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 64,
-                  "end": 64
-                },
-                {
-                  "start": 71,
-                  "end": 71
+                  "start": 1,
+                  "end": 120
                 }
               ]
             },
@@ -2075,40 +1053,86 @@
           },
           {
             "files": [
-              "pyproject.toml",
-              "setup.cfg",
-              "tests/runtests.py",
-              "tox.ini"
+              "django/utils/html.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/utils/html.py": [
+                {
+                  "start": 1,
+                  "end": 140
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/utils_tests/test_html.py"
+            ],
+            "spans": {
+              "tests/utils_tests/test_html.py": [
+                {
+                  "start": 140,
+                  "end": 240
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/README.rst"
             ],
-            "spans": {},
+            "spans": {
+              "tests/README.rst": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "docs/ref/templates/builtins.txt"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "docs/releases"
-            ],
-            "spans": {},
+            "spans": {
+              "docs/ref/templates/builtins.txt": [
+                {
+                  "start": 1815,
+                  "end": 1865
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "django/__init__.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/__init__.py": [
+                {
+                  "start": 1,
+                  "end": 80
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "docs/releases/4.1.txt"
+            ],
+            "spans": {
+              "docs/releases/4.1.txt": [
+                {
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -2120,24 +1144,13 @@
           },
           {
             "files": [
-              "django/template/defaultfilters.py",
-              "django/utils/html.py"
+              "django/template/defaultfilters.py"
             ],
             "spans": {
               "django/template/defaultfilters.py": [
                 {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                }
-              ],
-              "django/utils/html.py": [
-                {
-                  "start": 64,
-                  "end": 64
+                  "start": 80,
+                  "end": 95
                 }
               ]
             },
@@ -2145,111 +1158,13 @@
           },
           {
             "files": [
-              "django/contrib/staticfiles/handlers.py",
-              "django/core/cache/backends/base.py",
-              "django/core/handlers/asgi.py",
-              "django/core/handlers/base.py",
-              "django/core/handlers/exception.py",
-              "django/test/client.py",
-              "django/test/signals.py",
-              "django/test/testcases.py",
-              "django/urls/base.py",
-              "django/urls/resolvers.py",
-              "django/utils/connection.py",
-              "django/utils/deprecation.py",
-              "django/utils/timezone.py",
-              "django/utils/translation/reloader.py",
-              "django/utils/translation/trans_real.py"
+              "django/utils/html.py"
             ],
             "spans": {
-              "django/test/testcases.py": [
+              "django/utils/html.py": [
                 {
-                  "start": 21,
-                  "end": 21
-                }
-              ],
-              "django/test/signals.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/test/client.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "django/contrib/staticfiles/handlers.py": [
-                {
-                  "start": 4,
-                  "end": 4
-                }
-              ],
-              "django/utils/timezone.py": [
-                {
-                  "start": 17,
-                  "end": 17
-                }
-              ],
-              "django/urls/base.py": [
-                {
-                  "start": 3,
-                  "end": 3
-                }
-              ],
-              "django/utils/connection.py": [
-                {
-                  "start": 1,
-                  "end": 1
-                }
-              ],
-              "django/utils/deprecation.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/urls/resolvers.py": [
-                {
-                  "start": 16,
-                  "end": 16
-                }
-              ],
-              "django/utils/translation/reloader.py": [
-                {
-                  "start": 3,
-                  "end": 3
-                }
-              ],
-              "django/utils/translation/trans_real.py": [
-                {
-                  "start": 9,
-                  "end": 9
-                }
-              ],
-              "django/core/handlers/base.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/core/handlers/asgi.py": [
-                {
-                  "start": 6,
-                  "end": 6
-                }
-              ],
-              "django/core/handlers/exception.py": [
-                {
-                  "start": 6,
-                  "end": 6
-                }
-              ],
-              "django/core/cache/backends/base.py": [
-                {
-                  "start": 5,
-                  "end": 5
+                  "start": 60,
+                  "end": 82
                 }
               ]
             },
@@ -2257,237 +1172,98 @@
           },
           {
             "files": [
-              "<script type=\"application/json\">{\"a\": \"testing\"}</script>"
+              "tests/utils_tests/test_html.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/utils_tests/test_html.py": [
+                {
+                  "start": 150,
+                  "end": 185
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "Engine().from_string({{ value|json_script }}).render(Context({value:"
+              "docs/releases/4.1.txt"
             ],
-            "spans": {},
+            "spans": {
+              "docs/releases/4.1.txt": [
+                {
+                  "start": 208,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/template_tests/filter_tests/test_json_script.py"
+            ],
+            "spans": {
+              "tests/template_tests/filter_tests/test_json_script.py": [
+                {
+                  "start": 1,
+                  "end": 40
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "docs/ref/templates/builtins.txt"
+            ],
+            "spans": {
+              "docs/ref/templates/builtins.txt": [
+                {
+                  "start": 1830,
+                  "end": 1858
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "<script type=\"application/json\">{\"a\": \"testing\"}</script>",
-          "Engine().from_string({{ value|json_script }}).render(Context({value:",
-          "django/__init__.py",
-          "django/contrib/staticfiles/handlers.py",
-          "django/core/cache/backends/base.py",
-          "django/core/handlers/asgi.py",
-          "django/core/handlers/base.py",
-          "django/core/handlers/exception.py",
           "django/template/defaultfilters.py",
-          "django/test/client.py",
-          "django/test/signals.py",
-          "django/test/testcases.py",
-          "django/urls/base.py",
-          "django/urls/resolvers.py",
-          "django/utils/connection.py",
-          "django/utils/deprecation.py",
           "django/utils/html.py",
-          "django/utils/timezone.py",
-          "django/utils/translation/reloader.py",
-          "django/utils/translation/trans_real.py",
           "docs/ref/templates/builtins.txt",
-          "docs/releases",
           "docs/releases/4.1.txt",
-          "pyproject.toml",
-          "setup.cfg",
-          "tests/README.rst",
-          "tests/admin_inlines/tests.py",
-          "tests/runtests.py",
           "tests/template_tests/filter_tests/test_json_script.py",
-          "tests/utils_tests/test_html.py",
-          "tox.ini"
+          "tests/utils_tests/test_html.py"
         ],
         "predSpans": {
           "django/utils/html.py": [
             {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 64,
-              "end": 64
-            },
-            {
               "start": 64,
               "end": 80
-            },
-            {
-              "start": 71,
-              "end": 71
-            },
-            {
-              "start": 74,
-              "end": 74
             }
           ],
           "django/template/defaultfilters.py": [
             {
-              "start": 16,
-              "end": 16
-            },
-            {
               "start": 85,
               "end": 91
-            },
-            {
-              "start": 86,
-              "end": 86
-            },
-            {
-              "start": 91,
-              "end": 91
-            }
-          ],
-          "tests/admin_inlines/tests.py": [
-            {
-              "start": 1598,
-              "end": 1598
-            },
-            {
-              "start": 1600,
-              "end": 1600
             }
           ],
           "tests/utils_tests/test_html.py": [
             {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 154,
-              "end": 154
-            },
-            {
               "start": 154,
               "end": 180
-            },
-            {
-              "start": 174,
-              "end": 174
             }
           ],
           "tests/template_tests/filter_tests/test_json_script.py": [
             {
               "start": 6,
               "end": 32
-            },
-            {
-              "start": 8,
-              "end": 8
             }
           ],
           "docs/ref/templates/builtins.txt": [
             {
-              "start": 1827,
-              "end": 1827
-            },
-            {
-              "start": 1829,
-              "end": 1829
-            },
-            {
               "start": 1832,
               "end": 1857
-            },
-            {
-              "start": 1839,
-              "end": 1839
-            }
-          ],
-          "django/test/testcases.py": [
-            {
-              "start": 21,
-              "end": 21
-            }
-          ],
-          "django/test/signals.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/test/client.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "django/contrib/staticfiles/handlers.py": [
-            {
-              "start": 4,
-              "end": 4
-            }
-          ],
-          "django/utils/timezone.py": [
-            {
-              "start": 17,
-              "end": 17
-            }
-          ],
-          "django/urls/base.py": [
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "django/utils/connection.py": [
-            {
-              "start": 1,
-              "end": 1
-            }
-          ],
-          "django/utils/deprecation.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/urls/resolvers.py": [
-            {
-              "start": 16,
-              "end": 16
-            }
-          ],
-          "django/utils/translation/reloader.py": [
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "django/utils/translation/trans_real.py": [
-            {
-              "start": 9,
-              "end": 9
-            }
-          ],
-          "django/core/handlers/base.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/core/handlers/asgi.py": [
-            {
-              "start": 6,
-              "end": 6
-            }
-          ],
-          "django/core/handlers/exception.py": [
-            {
-              "start": 6,
-              "end": 6
-            }
-          ],
-          "django/core/cache/backends/base.py": [
-            {
-              "start": 5,
-              "end": 5
             }
           ],
           "docs/releases/4.1.txt": [
@@ -2514,195 +1290,150 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.3333333333333333,
+              "symbol": 0.16666666666666666,
+              "span": 0.14925954793452845,
+              "line": 0.208955223880597
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.3333333333333333,
+              "symbol": 0.16666666666666666,
+              "span": 0.14925954793452845,
+              "line": 0.208955223880597
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.6666666666666666,
+              "symbol": 0.6666666666666666,
+              "span": 0.5837879968823071,
+              "line": 0.6865671641791045
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 5,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 14,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 15,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
-            }
-          },
-          {
-            "step": 16,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
-            }
-          },
-          {
-            "step": 17,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
-            }
-          },
-          {
-            "step": 18,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
-            }
-          },
-          {
-            "step": 19,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
-            }
-          },
-          {
-            "step": 20,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.6666666666666666,
-              "span": 0.17459080280592362,
-              "line": 0.13432835820895522
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.8,
-          "symbol": 0.5333333333333332,
-          "span": 0.1396726422447389,
-          "line": 0.10746268656716415
+          "file": 0.888888888888889,
+          "symbol": 0.8666666666666667,
+          "span": 0.858820472850091,
+          "line": 0.8736318407960199
         },
         "redundancy": {
-          "file": 0.2432432432432432,
-          "symbol": 0.36363636363636365,
-          "span": 0.23072687224669608,
-          "line": 0.22499999999999998
+          "file": 0.4666666666666667,
+          "symbol": 0.22916666666666663,
+          "span": 0.18591515917529033,
+          "line": 0.12774613506916188
         }
       },
       "fixOverlap": {
@@ -2721,28 +1452,28 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/5e6ff1853a3f006d6ef6/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5e6ff1853a3f006d6ef6/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/5e6ff1853a3f006d6ef6/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/5e6ff1853a3f006d6ef6/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
@@ -2836,12 +1567,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/utils_tests/test_html.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/utils_tests/test_html.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/template_tests/filter_tests/test_json_script.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/template_tests/filter_tests/test_json_script.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2961,22 +1710,58 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/django/utils/html.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/django/utils/html.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/django/template/defaultfilters.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/django/template/defaultfilters.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/docs/ref/templates/builtins.txt",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/docs/ref/templates/builtins.txt",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/docs/releases/4.1.txt",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/docs/releases/4.1.txt",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

@@ -3,7 +3,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, ChevronRight, Eye, Filter } from "lucide-react";
 
 import type { ComparisonCard, ComparisonInstance } from "@/data/comparisons";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { buildInstanceRows, instanceContextF1 } from "@/components/comparison/instance-data";
 import { compactInstanceName } from "@/components/comparison/instance-naming";
@@ -310,9 +310,15 @@ export function InstanceResultsSection({
                     <SortableMetricCell value={rowMetricValue(row, "blockF1", Boolean(comparisonPair))} metricKey="blockF1" />
                     <SortableMetricCell value={rowMetricValue(row, "steps", Boolean(comparisonPair))} metricKey="steps" />
                     <TableCell>
-                      <Button variant="outline" size="icon" className="h-8 w-8" aria-label={`View details for ${row.instanceId}`} onClick={() => { window.location.hash = `#/comparisons/${comparison.id}/instances/${encodeURIComponent(row.instanceId)}`; }}>
+                      <a
+                        href={`#/comparisons/${comparison.id}/instances/${encodeURIComponent(row.instanceId)}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className={cn(buttonVariants({ variant: "outline", size: "icon" }), "h-8 w-8")}
+                        aria-label={`View details for ${row.instanceId}`}
+                      >
                         <Eye className="h-4 w-4" />
-                      </Button>
+                      </a>
                     </TableCell>
                   </TableRow>
                   {isExpanded ? (

@@ -9,7 +9,13 @@ export function instanceContextF1(instance: ComparisonInstance | undefined): num
   const fileMetrics = coveragePrecision(instance.quality.file.predSize, instance.quality.file.goldSize, instance.quality.file.intersection);
   const symbolMetrics = coveragePrecision(instance.quality.symbol.predSize, instance.quality.symbol.goldSize, instance.quality.symbol.intersection);
   const spanMetrics = coveragePrecision(instance.quality.span.predSize, instance.quality.span.goldSize, instance.quality.span.intersection);
-  return (f1(fileMetrics.coverage, fileMetrics.precision) + f1(symbolMetrics.coverage, symbolMetrics.precision) + f1(spanMetrics.coverage, spanMetrics.precision)) / 3;
+  const lineMetrics = coveragePrecision(instance.quality.line.predSize, instance.quality.line.goldSize, instance.quality.line.intersection);
+  return (
+    f1(fileMetrics.coverage, fileMetrics.precision) +
+    f1(spanMetrics.coverage, spanMetrics.precision) +
+    f1(lineMetrics.coverage, lineMetrics.precision) +
+    f1(symbolMetrics.coverage, symbolMetrics.precision)
+  ) / 4;
 }
 
 function instanceContextRecallPrecision(instance: ComparisonInstance | undefined): { recall: number; precision: number } | null {
@@ -17,9 +23,35 @@ function instanceContextRecallPrecision(instance: ComparisonInstance | undefined
   const fileMetrics = coveragePrecision(instance.quality.file.predSize, instance.quality.file.goldSize, instance.quality.file.intersection);
   const symbolMetrics = coveragePrecision(instance.quality.symbol.predSize, instance.quality.symbol.goldSize, instance.quality.symbol.intersection);
   const spanMetrics = coveragePrecision(instance.quality.span.predSize, instance.quality.span.goldSize, instance.quality.span.intersection);
+  const lineMetrics = coveragePrecision(instance.quality.line.predSize, instance.quality.line.goldSize, instance.quality.line.intersection);
   return {
-    recall: (fileMetrics.coverage + symbolMetrics.coverage + spanMetrics.coverage) / 3,
-    precision: (fileMetrics.precision + symbolMetrics.precision + spanMetrics.precision) / 3,
+    recall: (fileMetrics.coverage + spanMetrics.coverage + lineMetrics.coverage + symbolMetrics.coverage) / 4,
+    precision: (fileMetrics.precision + spanMetrics.precision + lineMetrics.precision + symbolMetrics.precision) / 4,
+  };
+}
+
+function terminalTrajectoryCoverage(instance: ComparisonInstance | undefined, level: "file" | "symbol" | "span" | "line"): number | null {
+  if (!instance || (instance.artifacts && instance.artifacts.evaluationStatus !== "valid")) return null;
+  if (!instance.evaluatedTrajectory) return null;
+  const steps = (instance.evaluatedTrajectory?.steps ?? []).filter((step) => !step.isSkillRead);
+  const values = steps
+    .map((step) => step.coverage[level])
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (values.length === 0) return 0;
+  return Math.min(Math.max(values[values.length - 1], 0), 1);
+}
+
+function instanceTrajectoryGoldFound(instance: ComparisonInstance | undefined): number | null {
+  const values = (["file", "span", "line", "symbol"] as const)
+    .map((level) => terminalTrajectoryCoverage(instance, level))
+    .filter((value): value is number => value !== null);
+  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+
+function formatTrajectoryLevel(instance: ComparisonInstance | undefined, level: "file" | "symbol" | "span" | "line") {
+  const value = terminalTrajectoryCoverage(instance, level);
+  return {
+    goldFound: value !== null ? formatMetric(value) : undefined,
   };
 }
 
@@ -80,13 +112,14 @@ export function buildInstanceVariant(variant: ComparisonVariant, instance: Compa
   const partialRuns = status === "partial" ? 1 : 0;
   const failures = status && !["completed", "partial", "skipped"].includes(status) ? 1 : 0;
   const hasArtifactData = Boolean(instance?.artifacts);
-  const hasValidEvaluation = instance?.artifacts ? instance.artifacts.evaluationStatus === "valid" : true;
+  const hasValidEvaluation = instance ? (instance.artifacts ? instance.artifacts.evaluationStatus === "valid" : true) : false;
   const fileF1 = metricF1(instance?.quality.file);
   const symbolF1 = metricF1(instance?.quality.symbol);
   const spanF1 = metricF1(instance?.quality.span);
   const lineF1 = metricF1(instance?.quality.line);
   const contextF1 = instanceContextF1(instance);
   const contextRecallPrecision = instanceContextRecallPrecision(instance);
+  const trajectoryGoldFound = instanceTrajectoryGoldFound(instance);
 
   return {
     ...variant,
@@ -120,6 +153,7 @@ export function buildInstanceVariant(variant: ComparisonVariant, instance: Compa
         contextF1: contextF1 !== null ? formatMetric(contextF1) : undefined,
         contextRecall: contextRecallPrecision ? formatMetric(contextRecallPrecision.recall) : undefined,
         contextPrecision: contextRecallPrecision ? formatMetric(contextRecallPrecision.precision) : undefined,
+        trajectoryGoldFound: trajectoryGoldFound !== null ? formatMetric(trajectoryGoldFound) : undefined,
         fileF1: hasValidEvaluation && instance ? formatMetric(fileF1) : undefined,
         symbolF1: hasValidEvaluation && instance ? formatMetric(symbolF1) : undefined,
         spanF1: hasValidEvaluation && instance ? formatMetric(spanF1) : undefined,
@@ -130,6 +164,14 @@ export function buildInstanceVariant(variant: ComparisonVariant, instance: Compa
               symbol: formatContextLevelMetrics(instance.quality.symbol),
               block: formatContextLevelMetrics(instance.quality.span),
               line: formatContextLevelMetrics(instance.quality.line),
+            }
+          : undefined,
+        trajectoryContextLevels: hasValidEvaluation && instance
+          ? {
+              file: formatTrajectoryLevel(instance, "file"),
+              symbol: formatTrajectoryLevel(instance, "symbol"),
+              block: formatTrajectoryLevel(instance, "span"),
+              line: formatTrajectoryLevel(instance, "line"),
             }
           : undefined,
         fixOverlapVsGold: fixOverlapSummaryFromInstance(instance),
@@ -148,6 +190,8 @@ export function buildInstanceVariant(variant: ComparisonVariant, instance: Compa
         commandExecutions: typeof instance?.resources.commandExecutions === "number" ? String(instance.resources.commandExecutions) : undefined,
         readToolCalls: typeof instance?.resources.readToolCalls === "number" ? String(instance.resources.readToolCalls) : undefined,
         editToolCalls: typeof instance?.resources.editToolCalls === "number" ? String(instance.resources.editToolCalls) : undefined,
+        rawTraceEvents: typeof instance?.resources.rawTraceEvents === "number" ? String(instance.resources.rawTraceEvents) : undefined,
+        rawAgentActions: typeof instance?.resources.rawAgentActions === "number" ? String(instance.resources.rawAgentActions) : undefined,
         cost: typeof instance?.resources.costUsd === "number" ? formatCurrency(instance.resources.costUsd) : undefined,
       },
       skills: {

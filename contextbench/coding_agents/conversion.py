@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-04-17 from upstream ContextBench.
 # Summary of changes: resolve task-result record paths robustly, tighten provenance source attribution, and keep final context scoring explicit.
 
@@ -241,6 +242,8 @@ def _clean_relative_context_path(value: str) -> str:
         return ""
     if normalized.startswith("<worktree>/"):
         normalized = normalized[len("<worktree>/") :]
+    elif normalized.startswith("<"):
+        return ""
     while normalized.startswith("./"):
         normalized = normalized[2:]
     if not normalized:
@@ -249,6 +252,13 @@ def _clean_relative_context_path(value: str) -> str:
     if posix_path.is_absolute() or normalized in {".", ".."}:
         return ""
     if any(part in {"", ".", ".."} for part in posix_path.parts):
+        return ""
+    parts = posix_path.parts
+    if any(part == ".agents" for part in parts):
+        return ""
+    if parts[:2] == ("home", ".agents"):
+        return ""
+    if ".cache" in parts and any(part in {"agent-runtimes", "superpowers"} for part in parts):
         return ""
     return posix_path.as_posix()
 

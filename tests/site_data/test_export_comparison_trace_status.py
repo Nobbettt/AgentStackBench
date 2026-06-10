@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from scripts.export_comparison_data import (
     ComparisonExportError,
     _extract_trace_entries,
     _trace_action_counts,
+    _trace_entry_counts,
     _extract_skill_counts,
     build_comparison_export,
     build_comparison_payload,
@@ -172,6 +174,100 @@ def test_extract_trace_entries_renders_codex_mcp_tool_calls() -> None:
             },
         }
     ]
+
+
+def test_extract_trace_entries_preserves_codex_file_change_paths() -> None:
+    raw_response = {
+        "agent": "codex",
+        "events": [
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "file_change",
+                    "changes": [
+                        {"path": "pkg/a.go", "kind": "update"},
+                        {"path": "pkg/b.go", "kind": "create"},
+                    ],
+                    "status": "completed",
+                },
+            },
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "file_change",
+                    "changes": [{"path": "pkg/c.go", "kind": "update"}],
+                    "status": "completed",
+                },
+            },
+        ],
+    }
+
+    entries = _extract_trace_entries(raw_response, sanitize_context=SanitizationContext())
+
+    assert entries == [
+        {
+            "kind": "file_change",
+            "status": "completed",
+            "payload": {
+                "changes": [
+                    {"path": "pkg/a.go", "kind": "update"},
+                    {"path": "pkg/b.go", "kind": "create"},
+                ],
+            },
+        },
+        {
+            "kind": "file_change",
+            "status": "completed",
+            "payload": {
+                "changes": [{"path": "pkg/c.go", "kind": "update"}],
+                "path": "pkg/c.go",
+                "kind": "update",
+            },
+        },
+    ]
+
+
+def test_trace_entry_counts_split_visible_rows_from_agent_actions() -> None:
+    entries = [
+        {"kind": "assistant_message", "text": "I will inspect the repo"},
+        {"kind": "todo_list", "payload": {"items": []}},
+        {"kind": "command_execution", "command": "rg bug"},
+        {"kind": "tool_use", "command": "mcp__cortex__context_search"},
+        {"kind": "tool_result", "command": "Result for orphaned-tool"},
+        {"kind": "file_change", "payload": {"path": "a.py"}},
+    ]
+
+    assert _trace_entry_counts(entries) == {
+        "rawTraceEvents": 6,
+        "rawAgentActions": 3,
+    }
+
+
+def test_raw_trace_counts_match_exported_trace_entries() -> None:
+    raw_response = {
+        "agent": "codex",
+        "events": [
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": f"echo {index}",
+                    "aggregated_output": "",
+                    "status": "completed",
+                    "exit_code": 0,
+                },
+            }
+            for index in range(125)
+        ],
+    }
+
+    entries = _extract_trace_entries(raw_response, sanitize_context=SanitizationContext())
+
+    assert len(entries) == 125
+    assert _trace_entry_counts(entries) == {
+        "rawTraceEvents": 125,
+        "rawAgentActions": 125,
+    }
 
 
 def test_trace_action_counts_split_claude_tool_buckets() -> None:

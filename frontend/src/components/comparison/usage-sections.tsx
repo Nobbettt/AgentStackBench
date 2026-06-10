@@ -4,7 +4,8 @@ import { Bar, BarChart, CartesianGrid, LabelList, ResponsiveContainer, XAxis, YA
 
 import type { ComparisonCard } from "@/data/comparisons";
 import { formatPercentDelta, formatSignedFixed, getComparisonPair } from "@/components/comparison/format";
-import { ComparisonSectionShell, DeltaIndicator, DeltaSectionLabel, HelpIcon } from "@/components/comparison/shared";
+import { getMetricSignificance } from "@/components/comparison/significance";
+import { ComparisonSectionShell, DeltaIndicator, DeltaSectionLabel, HelpIcon, SignificanceBadge } from "@/components/comparison/shared";
 import type { ComparisonResultsViewMode, DeltaDisplayMode, MetricDelta } from "@/components/comparison/types";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 
@@ -65,6 +66,7 @@ function UsageSection({
             const delta = showDeltas
               ? usageDelta(kind, comparisonPair.baseline, comparisonPair.treatment, deltaDisplayMode)
               : null;
+            const significance = showDeltas ? getMetricSignificance(comparison, kind === "skills" ? "skillInvocations" : "toolInvocations") : null;
             return (
               <div key={variant.label}>
                 <div className="mb-4 text-sm font-medium text-muted-foreground">{variant.name}</div>
@@ -75,7 +77,12 @@ function UsageSection({
                   </div>
                   <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
                     <div className="font-medium">{(usage?.averageInvocationsPerRun ?? 0).toFixed(2)}</div>
-                    {delta ? <DeltaIndicator label={delta.label} delta={delta.delta} tone={delta.tone} /> : null}
+                    {delta ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <DeltaIndicator label={delta.label} delta={delta.delta} tone={delta.tone} />
+                        <SignificanceBadge stat={significance} />
+                      </div>
+                    ) : null}
                   </div>
                 </div>
                 <UsageBreakdownChart entries={usage?.byType ?? []} />

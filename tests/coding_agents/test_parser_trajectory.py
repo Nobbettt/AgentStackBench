@@ -1,5 +1,6 @@
-# Fork note: Modified by Norbert Laszlo on 2026-04-17 from upstream ContextBench.
-# Summary of changes: cover safe repo-root path inference, trace guards, and effective file normalization for coding-agent parsers.
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-09 from upstream ContextBench.
+# Summary of changes: cover safe repo-root path inference, conservative search inference, trace guards, and effective file normalization for coding-agent parsers.
 
 from __future__ import annotations
 
@@ -309,7 +310,7 @@ def test_claude_parser_parses_observed_raw_response_fixture(fixtures_root) -> No
         }
     ]
 
-def test_codex_parser_propagates_trace_inference_meta(tmp_path) -> None:
+def test_codex_parser_ignores_search_output_environment_variables(tmp_path) -> None:
     parser = CodexAgentParser()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -333,8 +334,7 @@ def test_codex_parser_propagates_trace_inference_meta(tmp_path) -> None:
 
     inferred = parser.infer_trajectory_data(raw_response, record={"workspace_path": str(workspace)})
 
-    assert inferred is not None
-    assert inferred["trace_inference_meta"]["dropped_env_var_lines"] >= 1
+    assert inferred is None
 
 def test_codex_parser_infers_trajectory_from_command_events() -> None:
     parser = CodexAgentParser()
@@ -402,7 +402,7 @@ def test_codex_parser_infers_trajectory_from_command_events() -> None:
 
     assert traj is not None
     assert traj["pred_files"] == ["sklearn/impute/_iterative.py"]
-    assert traj["pred_spans"]["sklearn/impute/_iterative.py"][0]["start"] == 120
+    assert traj["pred_spans"]["sklearn/impute/_iterative.py"][0]["start"] == 115
     assert traj["pred_spans"]["sklearn/impute/_iterative.py"][-1]["end"] == 123
 
 def test_claude_parser_infers_trajectory_from_verbose_tool_history() -> None:
@@ -508,6 +508,47 @@ def test_claude_parser_infers_trajectory_from_verbose_tool_history() -> None:
     assert traj["pred_spans"]["sklearn/impute/_iterative.py"][-1]["end"] == 123
     assert [call["tool_name"] for call in tool_calls] == ["Grep", "Read", "Edit"]
     assert tool_calls[0]["payload"]["result"]["content_chars"] == 58
+
+
+def test_claude_parser_ignores_directory_scoped_grep_output_as_context() -> None:
+    parser = ClaudeAgentParser()
+    raw_response = {
+        "agent": "claude",
+        "response_format": "json",
+        "response": [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "grep-1",
+                            "name": "Grep",
+                            "input": {
+                                "pattern": "fill_value",
+                                "path": "/tmp/workspace/sklearn",
+                                "output_mode": "content",
+                            },
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "grep-1",
+                            "content": "sklearn/impute/_iterative.py:120: fill_value\n",
+                        }
+                    ]
+                },
+            },
+        ],
+    }
+
+    assert parser.infer_trajectory_data(raw_response, record={"workspace_path": "/tmp/workspace"}) is None
 
 
 def test_claude_parser_infers_trajectory_from_generic_mcp_tool_result() -> None:
@@ -677,4 +718,4 @@ def test_convert_run_record_keeps_inferred_codex_trajectory_out_of_empty_final_c
     assert converted["traj_data"]["pred_files"] == []
     assert converted["traj_data"]["pred_spans"] == {}
     assert converted["traj_data"]["pred_steps"][0]["files"] == ["sklearn/impute/_iterative.py"]
-    assert converted["traj_data"]["pred_steps"][0]["spans"]["sklearn/impute/_iterative.py"][0]["start"] == 120
+    assert converted["traj_data"]["pred_steps"][0]["spans"] == {}

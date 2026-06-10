@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-07 from upstream ContextBench.
+# Summary of changes: support normalized final-context files and line spans for benchmark exports.
+
 """Parse gold annotations."""
 
 import json
@@ -85,8 +89,15 @@ class Gold:
         
         Returns {file: [(start_line, end_line)]} where lines are inclusive.
         """
+        return self._line_spans_for_items(self.init)
+
+    def line_spans(self) -> Dict[str, List[Tuple[int, int]]]:
+        """Get merged line intervals per file from init+add context."""
+        return self._line_spans_for_items(self.init + self.add)
+
+    def _line_spans_for_items(self, ctx_list: List[dict]) -> Dict[str, List[Tuple[int, int]]]:
         result = {}
-        for item in self.init:
+        for item in ctx_list:
             file_path = _normalize_rel_path(item.get('file', ''))
             if not file_path:
                 continue
@@ -233,4 +244,3 @@ class GoldLoader:
     def size(self) -> int:
         """Number of indexed IDs."""
         return len(self.index) if self.index else len(self.cache)
-

@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-19T07:57:56Z",
       "completedAt": "2026-05-19T08:02:12Z",
       "durationMs": 255798,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 995171,
@@ -25,53 +40,75 @@
         "total_tokens": 1007102,
         "cache_read_input_tokens": 825216
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 36,
+        "readToolCalls": 0,
+        "editToolCalls": 1
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/sphinx/ext/napoleon/__init__.py b/sphinx/ext/napoleon/__init__.py\nindex 10b1ff3a3..4bff3389b 100644\n--- a/sphinx/ext/napoleon/__init__.py\n+++ b/sphinx/ext/napoleon/__init__.py\n@@ -13,6 +13,7 @@ from typing import Any, Dict, List\n from sphinx import __display_version__ as __version__\n from sphinx.application import Sphinx\n from sphinx.ext.napoleon.docstring import GoogleDocstring, NumpyDocstring\n+from sphinx.util import inspect\n \n \n class Config:\n@@ -426,7 +427,8 @@ def _skip_member(app: Sphinx, what: str, name: str, obj: Any,\n     if name != '__weakref__' and has_doc and is_member:\n         cls_is_owner = False\n         if what == 'class' or what == 'exception':\n-            qualname = getattr(obj, '__qualname__', '')\n+            target = inspect.unwrap_all(obj)\n+            qualname = getattr(target, '__qualname__', '')\n             cls_path, _, _ = qualname.rpartition('.')\n             if cls_path:\n                 try:\n@@ -434,11 +436,11 @@ def _skip_member(app: Sphinx, what: str, name: str, obj: Any,\n                         import importlib\n                         import functools\n \n-                        mod = importlib.import_module(obj.__module__)\n+                        mod = importlib.import_module(target.__module__)\n                         mod_path = cls_path.split('.')\n                         cls = functools.reduce(getattr, mod_path, mod)\n                     else:\n-                        cls = obj.__globals__[cls_path]\n+                        cls = target.__globals__[cls_path]\n                 except Exception:\n                     cls_is_owner = False\n                 else:\ndiff --git a/tests/test_ext_napoleon.py b/tests/test_ext_napoleon.py\nindex 7c3379757..7e1ccf3e6 100644\n--- a/tests/test_ext_napoleon.py\n+++ b/tests/test_ext_napoleon.py\n@@ -11,6 +11,7 @@\n \n import sys\n from collections import namedtuple\n+from functools import wraps\n from unittest import TestCase, mock\n \n from sphinx.application import Sphinx\n@@ -70,6 +71,21 @@ class SampleError(Exception):\n SampleNamedTuple = namedtuple('SampleNamedTuple', 'user_id block_type def_id')\n \n \n+def decorator(func):\n+    @wraps(func)\n+    def wrapper(*args, **kwargs):\n+        return func(*args, **kwargs)\n+\n+    return wrapper\n+\n+\n+class DecoratedInit:\n+    @decorator\n+    def __init__(self):\n+        \"\"\"DecoratedInit.__init__.DOCSTRING\"\"\"\n+        pass\n+\n+\n class ProcessDocstringTest(TestCase):\n     def test_modify_in_place(self):\n         lines = ['Summary line.',\n@@ -170,6 +186,11 @@ class SkipMemberTest(TestCase):\n                         SampleClass.__special_undoc__, True,\n                         'napoleon_include_special_with_doc')\n \n+    def test_class_init_wrapped_doc(self):\n+        self.assertSkip('class', '__init__',\n+                        DecoratedInit.__init__, False,\n+                        'napoleon_include_init_with_doc')\n+\n     def test_exception_private_doc(self):\n         self.assertSkip('exception', '_private_doc',\n                         SampleError._private_doc, False,\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Updated `sphinx.ext.napoleon._skip_member` so class-owner detection unwraps decorated members before resolving `__qualname__`, `__module__`, and `__globals__`. This fixes `napoleon_include_init_with_doc=True` for wrapped `__init__` methods that preserve metadata with `functools.wraps`.\n\nAdded a regression test in `tests/test_ext_napoleon.py` covering a decorated `__init__` and asserting that napoleon includes it when `napoleon_include_init_with_doc` is enabled.\n\nVerification:\n- `python3 -m py_compile sphinx/ext/napoleon/__init__.py tests/test_ext_napoleon.py`\n- Ran a direct functional reproducer against the patched `_skip_member` path; it returned `False` for a wrapped `__init__`, which is the expected include-in-docs behavior.\n\nVerification limits:\n- `python3 -m pytest tests/test_ext_napoleon.py` could not run because `pytest` is not installed.\n- Importing the full Sphinx test target is also blocked here because `docutils` is not installed.",
         "notes": "Full repo-native test execution was not available in this environment because both `pytest` and `docutils` are missing. To compensate, I ran syntax compilation on the edited files and a standalone functional reproducer that loaded the patched napoleon module with minimal stubs and confirmed the wrapped `__init__` case now resolves as documented.",
         "retrievedContextFiles": [
-          "<worktree>/sphinx/ext/napoleon/__init__.py",
-          "<worktree>/tests/test_ext_napoleon.py"
+          "sphinx/ext/napoleon/__init__.py",
+          "tests/test_ext_napoleon.py"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/sphinx/ext/napoleon/__init__.py",
+            "file": "sphinx/ext/napoleon/__init__.py",
             "start": 13,
             "end": 16
           },
           {
-            "file": "<worktree>/sphinx/ext/napoleon/__init__.py",
+            "file": "sphinx/ext/napoleon/__init__.py",
             "start": 425,
             "end": 448
           },
           {
-            "file": "<worktree>/tests/test_ext_napoleon.py",
+            "file": "tests/test_ext_napoleon.py",
             "start": 12,
             "end": 18
           },
           {
-            "file": "<worktree>/tests/test_ext_napoleon.py",
+            "file": "tests/test_ext_napoleon.py",
             "start": 71,
             "end": 86
           },
           {
-            "file": "<worktree>/tests/test_ext_napoleon.py",
+            "file": "tests/test_ext_napoleon.py",
             "start": 189,
             "end": 192
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/sphinx/ext/napoleon/__init__.py",
+            "file": "sphinx/ext/napoleon/__init__.py",
             "name": "_skip_member"
           },
           {
-            "file": "<worktree>/tests/test_ext_napoleon.py",
+            "file": "tests/test_ext_napoleon.py",
             "name": "DecoratedInit"
           },
           {
-            "file": "<worktree>/tests/test_ext_napoleon.py",
+            "file": "tests/test_ext_napoleon.py",
             "name": "SkipMemberTest.test_class_init_wrapped_doc"
           }
         ]
@@ -82,285 +119,63 @@
             "files": [
               "sphinx/ext/autodoc/__init__.py"
             ],
-            "spans": {},
+            "spans": {
+              "sphinx/ext/autodoc/__init__.py": [
+                {
+                  "start": 1180,
+                  "end": 1320
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "sphinx/ext/autodoc/__init__.py",
-              "sphinx/ext/autodoc/mock.py",
-              "sphinx/util/__init__.py",
-              "sphinx/util/inspect.py",
-              "sphinx/util/typing.py"
+              "sphinx/util/inspect.py"
             ],
             "spans": {
-              "sphinx/util/typing.py": [
-                {
-                  "start": 59,
-                  "end": 59
-                },
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 75,
-                  "end": 75
-                },
-                {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 77,
-                  "end": 77
-                },
-                {
-                  "start": 79,
-                  "end": 79
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                },
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 83,
-                  "end": 83
-                },
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                },
-                {
-                  "start": 106,
-                  "end": 106
-                },
-                {
-                  "start": 111,
-                  "end": 111
-                },
-                {
-                  "start": 114,
-                  "end": 114
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 124,
-                  "end": 124
-                },
-                {
-                  "start": 125,
-                  "end": 125
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 128,
-                  "end": 128
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                },
-                {
-                  "start": 132,
-                  "end": 132
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                },
-                {
-                  "start": 134,
-                  "end": 134
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 145,
-                  "end": 145
-                },
-                {
-                  "start": 156,
-                  "end": 156
-                },
-                {
-                  "start": 162,
-                  "end": 162
-                },
-                {
-                  "start": 172,
-                  "end": 172
-                },
-                {
-                  "start": 192,
-                  "end": 192
-                },
-                {
-                  "start": 198,
-                  "end": 198
-                },
-                {
-                  "start": 209,
-                  "end": 209
-                },
-                {
-                  "start": 212,
-                  "end": 212
-                }
-              ],
-              "sphinx/ext/autodoc/mock.py": [
-                {
-                  "start": 41,
-                  "end": 41
-                }
-              ],
-              "sphinx/ext/autodoc/__init__.py": [
-                {
-                  "start": 1325,
-                  "end": 1325
-                },
-                {
-                  "start": 1395,
-                  "end": 1395
-                },
-                {
-                  "start": 1398,
-                  "end": 1398
-                },
-                {
-                  "start": 1400,
-                  "end": 1400
-                },
-                {
-                  "start": 1406,
-                  "end": 1406
-                },
-                {
-                  "start": 1434,
-                  "end": 1434
-                },
-                {
-                  "start": 1489,
-                  "end": 1489
-                }
-              ],
               "sphinx/util/inspect.py": [
                 {
-                  "start": 121,
-                  "end": 121
-                },
-                {
-                  "start": 124,
-                  "end": 124
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                },
-                {
-                  "start": 132,
-                  "end": 132
-                },
-                {
-                  "start": 233,
-                  "end": 233
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 237,
-                  "end": 237
-                },
-                {
-                  "start": 240,
-                  "end": 240
-                },
-                {
-                  "start": 243,
-                  "end": 243
-                },
-                {
-                  "start": 248,
-                  "end": 248
-                },
-                {
-                  "start": 279,
-                  "end": 279
-                },
-                {
-                  "start": 284,
-                  "end": 284
-                },
-                {
-                  "start": 289,
-                  "end": 289
-                },
-                {
-                  "start": 294,
-                  "end": 294
-                },
-                {
-                  "start": 295,
-                  "end": 295
-                },
-                {
-                  "start": 425,
-                  "end": 425
-                },
-                {
-                  "start": 426,
-                  "end": 426
-                },
-                {
-                  "start": 430,
-                  "end": 430
-                },
-                {
-                  "start": 446,
-                  "end": 446
-                }
-              ],
-              "sphinx/util/__init__.py": [
-                {
-                  "start": 583,
-                  "end": 583
-                },
-                {
-                  "start": 605,
-                  "end": 605
-                },
-                {
-                  "start": 607,
-                  "end": 607
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/ext/autodoc/__init__.py"
+            ],
+            "spans": {
+              "sphinx/ext/autodoc/__init__.py": [
+                {
+                  "start": 260,
+                  "end": 420
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/ext/autodoc/__init__.py"
+            ],
+            "spans": {
+              "sphinx/ext/autodoc/__init__.py": [
+                {
+                  "start": 420,
+                  "end": 560
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/ext/autodoc/__init__.py"
+            ],
+            "spans": {},
             "symbols": {}
           },
           {
@@ -372,409 +187,27 @@
           },
           {
             "files": [
-              "sphinx/ext/apidoc.py",
-              "sphinx/ext/autodoc/__init__.py",
-              "sphinx/ext/autodoc/mock.py",
-              "sphinx/ext/autosummary/generate.py",
-              "sphinx/ext/inheritance_diagram.py",
-              "sphinx/ext/napoleon/__init__.py",
-              "sphinx/ext/napoleon/docstring.py",
-              "sphinx/pycode/parser.py",
-              "sphinx/templates/apidoc/module.rst_t",
-              "sphinx/util/__init__.py",
-              "sphinx/util/inspect.py",
-              "sphinx/util/typing.py",
-              "tests/test_util_typing.py"
+              "sphinx/ext/napoleon/__init__.py"
             ],
             "spans": {
-              "sphinx/templates/apidoc/module.rst_t": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "sphinx/pycode/parser.py": [
-                {
-                  "start": 242,
-                  "end": 242
-                },
-                {
-                  "start": 254,
-                  "end": 254
-                },
-                {
-                  "start": 255,
-                  "end": 255
-                },
-                {
-                  "start": 256,
-                  "end": 256
-                },
-                {
-                  "start": 259,
-                  "end": 259
-                },
-                {
-                  "start": 260,
-                  "end": 260
-                },
-                {
-                  "start": 261,
-                  "end": 261
-                },
-                {
-                  "start": 266,
-                  "end": 266
-                },
-                {
-                  "start": 267,
-                  "end": 267
-                },
-                {
-                  "start": 268,
-                  "end": 268
-                },
-                {
-                  "start": 272,
-                  "end": 272
-                },
-                {
-                  "start": 273,
-                  "end": 273
-                },
-                {
-                  "start": 274,
-                  "end": 274
-                },
-                {
-                  "start": 278,
-                  "end": 278
-                },
-                {
-                  "start": 279,
-                  "end": 279
-                },
-                {
-                  "start": 280,
-                  "end": 280
-                }
-              ],
-              "sphinx/ext/inheritance_diagram.py": [
-                {
-                  "start": 232,
-                  "end": 232
-                }
-              ],
               "sphinx/ext/napoleon/__init__.py": [
                 {
-                  "start": 427,
-                  "end": 427
-                },
-                {
-                  "start": 429,
-                  "end": 429
-                },
-                {
-                  "start": 430,
-                  "end": 430
-                },
-                {
-                  "start": 431,
-                  "end": 431
-                },
-                {
-                  "start": 433,
-                  "end": 433
-                },
-                {
-                  "start": 438,
-                  "end": 438
-                },
-                {
-                  "start": 441,
-                  "end": 441
-                },
-                {
-                  "start": 443,
-                  "end": 443
-                },
-                {
-                  "start": 445,
-                  "end": 445
-                },
-                {
-                  "start": 448,
-                  "end": 448
-                },
-                {
-                  "start": 450,
-                  "end": 450
+                  "start": 400,
+                  "end": 470
                 }
-              ],
-              "sphinx/ext/napoleon/docstring.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_ext_napoleon.py"
+            ],
+            "spans": {
+              "tests/test_ext_napoleon.py": [
                 {
-                  "start": 757,
-                  "end": 757
-                }
-              ],
-              "sphinx/ext/autosummary/generate.py": [
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 323,
-                  "end": 323
-                },
-                {
-                  "start": 324,
-                  "end": 324
-                },
-                {
-                  "start": 327,
-                  "end": 327
-                },
-                {
-                  "start": 330,
-                  "end": 330
-                },
-                {
-                  "start": 332,
-                  "end": 332
-                },
-                {
-                  "start": 336,
-                  "end": 336
-                },
-                {
-                  "start": 408,
-                  "end": 408
-                },
-                {
-                  "start": 419,
-                  "end": 419
-                }
-              ],
-              "sphinx/ext/apidoc.py": [
-                {
-                  "start": 139,
-                  "end": 139
-                },
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 147,
-                  "end": 147
-                }
-              ],
-              "sphinx/ext/autodoc/mock.py": [
-                {
-                  "start": 41,
-                  "end": 41
-                }
-              ],
-              "sphinx/ext/autodoc/__init__.py": [
-                {
-                  "start": 1325,
-                  "end": 1325
-                },
-                {
-                  "start": 1395,
-                  "end": 1395
-                },
-                {
-                  "start": 1398,
-                  "end": 1398
-                },
-                {
-                  "start": 1400,
-                  "end": 1400
-                },
-                {
-                  "start": 1406,
-                  "end": 1406
-                },
-                {
-                  "start": 1434,
-                  "end": 1434
-                },
-                {
-                  "start": 1489,
-                  "end": 1489
-                }
-              ],
-              "sphinx/util/typing.py": [
-                {
-                  "start": 59,
-                  "end": 59
-                },
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 75,
-                  "end": 75
-                },
-                {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 77,
-                  "end": 77
-                },
-                {
-                  "start": 79,
-                  "end": 79
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                },
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 83,
-                  "end": 83
-                },
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                },
-                {
-                  "start": 106,
-                  "end": 106
-                },
-                {
-                  "start": 111,
-                  "end": 111
-                },
-                {
-                  "start": 114,
-                  "end": 114
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 124,
-                  "end": 124
-                },
-                {
-                  "start": 125,
-                  "end": 125
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 128,
-                  "end": 128
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                },
-                {
-                  "start": 132,
-                  "end": 132
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                },
-                {
-                  "start": 134,
-                  "end": 134
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 145,
-                  "end": 145
-                },
-                {
-                  "start": 156,
-                  "end": 156
-                },
-                {
-                  "start": 162,
-                  "end": 162
-                },
-                {
-                  "start": 172,
-                  "end": 172
-                },
-                {
-                  "start": 192,
-                  "end": 192
-                },
-                {
-                  "start": 198,
-                  "end": 198
-                },
-                {
-                  "start": 209,
-                  "end": 209
-                },
-                {
-                  "start": 212,
-                  "end": 212
-                }
-              ],
-              "sphinx/util/inspect.py": [
-                {
-                  "start": 427,
-                  "end": 427
-                },
-                {
-                  "start": 428,
-                  "end": 428
-                },
-                {
-                  "start": 429,
-                  "end": 429
-                }
-              ],
-              "sphinx/util/__init__.py": [
-                {
-                  "start": 583,
-                  "end": 583
-                },
-                {
-                  "start": 605,
-                  "end": 605
-                },
-                {
-                  "start": 607,
-                  "end": 607
-                }
-              ],
-              "tests/test_util_typing.py": [
-                {
-                  "start": 25,
-                  "end": 25
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -789,55 +222,27 @@
           },
           {
             "files": [
-              "tests/test_ext_napoleon.py"
+              "sphinx/ext/napoleon/__init__.py"
             ],
-            "spans": {},
+            "spans": {
+              "sphinx/ext/napoleon/__init__.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "tests/conftest.py",
               "tests/test_ext_napoleon.py"
             ],
             "spans": {
-              "tests/conftest.py": [
-                {
-                  "start": 25,
-                  "end": 25
-                }
-              ],
               "tests/test_ext_napoleon.py": [
                 {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 79,
-                  "end": 79
-                },
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 96,
-                  "end": 96
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 131,
-                  "end": 131
-                },
-                {
-                  "start": 134,
-                  "end": 134
-                },
-                {
-                  "start": 137,
-                  "end": 137
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -847,51 +252,39 @@
             "files": [
               "sphinx/application.py"
             ],
-            "spans": {},
+            "spans": {
+              "sphinx/application.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "sphinx/util/__init__.py"
             ],
-            "spans": {},
+            "spans": {
+              "sphinx/util/__init__.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "sphinx/__init__.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "sphinx/util/logging.py",
-              "sphinx/util/typing.py"
-            ],
             "spans": {
-              "sphinx/util/logging.py": [
+              "sphinx/__init__.py": [
                 {
-                  "start": 17,
-                  "end": 17
-                },
-                {
-                  "start": 18,
-                  "end": 18
-                },
-                {
-                  "start": 19,
-                  "end": 19
-                }
-              ],
-              "sphinx/util/typing.py": [
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 16,
-                  "end": 16
+                  "start": 1,
+                  "end": 120
                 }
               ]
             },
@@ -901,570 +294,79 @@
             "files": [
               "sphinx/locale/__init__.py"
             ],
-            "spans": {},
+            "spans": {
+              "sphinx/locale/__init__.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "sphinx/util/logging.py"
             ],
-            "spans": {},
+            "spans": {
+              "sphinx/util/logging.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/ext/napoleon/__init__.py"
+            ],
+            "spans": {
+              "sphinx/ext/napoleon/__init__.py": [
+                {
+                  "start": 1,
+                  "end": 455
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_ext_napoleon.py"
+            ],
+            "spans": {
+              "tests/test_ext_napoleon.py": [
+                {
+                  "start": 1,
+                  "end": 180
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_ext_napoleon.py"
+            ],
+            "spans": {
+              "tests/test_ext_napoleon.py": [
+                {
+                  "start": 180,
+                  "end": 195
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "<worktree>/sphinx/ext/napoleon/__init__.py",
-          "<worktree>/tests/test_ext_napoleon.py",
-          "sphinx/__init__.py",
-          "sphinx/application.py",
-          "sphinx/ext/apidoc.py",
-          "sphinx/ext/autodoc/__init__.py",
-          "sphinx/ext/autodoc/mock.py",
-          "sphinx/ext/autosummary/generate.py",
-          "sphinx/ext/inheritance_diagram.py",
           "sphinx/ext/napoleon/__init__.py",
-          "sphinx/ext/napoleon/docstring.py",
-          "sphinx/locale/__init__.py",
-          "sphinx/pycode/parser.py",
-          "sphinx/templates/apidoc/module.rst_t",
-          "sphinx/util/__init__.py",
-          "sphinx/util/inspect.py",
-          "sphinx/util/logging.py",
-          "sphinx/util/typing.py",
-          "tests/conftest.py",
-          "tests/test_ext_napoleon.py",
-          "tests/test_util_typing.py"
+          "tests/test_ext_napoleon.py"
         ],
         "predSpans": {
-          "sphinx/util/typing.py": [
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 59,
-              "end": 59
-            },
-            {
-              "start": 60,
-              "end": 60
-            },
-            {
-              "start": 75,
-              "end": 75
-            },
-            {
-              "start": 76,
-              "end": 76
-            },
-            {
-              "start": 77,
-              "end": 77
-            },
-            {
-              "start": 79,
-              "end": 79
-            },
-            {
-              "start": 81,
-              "end": 81
-            },
-            {
-              "start": 82,
-              "end": 82
-            },
-            {
-              "start": 83,
-              "end": 83
-            },
-            {
-              "start": 86,
-              "end": 86
-            },
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 103,
-              "end": 103
-            },
-            {
-              "start": 106,
-              "end": 106
-            },
-            {
-              "start": 111,
-              "end": 111
-            },
-            {
-              "start": 114,
-              "end": 114
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 124,
-              "end": 124
-            },
-            {
-              "start": 125,
-              "end": 125
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 128,
-              "end": 128
-            },
-            {
-              "start": 130,
-              "end": 130
-            },
-            {
-              "start": 132,
-              "end": 132
-            },
-            {
-              "start": 133,
-              "end": 133
-            },
-            {
-              "start": 134,
-              "end": 134
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 143,
-              "end": 143
-            },
-            {
-              "start": 145,
-              "end": 145
-            },
-            {
-              "start": 156,
-              "end": 156
-            },
-            {
-              "start": 162,
-              "end": 162
-            },
-            {
-              "start": 172,
-              "end": 172
-            },
-            {
-              "start": 192,
-              "end": 192
-            },
-            {
-              "start": 198,
-              "end": 198
-            },
-            {
-              "start": 209,
-              "end": 209
-            },
-            {
-              "start": 212,
-              "end": 212
-            }
-          ],
-          "sphinx/ext/autodoc/mock.py": [
-            {
-              "start": 41,
-              "end": 41
-            }
-          ],
-          "sphinx/ext/autodoc/__init__.py": [
-            {
-              "start": 1325,
-              "end": 1325
-            },
-            {
-              "start": 1395,
-              "end": 1395
-            },
-            {
-              "start": 1398,
-              "end": 1398
-            },
-            {
-              "start": 1400,
-              "end": 1400
-            },
-            {
-              "start": 1406,
-              "end": 1406
-            },
-            {
-              "start": 1434,
-              "end": 1434
-            },
-            {
-              "start": 1489,
-              "end": 1489
-            }
-          ],
-          "sphinx/util/inspect.py": [
-            {
-              "start": 121,
-              "end": 121
-            },
-            {
-              "start": 124,
-              "end": 124
-            },
-            {
-              "start": 130,
-              "end": 130
-            },
-            {
-              "start": 132,
-              "end": 132
-            },
-            {
-              "start": 233,
-              "end": 233
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 237,
-              "end": 237
-            },
-            {
-              "start": 240,
-              "end": 240
-            },
-            {
-              "start": 243,
-              "end": 243
-            },
-            {
-              "start": 248,
-              "end": 248
-            },
-            {
-              "start": 279,
-              "end": 279
-            },
-            {
-              "start": 284,
-              "end": 284
-            },
-            {
-              "start": 289,
-              "end": 289
-            },
-            {
-              "start": 294,
-              "end": 294
-            },
-            {
-              "start": 295,
-              "end": 295
-            },
-            {
-              "start": 425,
-              "end": 425
-            },
-            {
-              "start": 426,
-              "end": 426
-            },
-            {
-              "start": 427,
-              "end": 427
-            },
-            {
-              "start": 428,
-              "end": 428
-            },
-            {
-              "start": 429,
-              "end": 429
-            },
-            {
-              "start": 430,
-              "end": 430
-            },
-            {
-              "start": 446,
-              "end": 446
-            }
-          ],
-          "sphinx/util/__init__.py": [
-            {
-              "start": 583,
-              "end": 583
-            },
-            {
-              "start": 605,
-              "end": 605
-            },
-            {
-              "start": 607,
-              "end": 607
-            }
-          ],
-          "sphinx/templates/apidoc/module.rst_t": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "sphinx/pycode/parser.py": [
-            {
-              "start": 242,
-              "end": 242
-            },
-            {
-              "start": 254,
-              "end": 254
-            },
-            {
-              "start": 255,
-              "end": 255
-            },
-            {
-              "start": 256,
-              "end": 256
-            },
-            {
-              "start": 259,
-              "end": 259
-            },
-            {
-              "start": 260,
-              "end": 260
-            },
-            {
-              "start": 261,
-              "end": 261
-            },
-            {
-              "start": 266,
-              "end": 266
-            },
-            {
-              "start": 267,
-              "end": 267
-            },
-            {
-              "start": 268,
-              "end": 268
-            },
-            {
-              "start": 272,
-              "end": 272
-            },
-            {
-              "start": 273,
-              "end": 273
-            },
-            {
-              "start": 274,
-              "end": 274
-            },
-            {
-              "start": 278,
-              "end": 278
-            },
-            {
-              "start": 279,
-              "end": 279
-            },
-            {
-              "start": 280,
-              "end": 280
-            }
-          ],
-          "sphinx/ext/inheritance_diagram.py": [
-            {
-              "start": 232,
-              "end": 232
-            }
-          ],
           "sphinx/ext/napoleon/__init__.py": [
-            {
-              "start": 427,
-              "end": 427
-            },
-            {
-              "start": 429,
-              "end": 429
-            },
-            {
-              "start": 430,
-              "end": 430
-            },
-            {
-              "start": 431,
-              "end": 431
-            },
-            {
-              "start": 433,
-              "end": 433
-            },
-            {
-              "start": 438,
-              "end": 438
-            },
-            {
-              "start": 441,
-              "end": 441
-            },
-            {
-              "start": 443,
-              "end": 443
-            },
-            {
-              "start": 445,
-              "end": 445
-            },
-            {
-              "start": 448,
-              "end": 448
-            },
-            {
-              "start": 450,
-              "end": 450
-            }
-          ],
-          "sphinx/ext/napoleon/docstring.py": [
-            {
-              "start": 757,
-              "end": 757
-            }
-          ],
-          "sphinx/ext/autosummary/generate.py": [
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 323,
-              "end": 323
-            },
-            {
-              "start": 324,
-              "end": 324
-            },
-            {
-              "start": 327,
-              "end": 327
-            },
-            {
-              "start": 330,
-              "end": 330
-            },
-            {
-              "start": 332,
-              "end": 332
-            },
-            {
-              "start": 336,
-              "end": 336
-            },
-            {
-              "start": 408,
-              "end": 408
-            },
-            {
-              "start": 419,
-              "end": 419
-            }
-          ],
-          "sphinx/ext/apidoc.py": [
-            {
-              "start": 139,
-              "end": 139
-            },
-            {
-              "start": 143,
-              "end": 143
-            },
-            {
-              "start": 147,
-              "end": 147
-            }
-          ],
-          "tests/test_util_typing.py": [
-            {
-              "start": 25,
-              "end": 25
-            }
-          ],
-          "tests/conftest.py": [
-            {
-              "start": 25,
-              "end": 25
-            }
-          ],
-          "tests/test_ext_napoleon.py": [
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 79,
-              "end": 79
-            },
-            {
-              "start": 82,
-              "end": 82
-            },
-            {
-              "start": 96,
-              "end": 96
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 131,
-              "end": 131
-            },
-            {
-              "start": 134,
-              "end": 134
-            },
-            {
-              "start": 137,
-              "end": 137
-            }
-          ],
-          "sphinx/util/logging.py": [
-            {
-              "start": 17,
-              "end": 17
-            },
-            {
-              "start": 18,
-              "end": 18
-            },
-            {
-              "start": 19,
-              "end": 19
-            }
-          ],
-          "<worktree>/sphinx/ext/napoleon/__init__.py": [
             {
               "start": 13,
               "end": 16
@@ -1474,7 +376,7 @@
               "end": 448
             }
           ],
-          "<worktree>/tests/test_ext_napoleon.py": [
+          "tests/test_ext_napoleon.py": [
             {
               "start": 12,
               "end": 18
@@ -1490,10 +392,10 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/sphinx/ext/napoleon/__init__.py": [
+          "sphinx/ext/napoleon/__init__.py": [
             "_skip_member"
           ],
-          "<worktree>/tests/test_ext_napoleon.py": [
+          "tests/test_ext_napoleon.py": [
             "DecoratedInit",
             "SkipMemberTest.test_class_init_wrapped_doc"
           ]
@@ -1531,28 +433,28 @@
           {
             "step": 4,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.2738944365192582,
-              "line": 0.21052631578947367
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.2738944365192582,
-              "line": 0.21052631578947367
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.2738944365192582,
-              "line": 0.21052631578947367
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
             }
           },
           {
@@ -1560,8 +462,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 0.5,
-              "span": 0.2738944365192582,
-              "line": 0.21052631578947367
+              "span": 0.7403708987161198,
+              "line": 0.6842105263157895
             }
           },
           {
@@ -1569,8 +471,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 0.5,
-              "span": 0.2738944365192582,
-              "line": 0.21052631578947367
+              "span": 0.7403708987161198,
+              "line": 0.6842105263157895
             }
           },
           {
@@ -1578,58 +480,112 @@
             "coverage": {
               "file": 1.0,
               "symbol": 0.5,
-              "span": 0.2738944365192582,
-              "line": 0.21052631578947367
+              "span": 0.7403708987161198,
+              "line": 0.6842105263157895
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.2738944365192582,
-              "line": 0.21052631578947367
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.2738944365192582,
-              "line": 0.21052631578947367
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.2738944365192582,
-              "line": 0.21052631578947367
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.2738944365192582,
-              "line": 0.21052631578947367
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 14,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 15,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 16,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 17,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 18,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 19,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.7692307692307693,
-          "symbol": 0.38461538461538464,
-          "span": 0.21068802809173712,
-          "line": 0.16194331983805668
+          "file": 0.6842105263157895,
+          "symbol": 0.6052631578947368,
+          "span": 0.643216457692019,
+          "line": 0.6343490304709141
         },
         "redundancy": {
-          "file": 0.3870967741935484,
-          "symbol": 0.2321428571428571,
-          "span": 0.2734403282249306,
-          "line": 0.26627218934911245
+          "file": 0.5263157894736843,
+          "symbol": 0.3756613756613757,
+          "span": 0.22851122329396922,
+          "line": 0.22590476190476194
         }
       },
       "fixOverlap": {
@@ -1795,7 +751,18 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/sphinx/ext/napoleon/__init__.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/tests/test_ext_napoleon.py",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "todo_list",
@@ -1988,9 +955,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-19T07:57:54Z",
       "completedAt": "2026-05-19T08:03:50Z",
       "durationMs": 355804,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1781820,
@@ -1999,6 +981,28 @@
         "total_tokens": 1797628,
         "cache_read_input_tokens": 1664384
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 43,
+        "readToolCalls": 0,
+        "editToolCalls": 3
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/sphinx/ext/napoleon/__init__.py b/sphinx/ext/napoleon/__init__.py\nindex 10b1ff3a3..760f6f7ef 100644\n--- a/sphinx/ext/napoleon/__init__.py\n+++ b/sphinx/ext/napoleon/__init__.py\n@@ -430,15 +430,11 @@ def _skip_member(app: Sphinx, what: str, name: str, obj: Any,\n             cls_path, _, _ = qualname.rpartition('.')\n             if cls_path:\n                 try:\n-                    if '.' in cls_path:\n-                        import importlib\n-                        import functools\n-\n-                        mod = importlib.import_module(obj.__module__)\n-                        mod_path = cls_path.split('.')\n-                        cls = functools.reduce(getattr, mod_path, mod)\n-                    else:\n-                        cls = obj.__globals__[cls_path]\n+                    import functools\n+                    import importlib\n+\n+                    mod = importlib.import_module(obj.__module__)\n+                    cls = functools.reduce(getattr, cls_path.split('.'), mod)\n                 except Exception:\n                     cls_is_owner = False\n                 else:\ndiff --git a/tests/test_ext_napoleon.py b/tests/test_ext_napoleon.py\nindex 7c3379757..d8779e55a 100644\n--- a/tests/test_ext_napoleon.py\n+++ b/tests/test_ext_napoleon.py\n@@ -10,6 +10,7 @@\n \"\"\"\n \n import sys\n+import types\n from collections import namedtuple\n from unittest import TestCase, mock\n \n@@ -70,6 +71,24 @@ class SampleError(Exception):\n SampleNamedTuple = namedtuple('SampleNamedTuple', 'user_id block_type def_id')\n \n \n+decorator_module = types.ModuleType('decorator_module')\n+exec('import functools\\n'\n+     '\\n'\n+     'def decorator(func):\\n'\n+     '    @functools.wraps(func)\\n'\n+     '    def wrapper(*args, **kwargs):\\n'\n+     '        return func(*args, **kwargs)\\n'\n+     '\\n'\n+     '    return wrapper\\n', decorator_module.__dict__)\n+\n+\n+class WrappedSampleClass:\n+    @decorator_module.decorator\n+    def __init__(self):\n+        \"\"\"WrappedSampleClass.__init__.DOCSTRING\"\"\"\n+        pass\n+\n+\n class ProcessDocstringTest(TestCase):\n     def test_modify_in_place(self):\n         lines = ['Summary line.',\n@@ -170,6 +189,14 @@ class SkipMemberTest(TestCase):\n                         SampleClass.__special_undoc__, True,\n                         'napoleon_include_special_with_doc')\n \n+    def test_class_init_doc_decorated(self):\n+        skip = True\n+        app = mock.Mock()\n+        app.config = Config(napoleon_include_init_with_doc=True)\n+        self.assertIs(False, _skip_member(app, 'class', '__init__',\n+                                          WrappedSampleClass.__init__, skip,\n+                                          mock.Mock()))\n+\n     def test_exception_private_doc(self):\n         self.assertSkip('exception', '_private_doc',\n                         SampleError._private_doc, False,\n",
       "finalOutput": {
         "status": "completed",
@@ -2049,443 +1053,125 @@
         "predSteps": [
           {
             "files": [
-              "sphinx/ext/autodoc/__init__.py",
-              "sphinx/ext/autodoc/directive.py",
-              "sphinx/ext/autodoc/importer.py",
-              "sphinx/ext/autodoc/mock.py",
-              "sphinx/ext/autodoc/type_comment.py",
-              "sphinx/ext/autodoc/typehints.py",
-              "sphinx/ext/napoleon/__init__.py",
-              "sphinx/ext/napoleon/docstring.py",
-              "sphinx/ext/napoleon/iterators.py",
-              "tests/roots/test-ext-autodoc/autodoc_dummy_bar.py",
-              "tests/roots/test-ext-autodoc/autodoc_dummy_module.py",
-              "tests/roots/test-ext-autodoc/bug2437/__init__.py",
-              "tests/roots/test-ext-autodoc/bug2437/autodoc_dummy_foo.py",
-              "tests/roots/test-ext-autodoc/conf.py",
-              "tests/roots/test-ext-autodoc/index.rst",
-              "tests/roots/test-ext-autodoc/target/__init__.py",
-              "tests/roots/test-ext-autodoc/target/abstractmethods.py",
-              "tests/roots/test-ext-autodoc/target/annotated.py",
-              "tests/roots/test-ext-autodoc/target/autoclass_content.py",
-              "tests/roots/test-ext-autodoc/target/bound_method.py",
-              "tests/roots/test-ext-autodoc/target/callable.py",
-              "tests/roots/test-ext-autodoc/target/classes.py",
-              "tests/roots/test-ext-autodoc/target/coroutine.py",
-              "tests/roots/test-ext-autodoc/target/cython.pyx",
-              "tests/roots/test-ext-autodoc/target/decorator.py",
-              "tests/roots/test-ext-autodoc/target/descriptor.py",
-              "tests/roots/test-ext-autodoc/target/docstring_signature.py",
-              "tests/roots/test-ext-autodoc/target/enum.py",
-              "tests/roots/test-ext-autodoc/target/final.py",
-              "tests/roots/test-ext-autodoc/target/functions.py",
-              "tests/roots/test-ext-autodoc/target/genericalias.py",
-              "tests/roots/test-ext-autodoc/target/imported_members.py",
-              "tests/roots/test-ext-autodoc/target/inheritance.py",
-              "tests/roots/test-ext-autodoc/target/methods.py",
-              "tests/roots/test-ext-autodoc/target/name_conflict/__init__.py",
-              "tests/roots/test-ext-autodoc/target/name_conflict/foo.py",
-              "tests/roots/test-ext-autodoc/target/need_mocks.py",
-              "tests/roots/test-ext-autodoc/target/overload.py",
-              "tests/roots/test-ext-autodoc/target/partialfunction.py",
-              "tests/roots/test-ext-autodoc/target/partialmethod.py",
-              "tests/roots/test-ext-autodoc/target/pep570.py",
-              "tests/roots/test-ext-autodoc/target/private.py",
-              "tests/roots/test-ext-autodoc/target/process_docstring.py",
-              "tests/roots/test-ext-autodoc/target/singledispatch.py",
-              "tests/roots/test-ext-autodoc/target/singledispatchmethod.py",
-              "tests/roots/test-ext-autodoc/target/slots.py",
-              "tests/roots/test-ext-autodoc/target/sort_by_all.py",
-              "tests/roots/test-ext-autodoc/target/typed_vars.py",
-              "tests/roots/test-ext-autodoc/target/typehints.py",
-              "tests/roots/test-ext-autodoc/target/typevar.py",
-              "tests/roots/test-ext-autodoc/target/wrappedfunction.py",
-              "tests/roots/test-ext-doctest-with-autodoc/conf.py",
-              "tests/roots/test-ext-doctest-with-autodoc/dir/__init__.py",
-              "tests/roots/test-ext-doctest-with-autodoc/dir/bar.py",
-              "tests/roots/test-ext-doctest-with-autodoc/dir/inner.rst",
-              "tests/roots/test-ext-doctest-with-autodoc/foo.py",
-              "tests/roots/test-ext-doctest-with-autodoc/index.rst",
-              "tests/roots/test-root/autodoc.txt",
-              "tests/roots/test-root/autodoc_target.py",
-              "tests/roots/test-warnings/autodoc_fodder.py",
-              "tests/test_ext_autodoc.py",
-              "tests/test_ext_autodoc_autofunction.py",
-              "tests/test_ext_autodoc_configs.py",
-              "tests/test_ext_autodoc_events.py",
-              "tests/test_ext_autodoc_mock.py",
-              "tests/test_ext_autodoc_private_members.py",
-              "tests/test_ext_napoleon.py",
-              "tests/test_ext_napoleon_docstring.py",
-              "tests/test_ext_napoleon_iterators.py"
+              "sphinx/ext/napoleon/__init__.py"
             ],
-            "spans": {},
+            "spans": {
+              "sphinx/ext/napoleon/__init__.py": [
+                {
+                  "start": 400,
+                  "end": 470
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "sphinx/ext/apidoc.py",
-              "sphinx/ext/autodoc/__init__.py",
-              "sphinx/ext/autodoc/mock.py",
-              "sphinx/ext/autosummary/generate.py",
-              "sphinx/ext/inheritance_diagram.py",
-              "sphinx/ext/napoleon/__init__.py",
-              "sphinx/ext/napoleon/docstring.py",
-              "sphinx/pycode/parser.py",
-              "sphinx/util/__init__.py",
-              "sphinx/util/typing.py"
+              "tests/test_ext_napoleon.py"
             ],
             "spans": {
-              "sphinx/pycode/parser.py": [
+              "tests/test_ext_napoleon.py": [
                 {
-                  "start": 242,
-                  "end": 242
-                },
-                {
-                  "start": 254,
-                  "end": 254
-                },
-                {
-                  "start": 255,
-                  "end": 255
-                },
-                {
-                  "start": 256,
-                  "end": 256
-                },
-                {
-                  "start": 259,
-                  "end": 259
-                },
-                {
-                  "start": 260,
+                  "start": 1,
                   "end": 260
-                },
-                {
-                  "start": 261,
-                  "end": 261
-                },
-                {
-                  "start": 266,
-                  "end": 266
-                },
-                {
-                  "start": 267,
-                  "end": 267
-                },
-                {
-                  "start": 268,
-                  "end": 268
-                },
-                {
-                  "start": 272,
-                  "end": 272
-                },
-                {
-                  "start": 273,
-                  "end": 273
-                },
-                {
-                  "start": 274,
-                  "end": 274
-                },
-                {
-                  "start": 278,
-                  "end": 278
-                },
-                {
-                  "start": 279,
-                  "end": 279
-                },
-                {
-                  "start": 280,
-                  "end": 280
                 }
-              ],
-              "sphinx/ext/inheritance_diagram.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_ext_autodoc_configs.py"
+            ],
+            "spans": {
+              "tests/test_ext_autodoc_configs.py": [
                 {
-                  "start": 232,
-                  "end": 232
+                  "start": 640,
+                  "end": 760
                 }
-              ],
-              "sphinx/ext/napoleon/docstring.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/roots/test-ext-autodoc/target/decorator.py"
+            ],
+            "spans": {
+              "tests/roots/test-ext-autodoc/target/decorator.py": [
                 {
-                  "start": 757,
-                  "end": 757
+                  "start": 1,
+                  "end": 220
                 }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/roots/test-ext-autodoc/target/wrappedfunction.py"
+            ],
+            "spans": {
+              "tests/roots/test-ext-autodoc/target/wrappedfunction.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/ext/napoleon/__init__.py"
+            ],
+            "spans": {
               "sphinx/ext/napoleon/__init__.py": [
                 {
-                  "start": 427,
-                  "end": 427
-                },
-                {
-                  "start": 429,
-                  "end": 429
-                },
-                {
-                  "start": 430,
-                  "end": 430
-                },
-                {
-                  "start": 441,
-                  "end": 441
-                },
-                {
-                  "start": 443,
-                  "end": 443
-                },
-                {
-                  "start": 445,
-                  "end": 445
-                },
-                {
-                  "start": 448,
-                  "end": 448
-                },
-                {
-                  "start": 450,
-                  "end": 450
+                  "start": 1,
+                  "end": 120
                 }
-              ],
-              "sphinx/util/typing.py": [
-                {
-                  "start": 59,
-                  "end": 59
-                },
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 75,
-                  "end": 75
-                },
-                {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 77,
-                  "end": 77
-                },
-                {
-                  "start": 79,
-                  "end": 79
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                },
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 83,
-                  "end": 83
-                },
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                },
-                {
-                  "start": 106,
-                  "end": 106
-                },
-                {
-                  "start": 111,
-                  "end": 111
-                },
-                {
-                  "start": 114,
-                  "end": 114
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 124,
-                  "end": 124
-                },
-                {
-                  "start": 125,
-                  "end": 125
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 128,
-                  "end": 128
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                },
-                {
-                  "start": 132,
-                  "end": 132
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                },
-                {
-                  "start": 134,
-                  "end": 134
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 145,
-                  "end": 145
-                },
-                {
-                  "start": 156,
-                  "end": 156
-                },
-                {
-                  "start": 162,
-                  "end": 162
-                },
-                {
-                  "start": 172,
-                  "end": 172
-                },
-                {
-                  "start": 192,
-                  "end": 192
-                },
-                {
-                  "start": 198,
-                  "end": 198
-                },
-                {
-                  "start": 209,
-                  "end": 209
-                },
-                {
-                  "start": 212,
-                  "end": 212
-                }
-              ],
-              "sphinx/ext/autosummary/generate.py": [
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 323,
-                  "end": 323
-                },
-                {
-                  "start": 324,
-                  "end": 324
-                },
-                {
-                  "start": 327,
-                  "end": 327
-                },
-                {
-                  "start": 330,
-                  "end": 330
-                },
-                {
-                  "start": 332,
-                  "end": 332
-                },
-                {
-                  "start": 336,
-                  "end": 336
-                },
-                {
-                  "start": 408,
-                  "end": 408
-                },
-                {
-                  "start": 419,
-                  "end": 419
-                }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "sphinx/util/__init__.py"
+            ],
+            "spans": {
               "sphinx/util/__init__.py": [
                 {
-                  "start": 583,
-                  "end": 583
-                },
-                {
-                  "start": 605,
-                  "end": 605
-                },
-                {
-                  "start": 607,
-                  "end": 607
+                  "start": 560,
+                  "end": 660
                 }
-              ],
-              "sphinx/ext/apidoc.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "setup.py"
+            ],
+            "spans": {
+              "setup.py": [
                 {
-                  "start": 139,
-                  "end": 139
-                },
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 147,
-                  "end": 147
+                  "start": 1,
+                  "end": 220
                 }
-              ],
-              "sphinx/ext/autodoc/mock.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_ext_napoleon.py"
+            ],
+            "spans": {
+              "tests/test_ext_napoleon.py": [
                 {
-                  "start": 41,
-                  "end": 41
-                }
-              ],
-              "sphinx/ext/autodoc/__init__.py": [
-                {
-                  "start": 1325,
-                  "end": 1325
-                },
-                {
-                  "start": 1395,
-                  "end": 1395
-                },
-                {
-                  "start": 1398,
-                  "end": 1398
-                },
-                {
-                  "start": 1400,
-                  "end": 1400
-                },
-                {
-                  "start": 1406,
-                  "end": 1406
-                },
-                {
-                  "start": 1434,
-                  "end": 1434
-                },
-                {
-                  "start": 1489,
-                  "end": 1489
+                  "start": 120,
+                  "end": 220
                 }
               ]
             },
@@ -2500,9 +1186,16 @@
           },
           {
             "files": [
-              "tests/test_ext_napoleon.py"
+              "tox.ini"
             ],
-            "spans": {},
+            "spans": {
+              "tox.ini": [
+                {
+                  "start": 1,
+                  "end": 140
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -2512,44 +1205,8 @@
             "spans": {
               "tests/test_ext_napoleon.py": [
                 {
-                  "start": 17,
-                  "end": 17
-                },
-                {
-                  "start": 108,
-                  "end": 108
-                },
-                {
-                  "start": 114,
-                  "end": 114
-                },
-                {
-                  "start": 115,
-                  "end": 115
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 119,
-                  "end": 119
-                },
-                {
-                  "start": 120,
-                  "end": 120
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                },
-                {
-                  "start": 136,
-                  "end": 136
+                  "start": 1,
+                  "end": 204
                 }
               ]
             },
@@ -2557,574 +1214,28 @@
           },
           {
             "files": [
-              "tests/test_ext_autodoc_configs.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/roots/test-ext-autodoc/target/decorator.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/roots/test-ext-autodoc/target/wrappedfunction.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "sphinx/util/__init__.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "sphinx/util/inspect.py"
+              "sphinx/ext/napoleon/__init__.py"
             ],
             "spans": {
-              "sphinx/util/inspect.py": [
-                {
-                  "start": 121,
-                  "end": 121
-                },
-                {
-                  "start": 124,
-                  "end": 124
-                },
-                {
-                  "start": 140,
-                  "end": 140
-                },
-                {
-                  "start": 141,
-                  "end": 141
-                },
-                {
-                  "start": 233,
-                  "end": 233
-                },
-                {
-                  "start": 295,
-                  "end": 295
-                },
+              "sphinx/ext/napoleon/__init__.py": [
                 {
                   "start": 425,
-                  "end": 425
-                },
-                {
-                  "start": 446,
-                  "end": 446
+                  "end": 455
                 }
               ]
             },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "setup.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "setup.cfg",
-              "tox.ini"
-            ],
-            "spans": {
-              "setup.cfg": [
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 56,
-                  "end": 56
-                }
-              ],
-              "tox.ini": [
-                {
-                  "start": 18,
-                  "end": 18
-                },
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 22,
-                  "end": 22
-                },
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 24,
-                  "end": 24
-                },
-                {
-                  "start": 25,
-                  "end": 25
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                }
-              ]
-            },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tox.ini"
-            ],
-            "spans": {},
             "symbols": {}
           }
         ],
         "predFiles": [
-          "setup.cfg",
-          "setup.py",
-          "sphinx/ext/apidoc.py",
-          "sphinx/ext/autodoc/__init__.py",
-          "sphinx/ext/autodoc/directive.py",
-          "sphinx/ext/autodoc/importer.py",
-          "sphinx/ext/autodoc/mock.py",
-          "sphinx/ext/autodoc/type_comment.py",
-          "sphinx/ext/autodoc/typehints.py",
-          "sphinx/ext/autosummary/generate.py",
-          "sphinx/ext/inheritance_diagram.py",
           "sphinx/ext/napoleon/__init__.py",
-          "sphinx/ext/napoleon/docstring.py",
-          "sphinx/ext/napoleon/iterators.py",
-          "sphinx/pycode/parser.py",
-          "sphinx/util/__init__.py",
-          "sphinx/util/inspect.py",
-          "sphinx/util/typing.py",
-          "tests/roots/test-ext-autodoc/autodoc_dummy_bar.py",
-          "tests/roots/test-ext-autodoc/autodoc_dummy_module.py",
-          "tests/roots/test-ext-autodoc/bug2437/__init__.py",
-          "tests/roots/test-ext-autodoc/bug2437/autodoc_dummy_foo.py",
-          "tests/roots/test-ext-autodoc/conf.py",
-          "tests/roots/test-ext-autodoc/index.rst",
-          "tests/roots/test-ext-autodoc/target/__init__.py",
-          "tests/roots/test-ext-autodoc/target/abstractmethods.py",
-          "tests/roots/test-ext-autodoc/target/annotated.py",
-          "tests/roots/test-ext-autodoc/target/autoclass_content.py",
-          "tests/roots/test-ext-autodoc/target/bound_method.py",
-          "tests/roots/test-ext-autodoc/target/callable.py",
-          "tests/roots/test-ext-autodoc/target/classes.py",
-          "tests/roots/test-ext-autodoc/target/coroutine.py",
-          "tests/roots/test-ext-autodoc/target/cython.pyx",
-          "tests/roots/test-ext-autodoc/target/decorator.py",
-          "tests/roots/test-ext-autodoc/target/descriptor.py",
-          "tests/roots/test-ext-autodoc/target/docstring_signature.py",
-          "tests/roots/test-ext-autodoc/target/enum.py",
-          "tests/roots/test-ext-autodoc/target/final.py",
-          "tests/roots/test-ext-autodoc/target/functions.py",
-          "tests/roots/test-ext-autodoc/target/genericalias.py",
-          "tests/roots/test-ext-autodoc/target/imported_members.py",
-          "tests/roots/test-ext-autodoc/target/inheritance.py",
-          "tests/roots/test-ext-autodoc/target/methods.py",
-          "tests/roots/test-ext-autodoc/target/name_conflict/__init__.py",
-          "tests/roots/test-ext-autodoc/target/name_conflict/foo.py",
-          "tests/roots/test-ext-autodoc/target/need_mocks.py",
-          "tests/roots/test-ext-autodoc/target/overload.py",
-          "tests/roots/test-ext-autodoc/target/partialfunction.py",
-          "tests/roots/test-ext-autodoc/target/partialmethod.py",
-          "tests/roots/test-ext-autodoc/target/pep570.py",
-          "tests/roots/test-ext-autodoc/target/private.py",
-          "tests/roots/test-ext-autodoc/target/process_docstring.py",
-          "tests/roots/test-ext-autodoc/target/singledispatch.py",
-          "tests/roots/test-ext-autodoc/target/singledispatchmethod.py",
-          "tests/roots/test-ext-autodoc/target/slots.py",
-          "tests/roots/test-ext-autodoc/target/sort_by_all.py",
-          "tests/roots/test-ext-autodoc/target/typed_vars.py",
-          "tests/roots/test-ext-autodoc/target/typehints.py",
-          "tests/roots/test-ext-autodoc/target/typevar.py",
-          "tests/roots/test-ext-autodoc/target/wrappedfunction.py",
-          "tests/roots/test-ext-doctest-with-autodoc/conf.py",
-          "tests/roots/test-ext-doctest-with-autodoc/dir/__init__.py",
-          "tests/roots/test-ext-doctest-with-autodoc/dir/bar.py",
-          "tests/roots/test-ext-doctest-with-autodoc/dir/inner.rst",
-          "tests/roots/test-ext-doctest-with-autodoc/foo.py",
-          "tests/roots/test-ext-doctest-with-autodoc/index.rst",
-          "tests/roots/test-root/autodoc.txt",
-          "tests/roots/test-root/autodoc_target.py",
-          "tests/roots/test-warnings/autodoc_fodder.py",
-          "tests/test_ext_autodoc.py",
-          "tests/test_ext_autodoc_autofunction.py",
-          "tests/test_ext_autodoc_configs.py",
-          "tests/test_ext_autodoc_events.py",
-          "tests/test_ext_autodoc_mock.py",
-          "tests/test_ext_autodoc_private_members.py",
-          "tests/test_ext_napoleon.py",
-          "tests/test_ext_napoleon_docstring.py",
-          "tests/test_ext_napoleon_iterators.py",
-          "tox.ini"
+          "tests/test_ext_napoleon.py"
         ],
         "predSpans": {
-          "sphinx/pycode/parser.py": [
-            {
-              "start": 242,
-              "end": 242
-            },
-            {
-              "start": 254,
-              "end": 254
-            },
-            {
-              "start": 255,
-              "end": 255
-            },
-            {
-              "start": 256,
-              "end": 256
-            },
-            {
-              "start": 259,
-              "end": 259
-            },
-            {
-              "start": 260,
-              "end": 260
-            },
-            {
-              "start": 261,
-              "end": 261
-            },
-            {
-              "start": 266,
-              "end": 266
-            },
-            {
-              "start": 267,
-              "end": 267
-            },
-            {
-              "start": 268,
-              "end": 268
-            },
-            {
-              "start": 272,
-              "end": 272
-            },
-            {
-              "start": 273,
-              "end": 273
-            },
-            {
-              "start": 274,
-              "end": 274
-            },
-            {
-              "start": 278,
-              "end": 278
-            },
-            {
-              "start": 279,
-              "end": 279
-            },
-            {
-              "start": 280,
-              "end": 280
-            }
-          ],
-          "sphinx/ext/inheritance_diagram.py": [
-            {
-              "start": 232,
-              "end": 232
-            }
-          ],
-          "sphinx/ext/napoleon/docstring.py": [
-            {
-              "start": 757,
-              "end": 757
-            }
-          ],
           "sphinx/ext/napoleon/__init__.py": [
             {
               "start": 425,
               "end": 447
-            },
-            {
-              "start": 427,
-              "end": 427
-            },
-            {
-              "start": 429,
-              "end": 429
-            },
-            {
-              "start": 430,
-              "end": 430
-            },
-            {
-              "start": 441,
-              "end": 441
-            },
-            {
-              "start": 443,
-              "end": 443
-            },
-            {
-              "start": 445,
-              "end": 445
-            },
-            {
-              "start": 448,
-              "end": 448
-            },
-            {
-              "start": 450,
-              "end": 450
-            }
-          ],
-          "sphinx/util/typing.py": [
-            {
-              "start": 59,
-              "end": 59
-            },
-            {
-              "start": 60,
-              "end": 60
-            },
-            {
-              "start": 75,
-              "end": 75
-            },
-            {
-              "start": 76,
-              "end": 76
-            },
-            {
-              "start": 77,
-              "end": 77
-            },
-            {
-              "start": 79,
-              "end": 79
-            },
-            {
-              "start": 81,
-              "end": 81
-            },
-            {
-              "start": 82,
-              "end": 82
-            },
-            {
-              "start": 83,
-              "end": 83
-            },
-            {
-              "start": 86,
-              "end": 86
-            },
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 103,
-              "end": 103
-            },
-            {
-              "start": 106,
-              "end": 106
-            },
-            {
-              "start": 111,
-              "end": 111
-            },
-            {
-              "start": 114,
-              "end": 114
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 124,
-              "end": 124
-            },
-            {
-              "start": 125,
-              "end": 125
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 128,
-              "end": 128
-            },
-            {
-              "start": 130,
-              "end": 130
-            },
-            {
-              "start": 132,
-              "end": 132
-            },
-            {
-              "start": 133,
-              "end": 133
-            },
-            {
-              "start": 134,
-              "end": 134
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 143,
-              "end": 143
-            },
-            {
-              "start": 145,
-              "end": 145
-            },
-            {
-              "start": 156,
-              "end": 156
-            },
-            {
-              "start": 162,
-              "end": 162
-            },
-            {
-              "start": 172,
-              "end": 172
-            },
-            {
-              "start": 192,
-              "end": 192
-            },
-            {
-              "start": 198,
-              "end": 198
-            },
-            {
-              "start": 209,
-              "end": 209
-            },
-            {
-              "start": 212,
-              "end": 212
-            }
-          ],
-          "sphinx/ext/autosummary/generate.py": [
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 323,
-              "end": 323
-            },
-            {
-              "start": 324,
-              "end": 324
-            },
-            {
-              "start": 327,
-              "end": 327
-            },
-            {
-              "start": 330,
-              "end": 330
-            },
-            {
-              "start": 332,
-              "end": 332
-            },
-            {
-              "start": 336,
-              "end": 336
-            },
-            {
-              "start": 408,
-              "end": 408
-            },
-            {
-              "start": 419,
-              "end": 419
-            }
-          ],
-          "sphinx/util/__init__.py": [
-            {
-              "start": 583,
-              "end": 583
-            },
-            {
-              "start": 605,
-              "end": 605
-            },
-            {
-              "start": 607,
-              "end": 607
-            }
-          ],
-          "sphinx/ext/apidoc.py": [
-            {
-              "start": 139,
-              "end": 139
-            },
-            {
-              "start": 143,
-              "end": 143
-            },
-            {
-              "start": 147,
-              "end": 147
-            }
-          ],
-          "sphinx/ext/autodoc/mock.py": [
-            {
-              "start": 41,
-              "end": 41
-            }
-          ],
-          "sphinx/ext/autodoc/__init__.py": [
-            {
-              "start": 1325,
-              "end": 1325
-            },
-            {
-              "start": 1395,
-              "end": 1395
-            },
-            {
-              "start": 1398,
-              "end": 1398
-            },
-            {
-              "start": 1400,
-              "end": 1400
-            },
-            {
-              "start": 1406,
-              "end": 1406
-            },
-            {
-              "start": 1434,
-              "end": 1434
-            },
-            {
-              "start": 1489,
-              "end": 1489
             }
           ],
           "tests/test_ext_napoleon.py": [
@@ -3133,126 +1244,12 @@
               "end": 18
             },
             {
-              "start": 17,
-              "end": 17
-            },
-            {
               "start": 74,
               "end": 89
             },
             {
-              "start": 108,
-              "end": 108
-            },
-            {
-              "start": 114,
-              "end": 114
-            },
-            {
-              "start": 115,
-              "end": 115
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 119,
-              "end": 119
-            },
-            {
-              "start": 120,
-              "end": 120
-            },
-            {
-              "start": 130,
-              "end": 130
-            },
-            {
-              "start": 133,
-              "end": 133
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
               "start": 192,
               "end": 198
-            }
-          ],
-          "sphinx/util/inspect.py": [
-            {
-              "start": 121,
-              "end": 121
-            },
-            {
-              "start": 124,
-              "end": 124
-            },
-            {
-              "start": 140,
-              "end": 140
-            },
-            {
-              "start": 141,
-              "end": 141
-            },
-            {
-              "start": 233,
-              "end": 233
-            },
-            {
-              "start": 295,
-              "end": 295
-            },
-            {
-              "start": 425,
-              "end": 425
-            },
-            {
-              "start": 446,
-              "end": 446
-            }
-          ],
-          "setup.cfg": [
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 56,
-              "end": 56
-            }
-          ],
-          "tox.ini": [
-            {
-              "start": 18,
-              "end": 18
-            },
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 25,
-              "end": 25
-            },
-            {
-              "start": 31,
-              "end": 31
             }
           ]
         },
@@ -3271,186 +1268,132 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.7403708987161198,
+              "line": 0.6842105263157895
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.7403708987161198,
+              "line": 0.6842105263157895
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.7403708987161198,
+              "line": 0.6842105263157895
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.7403708987161198,
+              "line": 0.6842105263157895
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.5,
+              "span": 0.7403708987161198,
+              "line": 0.6842105263157895
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1383737517831669,
-              "line": 0.10526315789473684
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1383737517831669,
-              "line": 0.10526315789473684
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1383737517831669,
-              "line": 0.10526315789473684
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1383737517831669,
-              "line": 0.10526315789473684
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1383737517831669,
-              "line": 0.10526315789473684
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1383737517831669,
-              "line": 0.10526315789473684
-            }
-          },
-          {
-            "step": 14,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1383737517831669,
-              "line": 0.10526315789473684
-            }
-          },
-          {
-            "step": 15,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1383737517831669,
-              "line": 0.10526315789473684
-            }
-          },
-          {
-            "step": 16,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1383737517831669,
-              "line": 0.10526315789473684
-            }
-          },
-          {
-            "step": 17,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1383737517831669,
-              "line": 0.10526315789473684
-            }
-          },
-          {
-            "step": 18,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1383737517831669,
-              "line": 0.10526315789473684
-            }
-          },
-          {
-            "step": 19,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.5,
-              "span": 0.1383737517831669,
-              "line": 0.10526315789473684
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.6842105263157895,
-          "symbol": 0.3157894736842105,
-          "span": 0.08739394849463174,
-          "line": 0.06648199445983378
+          "file": 1.0,
+          "symbol": 0.8076923076923077,
+          "span": 0.9001426533523538,
+          "line": 0.8785425101214575
         },
         "redundancy": {
-          "file": 0.13186813186813184,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.3846153846153846,
+          "symbol": 0.43965517241379315,
+          "span": 0.2688314557101833,
+          "line": 0.18573797678275294
         }
       },
       "fixOverlap": {
@@ -3469,42 +1412,42 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5d8b6c909dbd056b35e1/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5d8b6c909dbd056b35e1/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/5d8b6c909dbd056b35e1/home/.agents/skills/superpowers/systematic-debugging/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: systematic-debugging\ndescription: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes\n---\n\n# Systematic Debugging\n\n## Overview\n\nRandom fixes waste time and create new bugs. Quick patches mask underlying issues.\n\n**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.\n\n**Violating the letter of this process is violating the spirit of debugging.**\n\n## The Iron Law\n\n```\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST\n```\n\nIf you haven't completed Phase 1, you cannot propose fixes.\n\n## When to Use\n\nUse for ANY technical issue:\n- Test failures\n- Bugs in production\n- Unexpected behavior\n- Performance problems\n- Build failures\n- Integration issues\n\n**Use this ESPECIALLY when:**\n- Under time pressure (emergencies make guessing tempting)\n- \"Just one quick fix\" seems obvious\n- You've already tried multiple fixes\n- Previous fix didn't work\n- You don't fully understand the issue\n\n**Don't skip when:**\n- Issue seems simple (simple bugs have root causes too)\n- You're in a hurry (rushing guarantees rework)\n- Manager wants it fixed NOW (systematic is faster than thrashing)\n\n## The Four Phases\n\nYou MUST complete each phase before proceeding to the next.\n\n### Phase 1: Root Cause Investigation\n\n**BEFORE attempting ANY fix:**\n\n1. **Read Error Messages Carefully**\n   - Don't skip past errors or warnings\n   - They often contain the exact solution\n   - Read stack traces completely\n   - Note line numbers, file paths, error codes\n\n2. **Reproduce Consistently**\n   - Can you trigger it reliably?\n   - What are the exact steps?\n   - Does it happen every time?\n   - If not reproducible \u2192 gather more data, don't guess\n\n3. **Check Recent Changes**\n   - What changed that could cause this?\n   - Git diff, recent commits\n   - New dependencies, config changes\n   - Environmental differences\n\n4. **Gather Evidence in Multi-Component Systems**\n\n   **WHEN system has multiple components (CI \u2192 build \u2192 signing, API \u2192 service \u2192 database):**\n\n   **BEFORE proposing fixes, add diagnostic instrumentation:**\n   ```\n   For EACH component boundary:\n     - Log what data enters component\n     - Log what data exits component\n     - Verify environment/config propagation\n     - Check state at each layer\n\n   Run once to gather evidence showing WHERE it breaks\n   THEN analyze evidence to identify failing component\n   THEN investigate that specific component\n   ```\n\n   **Example (multi-layer system):**\n   ```bash\n   # Layer 1: Workflow\n   echo \"=== Secrets available in workflow: ===\"\n   echo \"IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}\"\n\n   # Layer 2: Build script\n   echo \"=== Env vars in build script: ===\"\n   env | grep IDENTITY || echo \"IDENTITY not in environment\"\n\n   # Layer 3: Signing script\n   echo \"=== Keychain state: ===\"\n   security list-keychains\n   security find-identity -v\n\n   # Layer 4: Actual signing\n   codesign --sign \"$IDENTITY\" --verbose=4 \"$APP\"\n   ```\n\n   **This reveals:** Which layer fails (secrets \u2192 workflow \u2713, workflow \u2192 build \u2717)\n\n5. **Trace Data Flow**\n\n   **WHEN error is deep in call stack:**\n\n   See `root-cause-tracing.md` in this directory for the complete backward tracing technique.\n\n   **Quick version:**\n   - Where does bad value originate?\n   - What called this with bad value?\n   - Keep tracing up until you find the source\n   - Fix at source, not at symptom\n\n### Phase 2: Pattern Analysis\n\n**Find the pattern before fixing:**\n\n1. **Find Working Examples**\n   - Locate similar working code in same codebase\n   - What works that's similar to what's broken?\n\n2. **Compare Against References**\n   - If implementing pattern, read reference implementation COMPLETELY\n   - Don't skim - read every line\n   - Understand the pattern fully before applying\n\n3. **Identify Differences**\n   - What's different between working and broken?\n   - List every difference, however small\n   - Don't assume \"that can't matter\"\n\n4. **Understand Dependencies**\n   - What other components does this need?\n   - \u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/5d8b6c909dbd056b35e1/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5d8b6c909dbd056b35e1/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5d8b6c909dbd056b35e1/home/.agents/skills/superpowers/writing-plans/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: writing-plans\ndescription: Use when you have a spec or requirements for a multi-step task, before touching code\n---\n\n# Writing Plans\n\n## Overview\n\nWrite comprehensive implementation plans assuming the engineer has zero context for our codebase and questionable taste. Document everything they need to know: which files to touch for each task, code, testing, docs they might need to check, how to test it. Give them the whole plan as bite-sized tasks. DRY. YAGNI. TDD. Frequent commits.\n\nAssume they are a skilled developer, but know almost nothing about our toolset or problem domain. Assume they don't know good test design very well.\n\n**Announce at start:** \"I'm using the writing-plans skill to create the implementation plan.\"\n\n**Context:** This should be run in a dedicated worktree (created by brainstorming skill).\n\n**Save plans to:** `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`\n- (User preferences for plan location override this default)\n\n## Scope Check\n\nIf the spec covers multiple independent subsystems, it should have been broken into sub-project specs during brainstorming. If it wasn't, suggest breaking this into separate plans \u2014 one per subsystem. Each plan should produce working, testable software on its own.\n\n## File Structure\n\nBefore defining tasks, map out which files will be created or modified and what each one is responsible for. This is where decomposition decisions get locked in.\n\n- Design units with clear boundaries and well-defined interfaces. Each file should have one clear responsibility.\n- You reason best about code you can hold in context at once, and your edits are more reliable when files are focused. Prefer smaller, focused files over large ones that do too much.\n- Files that change together should live together. Split by responsibility, not by technical layer.\n- In existing codebases, follow established patterns. If the codebase uses large files, don't unilaterally restructure - but if a file you're modifying has grown unwieldy, including a split in the plan is reasonable.\n\nThis structure informs the task decomposition. Each task should produce self-contained changes that make sense independently.\n\n## Bite-Sized Task Granularity\n\n**Each step is one action (2-5 minutes):**\n- \"Write the failing test\" - step\n- \"Run it to make sure it fails\" - step\n- \"Implement the minimal code to make the test pass\" - step\n- \"Run the tests and make sure they pass\" - step\n- \"Commit\" - step\n\n## Plan Document Header\n\n**Every plan MUST start with this header:**\n\n```markdown\n# [Feature Name] Implementation Plan\n\n> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.\n\n**Goal:** [One sentence describing what this builds]\n\n**Architecture:** [2-3 sentences about approach]\n\n**Tech Stack:** [Key technologies/libraries]\n\n---\n```\n\n## Task Structure\n\n````markdown\n### Task N: [Component Name]\n\n**Files:**\n- Create: `exact/path/to/file.py`\n- Modify: `exact/path/to/existing.py:123-145`\n- Test: `tests/exact/path/to/test.py`\n\n- [ ] **Step 1: Write the failing test**\n\n```python\ndef test_specific_behavior():\n    result = function(input)\n    assert result == expected\n```\n\n- [ ] **Step 2: Run test to verify it fails**\n\nRun: `pytest tests/path/test.py::test_name -v`\nExpected: FAIL with \"function not defined\"\n\n- [ ] **Step 3: Write minimal implementation**\n\n```python\ndef function(input):\n    return expected\n```\n\n- [ ] **Step 4: Run test to verify it passes**\n\nRun: `pytest tests/path/test.py::test_name -v`\nExpected: PASS\n\n- [ ] **Step 5: Commit**\n\n```bash\ngit add tests/path/test.py src/path/file.py\ngit commit -m \"feat: add specific feature\"\n```\n````\n\n## Remember\n- Exact file paths always\n- Complete code in plan (not \"add validation\")\n- Exact commands with expected output\n- Reference relevant skills with @ syntax\n- DRY, YAGNI, TDD, frequent commits\n\n## Plan Review Loop\n\nA\u2026",
           "exitCode": 0
         },
@@ -3731,7 +1674,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/test_ext_napoleon.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/test_ext_napoleon.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3750,7 +1702,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/test_ext_napoleon.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/test_ext_napoleon.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3786,7 +1747,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/sphinx/ext/napoleon/__init__.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/sphinx/ext/napoleon/__init__.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-06T06:52:39Z",
       "completedAt": "2026-05-06T06:58:42Z",
       "durationMs": 363369,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1306275,
@@ -25,6 +40,28 @@
         "total_tokens": 1319357,
         "cache_read_input_tokens": 1197312
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 42,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\nindex 686e75c979..b26247be82 100644\n--- a/django/db/models/sql/compiler.py\n+++ b/django/db/models/sql/compiler.py\n@@ -502,6 +502,8 @@ class SQLCompiler:\n             combinator = self.query.combinator\n             features = self.connection.features\n             if combinator:\n+                if self.query.is_empty():\n+                    raise EmptyResultSet\n                 if not getattr(features, 'supports_select_{}'.format(combinator)):\n                     raise NotSupportedError('{} is not supported on this database backend.'.format(combinator))\n                 result, params = self.get_combinator_sql(combinator, self.query.combinator_all)\ndiff --git a/tests/model_forms/tests.py b/tests/model_forms/tests.py\nindex 914defe5e7..017f142b7b 100644\n--- a/tests/model_forms/tests.py\n+++ b/tests/model_forms/tests.py\n@@ -1756,6 +1756,7 @@ class ModelMultipleChoiceFieldTests(TestCase):\n         f = forms.ModelMultipleChoiceField(Category.objects.all(), required=False)\n         self.assertIsInstance(f.clean([]), EmptyQuerySet)\n         self.assertIsInstance(f.clean(()), EmptyQuerySet)\n+        self.assertQuerysetEqual(f.clean([]), [])\n         with self.assertRaises(ValidationError):\n             f.clean(['0'])\n         with self.assertRaises(ValidationError):\n@@ -1781,6 +1782,41 @@ class ModelMultipleChoiceFieldTests(TestCase):\n             (self.c2.pk, \"multicategory It's a test\"),\n             (self.c3.pk, 'multicategory Third')])\n \n+    @skipUnlessDBFeature('supports_select_union')\n+    def test_model_multiple_choice_save_empty_value_from_union_queryset(self):\n+        class ArticleForm(forms.ModelForm):\n+            categories = forms.ModelMultipleChoiceField(\n+                Category.objects.filter(pk=self.c1.pk).union(\n+                    Category.objects.filter(pk=self.c3.pk)\n+                ),\n+                required=False,\n+            )\n+\n+            class Meta:\n+                model = Article\n+                fields = ['headline', 'slug', 'pub_date', 'writer', 'article', 'categories']\n+\n+        article = Article.objects.create(\n+            headline='Test article',\n+            slug='test-article',\n+            pub_date=datetime.date(1988, 1, 4),\n+            writer=Writer.objects.create(name='Test writer'),\n+            article='Hello.',\n+        )\n+        form = ArticleForm(\n+            data={\n+                'headline': article.headline,\n+                'slug': article.slug,\n+                'pub_date': article.pub_date.isoformat(),\n+                'writer': article.writer.pk,\n+                'article': article.article,\n+            },\n+            instance=article,\n+        )\n+        self.assertTrue(form.is_valid())\n+        form.save()\n+        self.assertCountEqual(article.categories.all(), [])\n+\n     def test_model_multiple_choice_number_of_queries(self):\n         \"\"\"\n         ModelMultipleChoiceField does O(1) queries instead of O(n) (#10156).\ndiff --git a/tests/queries/test_qs_combinators.py b/tests/queries/test_qs_combinators.py\nindex 9c6fd474ca..a1897173eb 100644\n--- a/tests/queries/test_qs_combinators.py\n+++ b/tests/queries/test_qs_combinators.py\n@@ -99,6 +99,12 @@ class QuerySetSetOperationTests(TestCase):\n         self.assertEqual(len(qs2.union(qs2)), 0)\n         self.assertEqual(len(qs3.union(qs3)), 0)\n \n+    def test_none_on_union_qs(self):\n+        qs1 = Number.objects.filter(num__lte=1)\n+        qs2 = Number.objects.filter(num__gte=8)\n+        self.assertCountEqual(qs1.union(qs2).none(), [])\n+        self.assertEqual(qs1.union(qs2).none().count(), 0)\n+\n     def test_limits(self):\n         qs1 = Number.objects.all()\n         qs2 = Number.objects.all()\n",
       "finalOutput": {
         "status": "completed",
@@ -71,863 +108,41 @@
         "predSteps": [
           {
             "files": [
-              "django/contrib/gis/gdal/geometries.py",
-              "django/contrib/gis/geos/geometry.py",
-              "django/core/management/__init__.py",
-              "django/db/migrations/autodetector.py",
-              "django/db/models/query.py",
-              "django/db/models/sql/compiler.py",
-              "django/db/models/sql/query.py",
-              "django/test/runner.py",
-              "django/test/utils.py",
-              "tests/defer/models.py",
-              "tests/filtered_relation/tests.py",
-              "tests/gis_tests/gdal_tests/test_geom.py",
-              "tests/gis_tests/geo3d/tests.py",
-              "tests/gis_tests/geoapp/test_functions.py",
-              "tests/gis_tests/geos_tests/test_geos.py",
-              "tests/queries/test_explain.py",
-              "tests/queries/test_qs_combinators.py",
               "tests/queries/tests.py"
             ],
             "spans": {
-              "tests/filtered_relation/tests.py": [
-                {
-                  "start": 221,
-                  "end": 221
-                },
-                {
-                  "start": 228,
-                  "end": 228
-                }
-              ],
-              "django/contrib/gis/gdal/geometries.py": [
-                {
-                  "start": 163,
-                  "end": 163
-                },
-                {
-                  "start": 493,
-                  "end": 493
-                }
-              ],
-              "django/contrib/gis/geos/geometry.py": [
-                {
-                  "start": 162,
-                  "end": 162
-                },
-                {
-                  "start": 587,
-                  "end": 587
-                },
-                {
-                  "start": 589,
-                  "end": 589
-                },
-                {
-                  "start": 591,
-                  "end": 591
-                },
-                {
-                  "start": 593,
-                  "end": 593
-                }
-              ],
-              "tests/gis_tests/geo3d/tests.py": [
-                {
-                  "start": 172,
-                  "end": 172
-                }
-              ],
-              "tests/gis_tests/geoapp/test_functions.py": [
-                {
-                  "start": 552,
-                  "end": 552
-                },
-                {
-                  "start": 571,
-                  "end": 571
-                },
-                {
-                  "start": 574,
-                  "end": 574
-                }
-              ],
-              "tests/gis_tests/geos_tests/test_geos.py": [
-                {
-                  "start": 646,
-                  "end": 646
-                },
-                {
-                  "start": 647,
-                  "end": 647
-                },
-                {
-                  "start": 652,
-                  "end": 652
-                },
-                {
-                  "start": 658,
-                  "end": 658
-                }
-              ],
-              "tests/gis_tests/gdal_tests/test_geom.py": [
-                {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 407,
-                  "end": 407
-                },
-                {
-                  "start": 408,
-                  "end": 408
-                },
-                {
-                  "start": 413,
-                  "end": 413
-                }
-              ],
-              "tests/queries/test_explain.py": [
-                {
-                  "start": 21,
-                  "end": 21
-                }
-              ],
-              "tests/queries/test_qs_combinators.py": [
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 51,
-                  "end": 51
-                },
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 94,
-                  "end": 94
-                },
-                {
-                  "start": 95,
-                  "end": 95
-                },
-                {
-                  "start": 96,
-                  "end": 96
-                },
-                {
-                  "start": 97,
-                  "end": 97
-                },
-                {
-                  "start": 98,
-                  "end": 98
-                },
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 100,
-                  "end": 100
-                },
-                {
-                  "start": 105,
-                  "end": 105
-                },
-                {
-                  "start": 110,
-                  "end": 110
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 124,
-                  "end": 124
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 144,
-                  "end": 144
-                },
-                {
-                  "start": 147,
-                  "end": 147
-                },
-                {
-                  "start": 150,
-                  "end": 150
-                },
-                {
-                  "start": 162,
-                  "end": 162
-                },
-                {
-                  "start": 169,
-                  "end": 169
-                },
-                {
-                  "start": 177,
-                  "end": 177
-                },
-                {
-                  "start": 188,
-                  "end": 188
-                },
-                {
-                  "start": 202,
-                  "end": 202
-                },
-                {
-                  "start": 205,
-                  "end": 205
-                },
-                {
-                  "start": 209,
-                  "end": 209
-                },
-                {
-                  "start": 227,
-                  "end": 227
-                },
-                {
-                  "start": 235,
-                  "end": 235
-                },
-                {
-                  "start": 238,
-                  "end": 238
-                },
-                {
-                  "start": 252,
-                  "end": 252
-                },
-                {
-                  "start": 260,
-                  "end": 260
-                },
-                {
-                  "start": 261,
-                  "end": 261
-                },
-                {
-                  "start": 265,
-                  "end": 265
-                },
-                {
-                  "start": 268,
-                  "end": 268
-                },
-                {
-                  "start": 270,
-                  "end": 270
-                },
-                {
-                  "start": 272,
-                  "end": 272
-                },
-                {
-                  "start": 274,
-                  "end": 274
-                },
-                {
-                  "start": 284,
-                  "end": 284
-                }
-              ],
               "tests/queries/tests.py": [
                 {
-                  "start": 2253,
-                  "end": 2253
-                },
-                {
-                  "start": 2746,
-                  "end": 2746
-                },
-                {
-                  "start": 2754,
-                  "end": 2754
-                },
-                {
-                  "start": 2759,
-                  "end": 2759
-                },
-                {
-                  "start": 2764,
-                  "end": 2764
-                },
-                {
-                  "start": 2769,
-                  "end": 2769
-                },
-                {
-                  "start": 2774,
-                  "end": 2774
-                },
-                {
-                  "start": 2779,
-                  "end": 2779
-                }
-              ],
-              "tests/defer/models.py": [
-                {
-                  "start": 45,
-                  "end": 45
-                }
-              ],
-              "django/db/migrations/autodetector.py": [
-                {
-                  "start": 1140,
-                  "end": 1140
-                },
-                {
-                  "start": 1162,
-                  "end": 1162
-                }
-              ],
-              "django/db/models/sql/query.py": [
-                {
-                  "start": 909,
-                  "end": 909
-                },
-                {
-                  "start": 910,
-                  "end": 910
-                },
-                {
-                  "start": 2060,
-                  "end": 2060
-                },
-                {
-                  "start": 2122,
-                  "end": 2122
-                }
-              ],
-              "django/db/models/sql/compiler.py": [
-                {
-                  "start": 448,
-                  "end": 448
-                },
-                {
-                  "start": 450,
-                  "end": 450
-                }
-              ],
-              "django/db/models/query.py": [
-                {
-                  "start": 919,
-                  "end": 919
-                },
-                {
-                  "start": 999,
-                  "end": 999
-                },
-                {
-                  "start": 1390,
-                  "end": 1390
-                }
-              ],
-              "django/test/runner.py": [
-                {
-                  "start": 804,
-                  "end": 804
-                }
-              ],
-              "django/test/utils.py": [
-                {
-                  "start": 848,
-                  "end": 848
-                }
-              ],
-              "django/core/management/__init__.py": [
-                {
-                  "start": 152,
-                  "end": 152
+                  "start": 2235,
+                  "end": 2285
                 }
               ]
             },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "django/db/models/query.py",
-              "django/db/models/sql/compiler.py",
-              "django/db/models/sql/query.py",
-              "tests/queries/test_qs_combinators.py",
-              "tests/queries/tests.py"
-            ],
-            "spans": {
-              "tests/queries/test_qs_combinators.py": [
-                {
-                  "start": 292,
-                  "end": 292
-                },
-                {
-                  "start": 294,
-                  "end": 294
-                },
-                {
-                  "start": 296,
-                  "end": 296
-                },
-                {
-                  "start": 297,
-                  "end": 297
-                },
-                {
-                  "start": 311,
-                  "end": 311
-                },
-                {
-                  "start": 314,
-                  "end": 314
-                },
-                {
-                  "start": 316,
-                  "end": 316
-                }
-              ],
-              "tests/queries/tests.py": [
-                {
-                  "start": 2253,
-                  "end": 2253
-                }
-              ],
-              "django/db/models/query.py": [
-                {
-                  "start": 418,
-                  "end": 418
-                },
-                {
-                  "start": 726,
-                  "end": 726
-                },
-                {
-                  "start": 775,
-                  "end": 775
-                },
-                {
-                  "start": 919,
-                  "end": 919
-                },
-                {
-                  "start": 941,
-                  "end": 941
-                },
-                {
-                  "start": 949,
-                  "end": 949
-                },
-                {
-                  "start": 988,
-                  "end": 988
-                },
-                {
-                  "start": 994,
-                  "end": 994
-                },
-                {
-                  "start": 995,
-                  "end": 995
-                },
-                {
-                  "start": 996,
-                  "end": 996
-                },
-                {
-                  "start": 1003,
-                  "end": 1003
-                },
-                {
-                  "start": 1004,
-                  "end": 1004
-                },
-                {
-                  "start": 1013,
-                  "end": 1013
-                },
-                {
-                  "start": 1019,
-                  "end": 1019
-                },
-                {
-                  "start": 1046,
-                  "end": 1046
-                },
-                {
-                  "start": 1068,
-                  "end": 1068
-                },
-                {
-                  "start": 1087,
-                  "end": 1087
-                },
-                {
-                  "start": 1142,
-                  "end": 1142
-                },
-                {
-                  "start": 1152,
-                  "end": 1152
-                },
-                {
-                  "start": 1174,
-                  "end": 1174
-                },
-                {
-                  "start": 1190,
-                  "end": 1190
-                },
-                {
-                  "start": 1377,
-                  "end": 1377
-                },
-                {
-                  "start": 1378,
-                  "end": 1378
-                },
-                {
-                  "start": 1381,
-                  "end": 1381
-                },
-                {
-                  "start": 1390,
-                  "end": 1390
-                }
-              ],
-              "django/db/models/sql/query.py": [
-                {
-                  "start": 208,
-                  "end": 208
-                },
-                {
-                  "start": 209,
-                  "end": 209
-                },
-                {
-                  "start": 210,
-                  "end": 210
-                },
-                {
-                  "start": 438,
-                  "end": 438
-                }
-              ],
-              "django/db/models/sql/compiler.py": [
-                {
-                  "start": 362,
-                  "end": 362
-                },
-                {
-                  "start": 433,
-                  "end": 433
-                },
-                {
-                  "start": 437,
-                  "end": 437
-                },
-                {
-                  "start": 440,
-                  "end": 440
-                },
-                {
-                  "start": 459,
-                  "end": 459
-                },
-                {
-                  "start": 472,
-                  "end": 472
-                },
-                {
-                  "start": 477,
-                  "end": 477
-                },
-                {
-                  "start": 478,
-                  "end": 478
-                },
-                {
-                  "start": 479,
-                  "end": 479
-                },
-                {
-                  "start": 482,
-                  "end": 482
-                },
-                {
-                  "start": 502,
-                  "end": 502
-                },
-                {
-                  "start": 504,
-                  "end": 504
-                },
-                {
-                  "start": 505,
-                  "end": 505
-                },
-                {
-                  "start": 506,
-                  "end": 506
-                },
-                {
-                  "start": 507,
-                  "end": 507
-                }
-              ]
-            },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/queries/tests.py"
-            ],
-            "spans": {},
             "symbols": {}
           },
           {
             "files": [
               "django/db/models/query.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/db/models/query.py": [
+                {
+                  "start": 900,
+                  "end": 1035
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/queries/test_qs_combinators.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "django/contrib/admin/options.py",
-              "django/forms/models.py",
-              "tests/admin_changelist/tests.py",
-              "tests/aggregation_regress/tests.py",
-              "tests/annotations/tests.py",
-              "tests/basic/tests.py",
-              "tests/get_object_or_404/tests.py",
-              "tests/gis_tests/geo3d/tests.py",
-              "tests/lookup/tests.py",
-              "tests/model_formsets/tests.py",
-              "tests/pagination/tests.py",
-              "tests/postgres_tests/test_aggregates.py",
-              "tests/queries/test_qs_combinators.py",
-              "tests/queries/tests.py",
-              "tests/queryset_pickle/tests.py"
-            ],
             "spans": {
-              "django/contrib/admin/options.py": [
-                {
-                  "start": 2145,
-                  "end": 2145
-                }
-              ],
-              "django/forms/models.py": [
-                {
-                  "start": 905,
-                  "end": 905
-                },
-                {
-                  "start": 1326,
-                  "end": 1326
-                }
-              ],
-              "tests/gis_tests/geo3d/tests.py": [
-                {
-                  "start": 205,
-                  "end": 205
-                }
-              ],
-              "tests/aggregation_regress/tests.py": [
-                {
-                  "start": 983,
-                  "end": 983
-                }
-              ],
-              "tests/postgres_tests/test_aggregates.py": [
-                {
-                  "start": 222,
-                  "end": 222
-                }
-              ],
-              "tests/queryset_pickle/tests.py": [
-                {
-                  "start": 283,
-                  "end": 283
-                },
-                {
-                  "start": 296,
-                  "end": 296
-                }
-              ],
-              "tests/model_formsets/tests.py": [
-                {
-                  "start": 431,
-                  "end": 431
-                }
-              ],
-              "tests/annotations/tests.py": [
-                {
-                  "start": 160,
-                  "end": 160
-                }
-              ],
-              "tests/lookup/tests.py": [
-                {
-                  "start": 571,
-                  "end": 571
-                },
-                {
-                  "start": 572,
-                  "end": 572
-                },
-                {
-                  "start": 573,
-                  "end": 573
-                },
-                {
-                  "start": 574,
-                  "end": 574
-                },
-                {
-                  "start": 575,
-                  "end": 575
-                },
-                {
-                  "start": 576,
-                  "end": 576
-                }
-              ],
-              "tests/basic/tests.py": [
-                {
-                  "start": 310,
-                  "end": 310
-                },
-                {
-                  "start": 317,
-                  "end": 317
-                },
-                {
-                  "start": 331,
-                  "end": 331
-                },
-                {
-                  "start": 341,
-                  "end": 341
-                },
-                {
-                  "start": 343,
-                  "end": 343
-                },
-                {
-                  "start": 351,
-                  "end": 351
-                }
-              ],
               "tests/queries/test_qs_combinators.py": [
                 {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                },
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                }
-              ],
-              "tests/queries/tests.py": [
-                {
-                  "start": 722,
-                  "end": 722
-                },
-                {
-                  "start": 842,
-                  "end": 842
-                },
-                {
-                  "start": 846,
-                  "end": 846
-                },
-                {
-                  "start": 849,
-                  "end": 849
-                },
-                {
-                  "start": 850,
-                  "end": 850
-                },
-                {
-                  "start": 2070,
-                  "end": 2070
-                },
-                {
-                  "start": 2257,
-                  "end": 2257
-                },
-                {
-                  "start": 2260,
-                  "end": 2260
-                },
-                {
-                  "start": 2261,
-                  "end": 2261
-                },
-                {
-                  "start": 2266,
-                  "end": 2266
-                }
-              ],
-              "tests/get_object_or_404/tests.py": [
-                {
-                  "start": 55,
-                  "end": 55
-                }
-              ],
-              "tests/admin_changelist/tests.py": [
-                {
-                  "start": 1069,
-                  "end": 1069
-                },
-                {
-                  "start": 1165,
-                  "end": 1165
-                }
-              ],
-              "tests/pagination/tests.py": [
-                {
-                  "start": 398,
-                  "end": 398
+                  "start": 1,
+                  "end": 380
                 }
               ]
             },
@@ -937,14 +152,84 @@
             "files": [
               "django/contrib/admin/options.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/contrib/admin/options.py": [
+                {
+                  "start": 2125,
+                  "end": 2160
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "django/forms/models.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/forms/models.py": [
+                {
+                  "start": 860,
+                  "end": 935
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/forms/models.py"
+            ],
+            "spans": {
+              "django/forms/models.py": [
+                {
+                  "start": 1300,
+                  "end": 1345
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/models/query.py"
+            ],
+            "spans": {
+              "django/db/models/query.py": [
+                {
+                  "start": 1370,
+                  "end": 1415
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/models/sql/query.py"
+            ],
+            "spans": {
+              "django/db/models/sql/query.py": [
+                {
+                  "start": 1760,
+                  "end": 1815
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/models/sql/compiler.py"
+            ],
+            "spans": {
+              "django/db/models/sql/compiler.py": [
+                {
+                  "start": 350,
+                  "end": 530
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -956,46 +241,97 @@
           },
           {
             "files": [
-              "django/db/models/sql/compiler.py"
+              "django/db/models/sql/query.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/db/models/sql/query.py": [
+                {
+                  "start": 288,
+                  "end": 324
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/models/sql/query.py"
+            ],
+            "spans": {
+              "django/db/models/sql/query.py": [
+                {
+                  "start": 324,
+                  "end": 372
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/model_forms/tests.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/model_forms/tests.py": [
+                {
+                  "start": 1688,
+                  "end": 1778
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/model_forms/tests.py"
+            ],
+            "spans": {
+              "tests/model_forms/tests.py": [
+                {
+                  "start": 1778,
+                  "end": 1865
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/model_forms/tests.py"
+            ],
+            "spans": {
+              "tests/model_forms/tests.py": [
+                {
+                  "start": 1865,
+                  "end": 1915
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/model_forms/models.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/model_forms/models.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "tests/queries/test_qs_combinators.py"
+              "tests/model_forms/tests.py"
             ],
             "spans": {
-              "tests/queries/test_qs_combinators.py": [
+              "tests/model_forms/tests.py": [
                 {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                },
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 91,
-                  "end": 91
+                  "start": 1,
+                  "end": 40
                 }
               ]
             },
@@ -1005,67 +341,11 @@
             "files": [
               "tests/runtests.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "django/contrib/staticfiles/handlers.py",
-              "django/core/cache/__init__.py",
-              "django/core/handlers/asgi.py",
-              "django/core/handlers/base.py",
-              "django/core/handlers/exception.py",
-              "django/test/client.py",
-              "django/test/signals.py",
-              "django/test/testcases.py"
-            ],
             "spans": {
-              "django/contrib/staticfiles/handlers.py": [
+              "tests/runtests.py": [
                 {
-                  "start": 4,
-                  "end": 4
-                }
-              ],
-              "django/test/testcases.py": [
-                {
-                  "start": 21,
-                  "end": 21
-                }
-              ],
-              "django/core/handlers/exception.py": [
-                {
-                  "start": 6,
-                  "end": 6
-                }
-              ],
-              "django/core/handlers/asgi.py": [
-                {
-                  "start": 6,
-                  "end": 6
-                }
-              ],
-              "django/core/handlers/base.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/core/cache/__init__.py": [
-                {
-                  "start": 15,
-                  "end": 15
-                }
-              ],
-              "django/test/signals.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/test/client.py": [
-                {
-                  "start": 12,
-                  "end": 12
+                  "start": 1,
+                  "end": 80
                 }
               ]
             },
@@ -1073,27 +353,55 @@
           },
           {
             "files": [
-              "django/db/backends/base/operations.py",
-              "django/db/backends/mysql/introspection.py",
-              "django/db/backends/sqlite3/introspection.py"
+              "django/db/models/sql/compiler.py"
             ],
             "spans": {
-              "django/db/backends/base/operations.py": [
+              "django/db/models/sql/compiler.py": [
                 {
-                  "start": 5,
-                  "end": 5
+                  "start": 498,
+                  "end": 512
                 }
-              ],
-              "django/db/backends/sqlite3/introspection.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/queries/test_qs_combinators.py"
+            ],
+            "spans": {
+              "tests/queries/test_qs_combinators.py": [
                 {
-                  "start": 4,
-                  "end": 4
+                  "start": 88,
+                  "end": 110
                 }
-              ],
-              "django/db/backends/mysql/introspection.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/model_forms/tests.py"
+            ],
+            "spans": {
+              "tests/model_forms/tests.py": [
                 {
-                  "start": 3,
-                  "end": 3
+                  "start": 1752,
+                  "end": 1824
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/model_forms/tests.py"
+            ],
+            "spans": {
+              "tests/model_forms/tests.py": [
+                {
+                  "start": 1784,
+                  "end": 1818
                 }
               ]
             },
@@ -1101,880 +409,21 @@
           }
         ],
         "predFiles": [
-          "django/contrib/admin/options.py",
-          "django/contrib/gis/gdal/geometries.py",
-          "django/contrib/gis/geos/geometry.py",
-          "django/contrib/staticfiles/handlers.py",
-          "django/core/cache/__init__.py",
-          "django/core/handlers/asgi.py",
-          "django/core/handlers/base.py",
-          "django/core/handlers/exception.py",
-          "django/core/management/__init__.py",
-          "django/db/backends/base/operations.py",
-          "django/db/backends/mysql/introspection.py",
-          "django/db/backends/sqlite3/introspection.py",
-          "django/db/migrations/autodetector.py",
-          "django/db/models/query.py",
           "django/db/models/sql/compiler.py",
-          "django/db/models/sql/query.py",
-          "django/forms/models.py",
-          "django/test/client.py",
-          "django/test/runner.py",
-          "django/test/signals.py",
-          "django/test/testcases.py",
-          "django/test/utils.py",
-          "tests/admin_changelist/tests.py",
-          "tests/aggregation_regress/tests.py",
-          "tests/annotations/tests.py",
-          "tests/basic/tests.py",
-          "tests/defer/models.py",
-          "tests/filtered_relation/tests.py",
-          "tests/get_object_or_404/tests.py",
-          "tests/gis_tests/gdal_tests/test_geom.py",
-          "tests/gis_tests/geo3d/tests.py",
-          "tests/gis_tests/geoapp/test_functions.py",
-          "tests/gis_tests/geos_tests/test_geos.py",
-          "tests/lookup/tests.py",
-          "tests/model_forms/models.py",
           "tests/model_forms/tests.py",
-          "tests/model_formsets/tests.py",
-          "tests/pagination/tests.py",
-          "tests/postgres_tests/test_aggregates.py",
-          "tests/queries/test_explain.py",
-          "tests/queries/test_qs_combinators.py",
-          "tests/queries/tests.py",
-          "tests/queryset_pickle/tests.py",
-          "tests/runtests.py"
+          "tests/queries/test_qs_combinators.py"
         ],
         "predSpans": {
-          "tests/filtered_relation/tests.py": [
+          "django/db/models/sql/compiler.py": [
             {
-              "start": 221,
-              "end": 221
-            },
-            {
-              "start": 228,
-              "end": 228
-            }
-          ],
-          "django/contrib/gis/gdal/geometries.py": [
-            {
-              "start": 163,
-              "end": 163
-            },
-            {
-              "start": 493,
-              "end": 493
-            }
-          ],
-          "django/contrib/gis/geos/geometry.py": [
-            {
-              "start": 162,
-              "end": 162
-            },
-            {
-              "start": 587,
-              "end": 587
-            },
-            {
-              "start": 589,
-              "end": 589
-            },
-            {
-              "start": 591,
-              "end": 591
-            },
-            {
-              "start": 593,
-              "end": 593
-            }
-          ],
-          "tests/gis_tests/geo3d/tests.py": [
-            {
-              "start": 172,
-              "end": 172
-            },
-            {
-              "start": 205,
-              "end": 205
-            }
-          ],
-          "tests/gis_tests/geoapp/test_functions.py": [
-            {
-              "start": 552,
-              "end": 552
-            },
-            {
-              "start": 571,
-              "end": 571
-            },
-            {
-              "start": 574,
-              "end": 574
-            }
-          ],
-          "tests/gis_tests/geos_tests/test_geos.py": [
-            {
-              "start": 646,
-              "end": 646
-            },
-            {
-              "start": 647,
-              "end": 647
-            },
-            {
-              "start": 652,
-              "end": 652
-            },
-            {
-              "start": 658,
-              "end": 658
-            }
-          ],
-          "tests/gis_tests/gdal_tests/test_geom.py": [
-            {
-              "start": 301,
-              "end": 301
-            },
-            {
-              "start": 407,
-              "end": 407
-            },
-            {
-              "start": 408,
-              "end": 408
-            },
-            {
-              "start": 413,
-              "end": 413
-            }
-          ],
-          "tests/queries/test_explain.py": [
-            {
-              "start": 21,
-              "end": 21
+              "start": 498,
+              "end": 509
             }
           ],
           "tests/queries/test_qs_combinators.py": [
             {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 51,
-              "end": 51
-            },
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 69,
-              "end": 69
-            },
-            {
-              "start": 82,
-              "end": 82
-            },
-            {
               "start": 89,
               "end": 106
-            },
-            {
-              "start": 91,
-              "end": 91
-            },
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 94,
-              "end": 94
-            },
-            {
-              "start": 95,
-              "end": 95
-            },
-            {
-              "start": 96,
-              "end": 96
-            },
-            {
-              "start": 97,
-              "end": 97
-            },
-            {
-              "start": 98,
-              "end": 98
-            },
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 100,
-              "end": 100
-            },
-            {
-              "start": 105,
-              "end": 105
-            },
-            {
-              "start": 110,
-              "end": 110
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 124,
-              "end": 124
-            },
-            {
-              "start": 130,
-              "end": 130
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 144,
-              "end": 144
-            },
-            {
-              "start": 147,
-              "end": 147
-            },
-            {
-              "start": 150,
-              "end": 150
-            },
-            {
-              "start": 162,
-              "end": 162
-            },
-            {
-              "start": 169,
-              "end": 169
-            },
-            {
-              "start": 177,
-              "end": 177
-            },
-            {
-              "start": 188,
-              "end": 188
-            },
-            {
-              "start": 202,
-              "end": 202
-            },
-            {
-              "start": 205,
-              "end": 205
-            },
-            {
-              "start": 209,
-              "end": 209
-            },
-            {
-              "start": 227,
-              "end": 227
-            },
-            {
-              "start": 235,
-              "end": 235
-            },
-            {
-              "start": 238,
-              "end": 238
-            },
-            {
-              "start": 252,
-              "end": 252
-            },
-            {
-              "start": 260,
-              "end": 260
-            },
-            {
-              "start": 261,
-              "end": 261
-            },
-            {
-              "start": 265,
-              "end": 265
-            },
-            {
-              "start": 268,
-              "end": 268
-            },
-            {
-              "start": 270,
-              "end": 270
-            },
-            {
-              "start": 272,
-              "end": 272
-            },
-            {
-              "start": 274,
-              "end": 274
-            },
-            {
-              "start": 284,
-              "end": 284
-            },
-            {
-              "start": 292,
-              "end": 292
-            },
-            {
-              "start": 294,
-              "end": 294
-            },
-            {
-              "start": 296,
-              "end": 296
-            },
-            {
-              "start": 297,
-              "end": 297
-            },
-            {
-              "start": 311,
-              "end": 311
-            },
-            {
-              "start": 314,
-              "end": 314
-            },
-            {
-              "start": 316,
-              "end": 316
-            }
-          ],
-          "tests/queries/tests.py": [
-            {
-              "start": 722,
-              "end": 722
-            },
-            {
-              "start": 842,
-              "end": 842
-            },
-            {
-              "start": 846,
-              "end": 846
-            },
-            {
-              "start": 849,
-              "end": 849
-            },
-            {
-              "start": 850,
-              "end": 850
-            },
-            {
-              "start": 2070,
-              "end": 2070
-            },
-            {
-              "start": 2253,
-              "end": 2253
-            },
-            {
-              "start": 2257,
-              "end": 2257
-            },
-            {
-              "start": 2260,
-              "end": 2260
-            },
-            {
-              "start": 2261,
-              "end": 2261
-            },
-            {
-              "start": 2266,
-              "end": 2266
-            },
-            {
-              "start": 2746,
-              "end": 2746
-            },
-            {
-              "start": 2754,
-              "end": 2754
-            },
-            {
-              "start": 2759,
-              "end": 2759
-            },
-            {
-              "start": 2764,
-              "end": 2764
-            },
-            {
-              "start": 2769,
-              "end": 2769
-            },
-            {
-              "start": 2774,
-              "end": 2774
-            },
-            {
-              "start": 2779,
-              "end": 2779
-            }
-          ],
-          "tests/defer/models.py": [
-            {
-              "start": 45,
-              "end": 45
-            }
-          ],
-          "django/db/migrations/autodetector.py": [
-            {
-              "start": 1140,
-              "end": 1140
-            },
-            {
-              "start": 1162,
-              "end": 1162
-            }
-          ],
-          "django/db/models/sql/query.py": [
-            {
-              "start": 208,
-              "end": 208
-            },
-            {
-              "start": 209,
-              "end": 209
-            },
-            {
-              "start": 210,
-              "end": 210
-            },
-            {
-              "start": 438,
-              "end": 438
-            },
-            {
-              "start": 909,
-              "end": 909
-            },
-            {
-              "start": 910,
-              "end": 910
-            },
-            {
-              "start": 2060,
-              "end": 2060
-            },
-            {
-              "start": 2122,
-              "end": 2122
-            }
-          ],
-          "django/db/models/sql/compiler.py": [
-            {
-              "start": 362,
-              "end": 362
-            },
-            {
-              "start": 433,
-              "end": 433
-            },
-            {
-              "start": 437,
-              "end": 437
-            },
-            {
-              "start": 440,
-              "end": 440
-            },
-            {
-              "start": 448,
-              "end": 448
-            },
-            {
-              "start": 450,
-              "end": 450
-            },
-            {
-              "start": 459,
-              "end": 459
-            },
-            {
-              "start": 472,
-              "end": 472
-            },
-            {
-              "start": 477,
-              "end": 477
-            },
-            {
-              "start": 478,
-              "end": 478
-            },
-            {
-              "start": 479,
-              "end": 479
-            },
-            {
-              "start": 482,
-              "end": 482
-            },
-            {
-              "start": 498,
-              "end": 509
-            },
-            {
-              "start": 502,
-              "end": 502
-            },
-            {
-              "start": 504,
-              "end": 504
-            },
-            {
-              "start": 505,
-              "end": 505
-            },
-            {
-              "start": 506,
-              "end": 506
-            },
-            {
-              "start": 507,
-              "end": 507
-            }
-          ],
-          "django/db/models/query.py": [
-            {
-              "start": 418,
-              "end": 418
-            },
-            {
-              "start": 726,
-              "end": 726
-            },
-            {
-              "start": 775,
-              "end": 775
-            },
-            {
-              "start": 919,
-              "end": 919
-            },
-            {
-              "start": 941,
-              "end": 941
-            },
-            {
-              "start": 949,
-              "end": 949
-            },
-            {
-              "start": 988,
-              "end": 988
-            },
-            {
-              "start": 994,
-              "end": 994
-            },
-            {
-              "start": 995,
-              "end": 995
-            },
-            {
-              "start": 996,
-              "end": 996
-            },
-            {
-              "start": 999,
-              "end": 999
-            },
-            {
-              "start": 1003,
-              "end": 1003
-            },
-            {
-              "start": 1004,
-              "end": 1004
-            },
-            {
-              "start": 1013,
-              "end": 1013
-            },
-            {
-              "start": 1019,
-              "end": 1019
-            },
-            {
-              "start": 1046,
-              "end": 1046
-            },
-            {
-              "start": 1068,
-              "end": 1068
-            },
-            {
-              "start": 1087,
-              "end": 1087
-            },
-            {
-              "start": 1142,
-              "end": 1142
-            },
-            {
-              "start": 1152,
-              "end": 1152
-            },
-            {
-              "start": 1174,
-              "end": 1174
-            },
-            {
-              "start": 1190,
-              "end": 1190
-            },
-            {
-              "start": 1377,
-              "end": 1377
-            },
-            {
-              "start": 1378,
-              "end": 1378
-            },
-            {
-              "start": 1381,
-              "end": 1381
-            },
-            {
-              "start": 1390,
-              "end": 1390
-            }
-          ],
-          "django/test/runner.py": [
-            {
-              "start": 804,
-              "end": 804
-            }
-          ],
-          "django/test/utils.py": [
-            {
-              "start": 848,
-              "end": 848
-            }
-          ],
-          "django/core/management/__init__.py": [
-            {
-              "start": 152,
-              "end": 152
-            }
-          ],
-          "django/contrib/admin/options.py": [
-            {
-              "start": 2145,
-              "end": 2145
-            }
-          ],
-          "django/forms/models.py": [
-            {
-              "start": 905,
-              "end": 905
-            },
-            {
-              "start": 1326,
-              "end": 1326
-            }
-          ],
-          "tests/aggregation_regress/tests.py": [
-            {
-              "start": 983,
-              "end": 983
-            }
-          ],
-          "tests/postgres_tests/test_aggregates.py": [
-            {
-              "start": 222,
-              "end": 222
-            }
-          ],
-          "tests/queryset_pickle/tests.py": [
-            {
-              "start": 283,
-              "end": 283
-            },
-            {
-              "start": 296,
-              "end": 296
-            }
-          ],
-          "tests/model_formsets/tests.py": [
-            {
-              "start": 431,
-              "end": 431
-            }
-          ],
-          "tests/annotations/tests.py": [
-            {
-              "start": 160,
-              "end": 160
-            }
-          ],
-          "tests/lookup/tests.py": [
-            {
-              "start": 571,
-              "end": 571
-            },
-            {
-              "start": 572,
-              "end": 572
-            },
-            {
-              "start": 573,
-              "end": 573
-            },
-            {
-              "start": 574,
-              "end": 574
-            },
-            {
-              "start": 575,
-              "end": 575
-            },
-            {
-              "start": 576,
-              "end": 576
-            }
-          ],
-          "tests/basic/tests.py": [
-            {
-              "start": 310,
-              "end": 310
-            },
-            {
-              "start": 317,
-              "end": 317
-            },
-            {
-              "start": 331,
-              "end": 331
-            },
-            {
-              "start": 341,
-              "end": 341
-            },
-            {
-              "start": 343,
-              "end": 343
-            },
-            {
-              "start": 351,
-              "end": 351
-            }
-          ],
-          "tests/get_object_or_404/tests.py": [
-            {
-              "start": 55,
-              "end": 55
-            }
-          ],
-          "tests/admin_changelist/tests.py": [
-            {
-              "start": 1069,
-              "end": 1069
-            },
-            {
-              "start": 1165,
-              "end": 1165
-            }
-          ],
-          "tests/pagination/tests.py": [
-            {
-              "start": 398,
-              "end": 398
-            }
-          ],
-          "django/contrib/staticfiles/handlers.py": [
-            {
-              "start": 4,
-              "end": 4
-            }
-          ],
-          "django/test/testcases.py": [
-            {
-              "start": 21,
-              "end": 21
-            }
-          ],
-          "django/core/handlers/exception.py": [
-            {
-              "start": 6,
-              "end": 6
-            }
-          ],
-          "django/core/handlers/asgi.py": [
-            {
-              "start": 6,
-              "end": 6
-            }
-          ],
-          "django/core/handlers/base.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/core/cache/__init__.py": [
-            {
-              "start": 15,
-              "end": 15
-            }
-          ],
-          "django/test/signals.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/test/client.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "django/db/backends/base/operations.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/db/backends/sqlite3/introspection.py": [
-            {
-              "start": 4,
-              "end": 4
-            }
-          ],
-          "django/db/backends/mysql/introspection.py": [
-            {
-              "start": 3,
-              "end": 3
             }
           ],
           "tests/model_forms/tests.py": [
@@ -2001,159 +450,213 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.15625,
-              "span": 0.008274145127041077,
-              "line": 0.008670520231213872
+              "file": 0.25,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.75,
+              "file": 0.5,
               "symbol": 0.375,
-              "span": 0.07307607820165483,
-              "line": 0.05491329479768786
+              "span": 0.28088159917990774,
+              "line": 0.28901734104046245
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.75,
+              "file": 0.5,
               "symbol": 0.375,
-              "span": 0.07307607820165483,
-              "line": 0.05491329479768786
+              "span": 0.28088159917990774,
+              "line": 0.28901734104046245
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.75,
+              "file": 0.5,
               "symbol": 0.375,
-              "span": 0.07307607820165483,
-              "line": 0.05491329479768786
+              "span": 0.28088159917990774,
+              "line": 0.28901734104046245
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.75,
+              "file": 0.5,
               "symbol": 0.375,
-              "span": 0.07307607820165483,
-              "line": 0.05491329479768786
+              "span": 0.28088159917990774,
+              "line": 0.28901734104046245
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.46875,
-              "span": 0.09496961265285202,
-              "line": 0.06936416184971098
+              "file": 0.5,
+              "symbol": 0.375,
+              "span": 0.28088159917990774,
+              "line": 0.28901734104046245
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.46875,
-              "span": 0.09496961265285202,
-              "line": 0.06936416184971098
+              "file": 0.5,
+              "symbol": 0.53125,
+              "span": 0.3332357033023358,
+              "line": 0.34971098265895956
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 0.75,
-              "symbol": 0.46875,
-              "span": 0.09496961265285202,
-              "line": 0.06936416184971098
+              "symbol": 0.625,
+              "span": 0.3456835322545215,
+              "line": 0.3670520231213873
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 0.75,
-              "symbol": 0.46875,
-              "span": 0.09496961265285202,
-              "line": 0.06936416184971098
+              "symbol": 0.625,
+              "span": 0.3456835322545215,
+              "line": 0.3670520231213873
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 0.75,
-              "symbol": 0.46875,
-              "span": 0.09496961265285202,
-              "line": 0.06936416184971098
+              "symbol": 0.625,
+              "span": 0.3456835322545215,
+              "line": 0.3670520231213873
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 0.75,
-              "symbol": 0.46875,
-              "span": 0.09496961265285202,
-              "line": 0.06936416184971098
+              "symbol": 0.65625,
+              "span": 0.4673061433697005,
+              "line": 0.47398843930635837
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 0.75,
-              "symbol": 0.46875,
-              "span": 0.09496961265285202,
-              "line": 0.06936416184971098
+              "symbol": 0.6875,
+              "span": 0.5386248810133997,
+              "line": 0.5520231213872833
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 0.75,
-              "symbol": 0.46875,
-              "span": 0.09496961265285202,
-              "line": 0.06936416184971098
+              "symbol": 0.6875,
+              "span": 0.5386248810133997,
+              "line": 0.5520231213872833
             }
           },
           {
             "step": 14,
             "coverage": {
               "file": 0.75,
-              "symbol": 0.46875,
-              "span": 0.09496961265285202,
-              "line": 0.06936416184971098
+              "symbol": 0.6875,
+              "span": 0.5386248810133997,
+              "line": 0.5520231213872833
             }
           },
           {
             "step": 15,
             "coverage": {
               "file": 0.75,
-              "symbol": 0.46875,
-              "span": 0.09496961265285202,
-              "line": 0.06936416184971098
+              "symbol": 0.6875,
+              "span": 0.5386248810133997,
+              "line": 0.5520231213872833
             }
           },
           {
             "step": 16,
             "coverage": {
               "file": 0.75,
-              "symbol": 0.46875,
-              "span": 0.09496961265285202,
-              "line": 0.06936416184971098
+              "symbol": 0.6875,
+              "span": 0.5386248810133997,
+              "line": 0.5520231213872833
+            }
+          },
+          {
+            "step": 17,
+            "coverage": {
+              "file": 0.75,
+              "symbol": 0.6875,
+              "span": 0.5386248810133997,
+              "line": 0.5520231213872833
+            }
+          },
+          {
+            "step": 18,
+            "coverage": {
+              "file": 0.75,
+              "symbol": 0.6875,
+              "span": 0.5386248810133997,
+              "line": 0.5520231213872833
+            }
+          },
+          {
+            "step": 19,
+            "coverage": {
+              "file": 0.75,
+              "symbol": 0.6875,
+              "span": 0.5386248810133997,
+              "line": 0.5520231213872833
+            }
+          },
+          {
+            "step": 20,
+            "coverage": {
+              "file": 0.75,
+              "symbol": 0.6875,
+              "span": 0.5386248810133997,
+              "line": 0.5520231213872833
+            }
+          },
+          {
+            "step": 21,
+            "coverage": {
+              "file": 0.75,
+              "symbol": 0.6875,
+              "span": 0.5386248810133997,
+              "line": 0.5520231213872833
+            }
+          },
+          {
+            "step": 22,
+            "coverage": {
+              "file": 0.75,
+              "symbol": 0.6875,
+              "span": 0.5386248810133997,
+              "line": 0.5520231213872833
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.75,
-          "symbol": 0.42578125,
-          "span": 0.08407776231968954,
-          "line": 0.061958092485549114
+          "file": 0.6590909090909091,
+          "symbol": 0.5681818181818182,
+          "span": 0.41667609684011525,
+          "line": 0.4291907514450867
         },
         "redundancy": {
-          "file": 0.2666666666666667,
-          "symbol": 0.11392405063291144,
-          "span": 0.025088576079670633,
-          "line": 0.03645833333333337
+          "file": 0.5454545454545454,
+          "symbol": 0.15135135135135136,
+          "span": 0.09469113931403017,
+          "line": 0.08713450292397662
         }
       },
       "fixOverlap": {
@@ -2361,7 +864,22 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/django/db/models/sql/compiler.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/tests/model_forms/tests.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/tests/queries/test_qs_combinators.py",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "todo_list",
@@ -2477,7 +995,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/model_forms/tests.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/model_forms/tests.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2527,9 +1054,26 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [
+          ".venv"
+        ],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 1
+      },
       "startedAt": "2026-05-06T06:52:36Z",
       "completedAt": "2026-05-06T07:01:32Z",
       "durationMs": 536188,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 2804080,
@@ -2538,6 +1082,28 @@
         "total_tokens": 2821985,
         "cache_read_input_tokens": 2686976
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 60,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py\nindex c913267476..f20451488b 100644\n--- a/django/db/models/sql/query.py\n+++ b/django/db/models/sql/query.py\n@@ -1777,6 +1777,8 @@ class Query(BaseExpression):\n \n     def set_empty(self):\n         self.where.add(NothingNode(), AND)\n+        for query in self.combined_queries:\n+            query.set_empty()\n \n     def is_empty(self):\n         return any(isinstance(c, NothingNode) for c in self.where.children)\ndiff --git a/tests/queries/test_qs_combinators.py b/tests/queries/test_qs_combinators.py\nindex 9c6fd474ca..e0958c051a 100644\n--- a/tests/queries/test_qs_combinators.py\n+++ b/tests/queries/test_qs_combinators.py\n@@ -99,6 +99,23 @@ class QuerySetSetOperationTests(TestCase):\n         self.assertEqual(len(qs2.union(qs2)), 0)\n         self.assertEqual(len(qs3.union(qs3)), 0)\n \n+    def test_union_none(self):\n+        qs1 = Number.objects.filter(num__lte=1)\n+        qs2 = Number.objects.filter(num__gte=8)\n+        self.assertNumbersEqual(qs1.union(qs2).none(), [], ordered=False)\n+\n+    @skipUnlessDBFeature('supports_select_intersection')\n+    def test_intersection_none(self):\n+        qs1 = Number.objects.filter(num__lte=5)\n+        qs2 = Number.objects.filter(num__gte=5)\n+        self.assertNumbersEqual(qs1.intersection(qs2).none(), [], ordered=False)\n+\n+    @skipUnlessDBFeature('supports_select_difference')\n+    def test_difference_none(self):\n+        qs1 = Number.objects.filter(num__lte=5)\n+        qs2 = Number.objects.filter(num__lte=4)\n+        self.assertNumbersEqual(qs1.difference(qs2).none(), [], ordered=False)\n+\n     def test_limits(self):\n         qs1 = Number.objects.all()\n         qs2 = Number.objects.all()\n",
       "finalOutput": {
         "status": "completed",
@@ -2616,1265 +1182,13 @@
         "predSteps": [
           {
             "files": [
-              "django/contrib/admin/options.py",
-              "django/contrib/auth/backends.py",
-              "django/contrib/auth/models.py",
-              "django/contrib/contenttypes/forms.py",
-              "django/contrib/gis/gdal/geometries.py",
-              "django/contrib/gis/geos/geometry.py",
-              "django/core/management/__init__.py",
-              "django/db/migrations/autodetector.py",
-              "django/db/models/expressions.py",
-              "django/db/models/fields/related.py",
-              "django/db/models/fields/related_descriptors.py",
-              "django/db/models/manager.py",
-              "django/db/models/query.py",
-              "django/db/models/sql/compiler.py",
-              "django/db/models/sql/query.py",
-              "django/forms/models.py",
-              "django/template/defaultfilters.py",
-              "django/test/runner.py",
-              "django/test/utils.py",
-              "django/views/generic/dates.py",
-              "tests/admin_changelist/tests.py",
-              "tests/aggregation_regress/tests.py",
-              "tests/annotations/tests.py",
-              "tests/auth_tests/test_forms.py",
-              "tests/backends/base/test_operations.py",
-              "tests/basic/tests.py",
-              "tests/cache/tests.py",
-              "tests/conditional_processing/views.py",
-              "tests/csrf_tests/tests.py",
-              "tests/db_functions/datetime/test_extract_trunc.py",
-              "tests/defer/models.py",
-              "tests/delete/tests.py",
-              "tests/deprecation/test_middleware_mixin.py",
-              "tests/expressions/tests.py",
-              "tests/filtered_relation/tests.py",
-              "tests/forms_tests/models.py",
-              "tests/forms_tests/tests/test_error_messages.py",
-              "tests/forms_tests/tests/tests.py",
-              "tests/forms_tests/widget_tests/test_checkboxinput.py",
-              "tests/forms_tests/widget_tests/test_checkboxselectmultiple.py",
-              "tests/forms_tests/widget_tests/test_dateinput.py",
-              "tests/forms_tests/widget_tests/test_datetimeinput.py",
-              "tests/forms_tests/widget_tests/test_multiplehiddeninput.py",
-              "tests/forms_tests/widget_tests/test_nullbooleanselect.py",
-              "tests/forms_tests/widget_tests/test_select.py",
-              "tests/forms_tests/widget_tests/test_selectdatewidget.py",
-              "tests/forms_tests/widget_tests/test_selectmultiple.py",
-              "tests/forms_tests/widget_tests/test_splitdatetimewidget.py",
-              "tests/forms_tests/widget_tests/test_textarea.py",
-              "tests/forms_tests/widget_tests/test_textinput.py",
-              "tests/forms_tests/widget_tests/test_timeinput.py",
-              "tests/get_object_or_404/tests.py",
-              "tests/gis_tests/gdal_tests/test_geom.py",
-              "tests/gis_tests/geo3d/tests.py",
-              "tests/gis_tests/geoapp/test_functions.py",
-              "tests/gis_tests/geos_tests/test_geos.py",
-              "tests/handlers/tests.py",
-              "tests/i18n/tests.py",
-              "tests/invalid_models_tests/test_ordinary_fields.py",
-              "tests/lookup/tests.py",
-              "tests/many_to_one/tests.py",
-              "tests/messages_tests/test_api.py",
-              "tests/middleware_exceptions/tests.py",
-              "tests/migrations/test_operations.py",
-              "tests/migrations/test_writer.py",
-              "tests/model_fields/test_jsonfield.py",
-              "tests/model_forms/test_modelchoicefield.py",
-              "tests/model_forms/test_uuid.py",
-              "tests/model_forms/tests.py",
-              "tests/model_formsets/tests.py",
-              "tests/model_inheritance/test_abstract_inheritance.py",
-              "tests/model_inheritance_regress/tests.py",
-              "tests/modeladmin/test_checks.py",
-              "tests/one_to_one/tests.py",
-              "tests/pagination/tests.py",
-              "tests/postgres_tests/test_aggregates.py",
-              "tests/postgres_tests/test_array.py",
-              "tests/postgres_tests/test_ranges.py",
-              "tests/queries/test_explain.py",
-              "tests/queries/test_qs_combinators.py",
-              "tests/queries/tests.py",
-              "tests/queryset_pickle/tests.py",
-              "tests/requests/test_accept_header.py",
-              "tests/settings_tests/tests.py",
-              "tests/template_tests/filter_tests/test_default.py",
-              "tests/template_tests/filter_tests/test_default_if_none.py",
-              "tests/template_tests/filter_tests/test_yesno.py",
-              "tests/template_tests/syntax_tests/test_include.py",
-              "tests/test_client/tests.py",
-              "tests/urlpatterns_reverse/tests.py",
-              "tests/utils_tests/test_http.py",
-              "tests/utils_tests/test_lazyobject.py",
-              "tests/utils_tests/test_timezone.py"
+              "django/forms/models.py"
             ],
             "spans": {
-              "tests/gis_tests/geo3d/tests.py": [
-                {
-                  "start": 172,
-                  "end": 172
-                },
-                {
-                  "start": 205,
-                  "end": 205
-                }
-              ],
-              "tests/gis_tests/geoapp/test_functions.py": [
-                {
-                  "start": 552,
-                  "end": 552
-                },
-                {
-                  "start": 571,
-                  "end": 571
-                },
-                {
-                  "start": 574,
-                  "end": 574
-                }
-              ],
-              "tests/gis_tests/gdal_tests/test_geom.py": [
-                {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 407,
-                  "end": 407
-                },
-                {
-                  "start": 408,
-                  "end": 408
-                },
-                {
-                  "start": 413,
-                  "end": 413
-                }
-              ],
-              "tests/settings_tests/tests.py": [
-                {
-                  "start": 361,
-                  "end": 361
-                }
-              ],
-              "tests/model_inheritance_regress/tests.py": [
-                {
-                  "start": 563,
-                  "end": 563
-                }
-              ],
-              "tests/gis_tests/geos_tests/test_geos.py": [
-                {
-                  "start": 646,
-                  "end": 646
-                },
-                {
-                  "start": 647,
-                  "end": 647
-                },
-                {
-                  "start": 652,
-                  "end": 652
-                },
-                {
-                  "start": 658,
-                  "end": 658
-                }
-              ],
-              "tests/aggregation_regress/tests.py": [
-                {
-                  "start": 983,
-                  "end": 983
-                }
-              ],
-              "tests/handlers/tests.py": [
-                {
-                  "start": 206,
-                  "end": 206
-                }
-              ],
-              "tests/i18n/tests.py": [
-                {
-                  "start": 166,
-                  "end": 166
-                },
-                {
-                  "start": 173,
-                  "end": 173
-                }
-              ],
-              "tests/postgres_tests/test_aggregates.py": [
-                {
-                  "start": 222,
-                  "end": 222
-                }
-              ],
-              "tests/postgres_tests/test_array.py": [
-                {
-                  "start": 623,
-                  "end": 623
-                }
-              ],
-              "tests/postgres_tests/test_ranges.py": [
-                {
-                  "start": 620,
-                  "end": 620
-                }
-              ],
-              "tests/queryset_pickle/tests.py": [
-                {
-                  "start": 283,
-                  "end": 283
-                },
-                {
-                  "start": 296,
-                  "end": 296
-                }
-              ],
-              "tests/model_formsets/tests.py": [
-                {
-                  "start": 431,
-                  "end": 431
-                }
-              ],
-              "tests/csrf_tests/tests.py": [
-                {
-                  "start": 573,
-                  "end": 573
-                }
-              ],
-              "tests/deprecation/test_middleware_mixin.py": [
-                {
-                  "start": 21,
-                  "end": 21
-                }
-              ],
-              "tests/model_fields/test_jsonfield.py": [
-                {
-                  "start": 509,
-                  "end": 509
-                }
-              ],
-              "tests/test_client/tests.py": [
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 801,
-                  "end": 801
-                }
-              ],
-              "tests/expressions/tests.py": [
-                {
-                  "start": 225,
-                  "end": 225
-                }
-              ],
-              "tests/one_to_one/tests.py": [
-                {
-                  "start": 221,
-                  "end": 221
-                }
-              ],
-              "tests/many_to_one/tests.py": [
-                {
-                  "start": 172,
-                  "end": 172
-                }
-              ],
-              "tests/modeladmin/test_checks.py": [
-                {
-                  "start": 1242,
-                  "end": 1242
-                }
-              ],
-              "tests/utils_tests/test_lazyobject.py": [
-                {
-                  "start": 334,
-                  "end": 334
-                }
-              ],
-              "tests/utils_tests/test_http.py": [
-                {
-                  "start": 84,
-                  "end": 84
-                }
-              ],
-              "tests/utils_tests/test_timezone.py": [
-                {
-                  "start": 72,
-                  "end": 72
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                },
-                {
-                  "start": 89,
-                  "end": 89
-                }
-              ],
-              "tests/annotations/tests.py": [
-                {
-                  "start": 160,
-                  "end": 160
-                }
-              ],
-              "tests/requests/test_accept_header.py": [
-                {
-                  "start": 89,
-                  "end": 89
-                }
-              ],
-              "tests/invalid_models_tests/test_ordinary_fields.py": [
-                {
-                  "start": 828,
-                  "end": 828
-                }
-              ],
-              "tests/lookup/tests.py": [
-                {
-                  "start": 569,
-                  "end": 569
-                },
-                {
-                  "start": 570,
-                  "end": 570
-                },
-                {
-                  "start": 571,
-                  "end": 571
-                },
-                {
-                  "start": 572,
-                  "end": 572
-                },
-                {
-                  "start": 573,
-                  "end": 573
-                },
-                {
-                  "start": 574,
-                  "end": 574
-                },
-                {
-                  "start": 575,
-                  "end": 575
-                },
-                {
-                  "start": 576,
-                  "end": 576
-                },
-                {
-                  "start": 607,
-                  "end": 607
-                },
-                {
-                  "start": 616,
-                  "end": 616
-                }
-              ],
-              "tests/queries/test_explain.py": [
-                {
-                  "start": 21,
-                  "end": 21
-                }
-              ],
-              "tests/queries/tests.py": [
-                {
-                  "start": 722,
-                  "end": 722
-                },
-                {
-                  "start": 842,
-                  "end": 842
-                },
-                {
-                  "start": 846,
-                  "end": 846
-                },
-                {
-                  "start": 849,
-                  "end": 849
-                },
-                {
-                  "start": 850,
-                  "end": 850
-                },
-                {
-                  "start": 2070,
-                  "end": 2070
-                },
-                {
-                  "start": 2257,
-                  "end": 2257
-                },
-                {
-                  "start": 2260,
-                  "end": 2260
-                },
-                {
-                  "start": 2261,
-                  "end": 2261
-                },
-                {
-                  "start": 2266,
-                  "end": 2266
-                },
-                {
-                  "start": 2746,
-                  "end": 2746
-                },
-                {
-                  "start": 2754,
-                  "end": 2754
-                },
-                {
-                  "start": 2759,
-                  "end": 2759
-                },
-                {
-                  "start": 2764,
-                  "end": 2764
-                },
-                {
-                  "start": 2769,
-                  "end": 2769
-                },
-                {
-                  "start": 2774,
-                  "end": 2774
-                },
-                {
-                  "start": 2779,
-                  "end": 2779
-                }
-              ],
-              "tests/basic/tests.py": [
-                {
-                  "start": 310,
-                  "end": 310
-                },
-                {
-                  "start": 317,
-                  "end": 317
-                },
-                {
-                  "start": 331,
-                  "end": 331
-                },
-                {
-                  "start": 341,
-                  "end": 341
-                },
-                {
-                  "start": 343,
-                  "end": 343
-                },
-                {
-                  "start": 351,
-                  "end": 351
-                }
-              ],
-              "tests/queries/test_qs_combinators.py": [
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 51,
-                  "end": 51
-                },
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                },
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                },
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 94,
-                  "end": 94
-                },
-                {
-                  "start": 95,
-                  "end": 95
-                },
-                {
-                  "start": 96,
-                  "end": 96
-                },
-                {
-                  "start": 97,
-                  "end": 97
-                },
-                {
-                  "start": 98,
-                  "end": 98
-                },
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 100,
-                  "end": 100
-                },
-                {
-                  "start": 105,
-                  "end": 105
-                },
-                {
-                  "start": 110,
-                  "end": 110
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 124,
-                  "end": 124
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 144,
-                  "end": 144
-                },
-                {
-                  "start": 147,
-                  "end": 147
-                },
-                {
-                  "start": 150,
-                  "end": 150
-                },
-                {
-                  "start": 162,
-                  "end": 162
-                },
-                {
-                  "start": 169,
-                  "end": 169
-                },
-                {
-                  "start": 177,
-                  "end": 177
-                },
-                {
-                  "start": 188,
-                  "end": 188
-                },
-                {
-                  "start": 202,
-                  "end": 202
-                },
-                {
-                  "start": 205,
-                  "end": 205
-                },
-                {
-                  "start": 209,
-                  "end": 209
-                },
-                {
-                  "start": 227,
-                  "end": 227
-                },
-                {
-                  "start": 235,
-                  "end": 235
-                },
-                {
-                  "start": 238,
-                  "end": 238
-                },
-                {
-                  "start": 252,
-                  "end": 252
-                },
-                {
-                  "start": 260,
-                  "end": 260
-                },
-                {
-                  "start": 261,
-                  "end": 261
-                },
-                {
-                  "start": 265,
-                  "end": 265
-                },
-                {
-                  "start": 268,
-                  "end": 268
-                },
-                {
-                  "start": 270,
-                  "end": 270
-                },
-                {
-                  "start": 272,
-                  "end": 272
-                },
-                {
-                  "start": 274,
-                  "end": 274
-                },
-                {
-                  "start": 284,
-                  "end": 284
-                }
-              ],
-              "tests/messages_tests/test_api.py": [
-                {
-                  "start": 30,
-                  "end": 30
-                }
-              ],
-              "tests/forms_tests/models.py": [
-                {
-                  "start": 30,
-                  "end": 30
-                }
-              ],
-              "tests/conditional_processing/views.py": [
-                {
-                  "start": 49,
-                  "end": 49
-                }
-              ],
-              "tests/get_object_or_404/tests.py": [
-                {
-                  "start": 55,
-                  "end": 55
-                }
-              ],
-              "tests/backends/base/test_operations.py": [
-                {
-                  "start": 72,
-                  "end": 72
-                }
-              ],
-              "tests/forms_tests/tests/test_error_messages.py": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 275,
-                  "end": 275
-                },
-                {
-                  "start": 302,
-                  "end": 302
-                },
-                {
-                  "start": 308,
-                  "end": 308
-                },
-                {
-                  "start": 317,
-                  "end": 317
-                },
-                {
-                  "start": 329,
-                  "end": 329
-                }
-              ],
-              "tests/forms_tests/tests/tests.py": [
-                {
-                  "start": 59,
-                  "end": 59
-                },
-                {
-                  "start": 299,
-                  "end": 299
-                },
-                {
-                  "start": 342,
-                  "end": 342
-                }
-              ],
-              "tests/model_inheritance/test_abstract_inheritance.py": [
-                {
-                  "start": 195,
-                  "end": 195
-                }
-              ],
-              "tests/forms_tests/widget_tests/test_datetimeinput.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/forms_tests/widget_tests/test_multiplehiddeninput.py": [
-                {
-                  "start": 61,
-                  "end": 61
-                }
-              ],
-              "tests/forms_tests/widget_tests/test_selectmultiple.py": [
-                {
-                  "start": 36,
-                  "end": 36
-                }
-              ],
-              "tests/forms_tests/widget_tests/test_textinput.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/forms_tests/widget_tests/test_timeinput.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/forms_tests/widget_tests/test_checkboxinput.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "tests/forms_tests/widget_tests/test_splitdatetimewidget.py": [
-                {
-                  "start": 16,
-                  "end": 16
-                }
-              ],
-              "tests/forms_tests/widget_tests/test_textarea.py": [
-                {
-                  "start": 23,
-                  "end": 23
-                }
-              ],
-              "tests/forms_tests/widget_tests/test_checkboxselectmultiple.py": [
-                {
-                  "start": 33,
-                  "end": 33
-                }
-              ],
-              "tests/forms_tests/widget_tests/test_dateinput.py": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "tests/forms_tests/widget_tests/test_nullbooleanselect.py": [
-                {
-                  "start": 29,
-                  "end": 29
-                }
-              ],
-              "tests/forms_tests/widget_tests/test_select.py": [
-                {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 386,
-                  "end": 386
-                }
-              ],
-              "tests/forms_tests/widget_tests/test_selectdatewidget.py": [
-                {
-                  "start": 87,
-                  "end": 87
-                }
-              ],
-              "tests/urlpatterns_reverse/tests.py": [
-                {
-                  "start": 293,
-                  "end": 293
-                }
-              ],
-              "tests/defer/models.py": [
-                {
-                  "start": 45,
-                  "end": 45
-                }
-              ],
-              "tests/delete/tests.py": [
-                {
-                  "start": 56,
-                  "end": 56
-                },
-                {
-                  "start": 647,
-                  "end": 647
-                }
-              ],
-              "tests/admin_changelist/tests.py": [
-                {
-                  "start": 1069,
-                  "end": 1069
-                },
-                {
-                  "start": 1165,
-                  "end": 1165
-                }
-              ],
-              "tests/db_functions/datetime/test_extract_trunc.py": [
-                {
-                  "start": 251,
-                  "end": 251
-                },
-                {
-                  "start": 695,
-                  "end": 695
-                },
-                {
-                  "start": 854,
-                  "end": 854
-                },
-                {
-                  "start": 882,
-                  "end": 882
-                }
-              ],
-              "tests/template_tests/filter_tests/test_default_if_none.py": [
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 14,
-                  "end": 14
-                }
-              ],
-              "tests/template_tests/filter_tests/test_default.py": [
-                {
-                  "start": 56,
-                  "end": 56
-                }
-              ],
-              "tests/cache/tests.py": [
-                {
-                  "start": 988,
-                  "end": 988
-                }
-              ],
-              "tests/template_tests/filter_tests/test_yesno.py": [
-                {
-                  "start": 22,
-                  "end": 22
-                }
-              ],
-              "tests/template_tests/syntax_tests/test_include.py": [
-                {
-                  "start": 258,
-                  "end": 258
-                }
-              ],
-              "tests/middleware_exceptions/tests.py": [
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 61,
-                  "end": 61
-                },
-                {
-                  "start": 303,
-                  "end": 303
-                }
-              ],
-              "tests/filtered_relation/tests.py": [
-                {
-                  "start": 221,
-                  "end": 221
-                },
-                {
-                  "start": 228,
-                  "end": 228
-                }
-              ],
-              "tests/pagination/tests.py": [
-                {
-                  "start": 398,
-                  "end": 398
-                }
-              ],
-              "tests/migrations/test_operations.py": [
-                {
-                  "start": 1270,
-                  "end": 1270
-                }
-              ],
-              "tests/migrations/test_writer.py": [
-                {
-                  "start": 655,
-                  "end": 655
-                }
-              ],
-              "tests/auth_tests/test_forms.py": [
-                {
-                  "start": 264,
-                  "end": 264
-                },
-                {
-                  "start": 459,
-                  "end": 459
-                },
-                {
-                  "start": 777,
-                  "end": 777
-                }
-              ],
-              "tests/model_forms/tests.py": [
-                {
-                  "start": 132,
-                  "end": 132
-                },
-                {
-                  "start": 1694,
-                  "end": 1694
-                },
-                {
-                  "start": 1702,
-                  "end": 1702
-                },
-                {
-                  "start": 1739,
-                  "end": 1739
-                },
-                {
-                  "start": 1748,
-                  "end": 1748
-                },
-                {
-                  "start": 1756,
-                  "end": 1756
-                },
-                {
-                  "start": 1786,
-                  "end": 1786
-                },
-                {
-                  "start": 1790,
-                  "end": 1790
-                },
-                {
-                  "start": 1795,
-                  "end": 1795
-                },
-                {
-                  "start": 1805,
-                  "end": 1805
-                },
-                {
-                  "start": 1811,
-                  "end": 1811
-                },
-                {
-                  "start": 1814,
-                  "end": 1814
-                },
-                {
-                  "start": 1841,
-                  "end": 1841
-                },
-                {
-                  "start": 1846,
-                  "end": 1846
-                },
-                {
-                  "start": 1856,
-                  "end": 1856
-                },
-                {
-                  "start": 1867,
-                  "end": 1867
-                },
-                {
-                  "start": 1877,
-                  "end": 1877
-                },
-                {
-                  "start": 1974,
-                  "end": 1974
-                },
-                {
-                  "start": 2542,
-                  "end": 2542
-                },
-                {
-                  "start": 2544,
-                  "end": 2544
-                }
-              ],
-              "tests/model_forms/test_uuid.py": [
-                {
-                  "start": 31,
-                  "end": 31
-                }
-              ],
-              "tests/model_forms/test_modelchoicefield.py": [
-                {
-                  "start": 182,
-                  "end": 182
-                },
-                {
-                  "start": 238,
-                  "end": 238
-                },
-                {
-                  "start": 262,
-                  "end": 262
-                },
-                {
-                  "start": 291,
-                  "end": 291
-                },
-                {
-                  "start": 294,
-                  "end": 294
-                },
-                {
-                  "start": 330,
-                  "end": 330
-                },
-                {
-                  "start": 334,
-                  "end": 334
-                },
-                {
-                  "start": 368,
-                  "end": 368
-                }
-              ],
-              "django/views/generic/dates.py": [
-                {
-                  "start": 387,
-                  "end": 387
-                },
-                {
-                  "start": 422,
-                  "end": 422
-                }
-              ],
-              "django/contrib/gis/geos/geometry.py": [
-                {
-                  "start": 162,
-                  "end": 162
-                },
-                {
-                  "start": 587,
-                  "end": 587
-                },
-                {
-                  "start": 589,
-                  "end": 589
-                },
-                {
-                  "start": 591,
-                  "end": 591
-                },
-                {
-                  "start": 593,
-                  "end": 593
-                }
-              ],
-              "django/contrib/gis/gdal/geometries.py": [
-                {
-                  "start": 163,
-                  "end": 163
-                },
-                {
-                  "start": 493,
-                  "end": 493
-                }
-              ],
-              "django/contrib/contenttypes/forms.py": [
-                {
-                  "start": 22,
-                  "end": 22
-                }
-              ],
-              "django/db/models/manager.py": [
-                {
-                  "start": 204,
-                  "end": 204
-                }
-              ],
-              "django/db/models/sql/compiler.py": [
-                {
-                  "start": 448,
-                  "end": 448
-                },
-                {
-                  "start": 450,
-                  "end": 450
-                }
-              ],
-              "django/db/models/sql/query.py": [
-                {
-                  "start": 909,
-                  "end": 909
-                },
-                {
-                  "start": 910,
-                  "end": 910
-                },
-                {
-                  "start": 2060,
-                  "end": 2060
-                },
-                {
-                  "start": 2122,
-                  "end": 2122
-                }
-              ],
-              "django/db/models/expressions.py": [
-                {
-                  "start": 276,
-                  "end": 276
-                }
-              ],
-              "django/db/models/query.py": [
-                {
-                  "start": 919,
-                  "end": 919
-                },
-                {
-                  "start": 999,
-                  "end": 999
-                },
-                {
-                  "start": 1392,
-                  "end": 1392
-                },
-                {
-                  "start": 1393,
-                  "end": 1393
-                }
-              ],
-              "django/db/models/fields/related.py": [
-                {
-                  "start": 1674,
-                  "end": 1674
-                }
-              ],
-              "django/db/models/fields/related_descriptors.py": [
-                {
-                  "start": 588,
-                  "end": 588
-                }
-              ],
-              "django/db/migrations/autodetector.py": [
-                {
-                  "start": 1140,
-                  "end": 1140
-                },
-                {
-                  "start": 1162,
-                  "end": 1162
-                }
-              ],
-              "django/contrib/admin/options.py": [
-                {
-                  "start": 2145,
-                  "end": 2145
-                }
-              ],
-              "django/contrib/auth/backends.py": [
-                {
-                  "start": 139,
-                  "end": 139
-                }
-              ],
-              "django/contrib/auth/models.py": [
-                {
-                  "start": 189,
-                  "end": 189
-                }
-              ],
-              "django/template/defaultfilters.py": [
-                {
-                  "start": 759,
-                  "end": 759
-                }
-              ],
-              "django/test/utils.py": [
-                {
-                  "start": 848,
-                  "end": 848
-                }
-              ],
               "django/forms/models.py": [
                 {
-                  "start": 24,
-                  "end": 24
-                },
-                {
-                  "start": 905,
-                  "end": 905
-                },
-                {
-                  "start": 1295,
-                  "end": 1295
-                },
-                {
-                  "start": 1326,
-                  "end": 1326
-                }
-              ],
-              "django/test/runner.py": [
-                {
-                  "start": 804,
-                  "end": 804
-                }
-              ],
-              "django/core/management/__init__.py": [
-                {
-                  "start": 152,
-                  "end": 152
+                  "start": 880,
+                  "end": 930
                 }
               ]
             },
@@ -3884,35 +1198,112 @@
             "files": [
               "django/forms/models.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/forms/models.py": [
+                {
+                  "start": 1280,
+                  "end": 1365
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/model_forms/test_modelchoicefield.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/model_forms/test_modelchoicefield.py": [
+                {
+                  "start": 160,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/model_forms/tests.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/model_forms/tests.py": [
+                {
+                  "start": 1748,
+                  "end": 1795
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/queries/test_qs_combinators.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/queries/test_qs_combinators.py": [
+                {
+                  "start": 40,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/model_forms/tests.py"
+            ],
+            "spans": {
+              "tests/model_forms/tests.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "django/db/models/query.py"
             ],
-            "spans": {},
+            "spans": {
+              "django/db/models/query.py": [
+                {
+                  "start": 900,
+                  "end": 1035
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/models/fields/related_descriptors.py"
+            ],
+            "spans": {
+              "django/db/models/fields/related_descriptors.py": [
+                {
+                  "start": 2140,
+                  "end": 2205
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/models/sql/query.py"
+            ],
+            "spans": {
+              "django/db/models/sql/query.py": [
+                {
+                  "start": 2130,
+                  "end": 2195
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -3931,6 +1322,34 @@
           },
           {
             "files": [
+              "django/db/models/sql/query.py"
+            ],
+            "spans": {
+              "django/db/models/sql/query.py": [
+                {
+                  "start": 1770,
+                  "end": 1795
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/models/fields/related_descriptors.py"
+            ],
+            "spans": {
+              "django/db/models/fields/related_descriptors.py": [
+                {
+                  "start": 980,
+                  "end": 1025
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
               "tests/model_forms/models.py"
             ],
             "spans": {},
@@ -3938,16 +1357,100 @@
           },
           {
             "files": [
-              "tests/runtests.py"
+              "tests/model_forms/models.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/model_forms/models.py": [
+                {
+                  "start": 300,
+                  "end": 420
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "2>/dev/null"
+              "tests/model_forms/models.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/model_forms/models.py": [
+                {
+                  "start": 1,
+                  "end": 115
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/runtests.py"
+            ],
+            "spans": {
+              "tests/runtests.py": [
+                {
+                  "start": 1,
+                  "end": 140
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/runtests.py"
+            ],
+            "spans": {
+              "tests/runtests.py": [
+                {
+                  "start": 1,
+                  "end": 80
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              ".venv"
+            ],
+            "spans": {
+              ".venv": [
+                {
+                  "start": 1,
+                  "end": 40
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/models/sql/compiler.py"
+            ],
+            "spans": {
+              "django/db/models/sql/compiler.py": [
+                {
+                  "start": 500,
+                  "end": 625
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/models/sql/compiler.py"
+            ],
+            "spans": {
+              "django/db/models/sql/compiler.py": [
+                {
+                  "start": 420,
+                  "end": 500
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -3959,24 +1462,13 @@
           },
           {
             "files": [
-              "django/db/models/query.py",
               "django/db/models/sql/query.py"
             ],
             "spans": {
               "django/db/models/sql/query.py": [
                 {
-                  "start": 1778,
-                  "end": 1778
-                },
-                {
-                  "start": 1805,
-                  "end": 1805
-                }
-              ],
-              "django/db/models/query.py": [
-                {
-                  "start": 922,
-                  "end": 922
+                  "start": 1796,
+                  "end": 1812
                 }
               ]
             },
@@ -3984,48 +1476,55 @@
           },
           {
             "files": [
-              "django/contrib/gis/gdal/geometries.py",
-              "django/contrib/sessions/backends/base.py",
-              "django/contrib/sessions/middleware.py",
-              "django/db/models/query.py",
-              "django/db/models/sql/compiler.py",
+              "tests/queries/test_qs_combinators.py"
+            ],
+            "spans": {
+              "tests/queries/test_qs_combinators.py": [
+                {
+                  "start": 1,
+                  "end": 140
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
               "django/db/models/sql/query.py"
             ],
             "spans": {
-              "django/contrib/sessions/middleware.py": [
-                {
-                  "start": 35,
-                  "end": 35
-                }
-              ],
-              "django/contrib/sessions/backends/base.py": [
-                {
-                  "start": 167,
-                  "end": 167
-                }
-              ],
-              "django/contrib/gis/gdal/geometries.py": [
-                {
-                  "start": 249,
-                  "end": 249
-                }
-              ],
               "django/db/models/sql/query.py": [
                 {
-                  "start": 1781,
-                  "end": 1781
+                  "start": 1776,
+                  "end": 1786
                 }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/queries/test_qs_combinators.py"
+            ],
+            "spans": {
+              "tests/queries/test_qs_combinators.py": [
+                {
+                  "start": 88,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/models/sql/compiler.py"
+            ],
+            "spans": {
               "django/db/models/sql/compiler.py": [
                 {
-                  "start": 437,
-                  "end": 437
-                }
-              ],
-              "django/db/models/query.py": [
-                {
-                  "start": 1387,
-                  "end": 1387
+                  "start": 433,
+                  "end": 509
                 }
               ]
             },
@@ -4033,150 +1532,27 @@
           },
           {
             "files": [
-              "django/contrib/staticfiles/handlers.py",
-              "django/core/cache/__init__.py",
-              "django/core/handlers/asgi.py",
-              "django/core/handlers/base.py",
-              "django/core/handlers/exception.py",
-              "django/db/utils.py",
-              "django/test/client.py",
-              "django/test/signals.py",
-              "django/test/testcases.py",
-              "django/urls/base.py",
-              "django/urls/resolvers.py",
-              "django/utils/deprecation.py",
-              "django/utils/timezone.py",
-              "django/utils/translation/reloader.py",
-              "django/utils/translation/trans_real.py",
-              "tests/asgi/tests.py",
-              "tests/async/tests.py",
-              "tests/i18n/tests.py",
-              "tests/template_tests/syntax_tests/i18n/test_blocktranslate.py",
-              "tests/template_tests/syntax_tests/i18n/test_translate.py"
+              "django/forms/models.py"
             ],
             "spans": {
-              "tests/i18n/tests.py": [
+              "django/forms/models.py": [
                 {
-                  "start": 13,
-                  "end": 13
+                  "start": 1318,
+                  "end": 1330
                 }
-              ],
-              "django/urls/base.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "django/db/models/query.py"
+            ],
+            "spans": {
+              "django/db/models/query.py": [
                 {
-                  "start": 3,
-                  "end": 3
-                }
-              ],
-              "django/db/utils.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/utils/timezone.py": [
-                {
-                  "start": 10,
-                  "end": 10
-                }
-              ],
-              "django/utils/deprecation.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/utils/translation/reloader.py": [
-                {
-                  "start": 3,
-                  "end": 3
-                }
-              ],
-              "django/utils/translation/trans_real.py": [
-                {
-                  "start": 9,
-                  "end": 9
-                }
-              ],
-              "django/contrib/staticfiles/handlers.py": [
-                {
-                  "start": 4,
-                  "end": 4
-                }
-              ],
-              "django/urls/resolvers.py": [
-                {
-                  "start": 15,
-                  "end": 15
-                }
-              ],
-              "django/test/testcases.py": [
-                {
-                  "start": 21,
-                  "end": 21
-                }
-              ],
-              "django/test/client.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "django/test/signals.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/core/cache/__init__.py": [
-                {
-                  "start": 15,
-                  "end": 15
-                }
-              ],
-              "django/core/handlers/base.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "django/core/handlers/exception.py": [
-                {
-                  "start": 6,
-                  "end": 6
-                }
-              ],
-              "django/core/handlers/asgi.py": [
-                {
-                  "start": 6,
-                  "end": 6
-                }
-              ],
-              "tests/async/tests.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "tests/template_tests/syntax_tests/i18n/test_blocktranslate.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "tests/template_tests/syntax_tests/i18n/test_translate.py": [
-                {
-                  "start": 4,
-                  "end": 4
-                }
-              ],
-              "tests/asgi/tests.py": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 8,
-                  "end": 8
+                  "start": 918,
+                  "end": 1006
                 }
               ]
             },
@@ -4184,1471 +1560,41 @@
           }
         ],
         "predFiles": [
-          "2>/dev/null",
-          "django/contrib/admin/options.py",
-          "django/contrib/auth/backends.py",
-          "django/contrib/auth/models.py",
-          "django/contrib/contenttypes/forms.py",
-          "django/contrib/gis/gdal/geometries.py",
-          "django/contrib/gis/geos/geometry.py",
-          "django/contrib/sessions/backends/base.py",
-          "django/contrib/sessions/middleware.py",
-          "django/contrib/staticfiles/handlers.py",
-          "django/core/cache/__init__.py",
-          "django/core/handlers/asgi.py",
-          "django/core/handlers/base.py",
-          "django/core/handlers/exception.py",
-          "django/core/management/__init__.py",
-          "django/db/migrations/autodetector.py",
-          "django/db/models/expressions.py",
-          "django/db/models/fields/related.py",
-          "django/db/models/fields/related_descriptors.py",
-          "django/db/models/manager.py",
           "django/db/models/query.py",
           "django/db/models/sql/compiler.py",
           "django/db/models/sql/query.py",
-          "django/db/utils.py",
           "django/forms/models.py",
-          "django/template/defaultfilters.py",
-          "django/test/client.py",
-          "django/test/runner.py",
-          "django/test/signals.py",
-          "django/test/testcases.py",
-          "django/test/utils.py",
-          "django/urls/base.py",
-          "django/urls/resolvers.py",
-          "django/utils/deprecation.py",
-          "django/utils/timezone.py",
-          "django/utils/translation/reloader.py",
-          "django/utils/translation/trans_real.py",
-          "django/views/generic/dates.py",
-          "tests/admin_changelist/tests.py",
-          "tests/aggregation_regress/tests.py",
-          "tests/annotations/tests.py",
-          "tests/asgi/tests.py",
-          "tests/async/tests.py",
-          "tests/auth_tests/test_forms.py",
-          "tests/backends/base/test_operations.py",
-          "tests/basic/tests.py",
-          "tests/cache/tests.py",
-          "tests/conditional_processing/views.py",
-          "tests/csrf_tests/tests.py",
-          "tests/db_functions/datetime/test_extract_trunc.py",
-          "tests/defer/models.py",
-          "tests/delete/tests.py",
-          "tests/deprecation/test_middleware_mixin.py",
-          "tests/expressions/tests.py",
-          "tests/filtered_relation/tests.py",
-          "tests/forms_tests/models.py",
-          "tests/forms_tests/tests/test_error_messages.py",
-          "tests/forms_tests/tests/tests.py",
-          "tests/forms_tests/widget_tests/test_checkboxinput.py",
-          "tests/forms_tests/widget_tests/test_checkboxselectmultiple.py",
-          "tests/forms_tests/widget_tests/test_dateinput.py",
-          "tests/forms_tests/widget_tests/test_datetimeinput.py",
-          "tests/forms_tests/widget_tests/test_multiplehiddeninput.py",
-          "tests/forms_tests/widget_tests/test_nullbooleanselect.py",
-          "tests/forms_tests/widget_tests/test_select.py",
-          "tests/forms_tests/widget_tests/test_selectdatewidget.py",
-          "tests/forms_tests/widget_tests/test_selectmultiple.py",
-          "tests/forms_tests/widget_tests/test_splitdatetimewidget.py",
-          "tests/forms_tests/widget_tests/test_textarea.py",
-          "tests/forms_tests/widget_tests/test_textinput.py",
-          "tests/forms_tests/widget_tests/test_timeinput.py",
-          "tests/get_object_or_404/tests.py",
-          "tests/gis_tests/gdal_tests/test_geom.py",
-          "tests/gis_tests/geo3d/tests.py",
-          "tests/gis_tests/geoapp/test_functions.py",
-          "tests/gis_tests/geos_tests/test_geos.py",
-          "tests/handlers/tests.py",
-          "tests/i18n/tests.py",
-          "tests/invalid_models_tests/test_ordinary_fields.py",
-          "tests/lookup/tests.py",
-          "tests/many_to_one/tests.py",
-          "tests/messages_tests/test_api.py",
-          "tests/middleware_exceptions/tests.py",
-          "tests/migrations/test_operations.py",
-          "tests/migrations/test_writer.py",
-          "tests/model_fields/test_jsonfield.py",
-          "tests/model_forms/models.py",
-          "tests/model_forms/test_modelchoicefield.py",
-          "tests/model_forms/test_uuid.py",
-          "tests/model_forms/tests.py",
-          "tests/model_formsets/tests.py",
-          "tests/model_inheritance/test_abstract_inheritance.py",
-          "tests/model_inheritance_regress/tests.py",
-          "tests/modeladmin/test_checks.py",
-          "tests/one_to_one/tests.py",
-          "tests/pagination/tests.py",
-          "tests/postgres_tests/test_aggregates.py",
-          "tests/postgres_tests/test_array.py",
-          "tests/postgres_tests/test_ranges.py",
-          "tests/queries/test_explain.py",
-          "tests/queries/test_qs_combinators.py",
-          "tests/queries/tests.py",
-          "tests/queryset_pickle/tests.py",
-          "tests/requests/test_accept_header.py",
-          "tests/runtests.py",
-          "tests/settings_tests/tests.py",
-          "tests/template_tests/filter_tests/test_default.py",
-          "tests/template_tests/filter_tests/test_default_if_none.py",
-          "tests/template_tests/filter_tests/test_yesno.py",
-          "tests/template_tests/syntax_tests/i18n/test_blocktranslate.py",
-          "tests/template_tests/syntax_tests/i18n/test_translate.py",
-          "tests/template_tests/syntax_tests/test_include.py",
-          "tests/test_client/tests.py",
-          "tests/urlpatterns_reverse/tests.py",
-          "tests/utils_tests/test_http.py",
-          "tests/utils_tests/test_lazyobject.py",
-          "tests/utils_tests/test_timezone.py"
+          "tests/queries/test_qs_combinators.py"
         ],
         "predSpans": {
-          "tests/gis_tests/geo3d/tests.py": [
+          "django/forms/models.py": [
             {
-              "start": 172,
-              "end": 172
-            },
-            {
-              "start": 205,
-              "end": 205
-            }
-          ],
-          "tests/gis_tests/geoapp/test_functions.py": [
-            {
-              "start": 552,
-              "end": 552
-            },
-            {
-              "start": 571,
-              "end": 571
-            },
-            {
-              "start": 574,
-              "end": 574
-            }
-          ],
-          "tests/gis_tests/gdal_tests/test_geom.py": [
-            {
-              "start": 301,
-              "end": 301
-            },
-            {
-              "start": 407,
-              "end": 407
-            },
-            {
-              "start": 408,
-              "end": 408
-            },
-            {
-              "start": 413,
-              "end": 413
-            }
-          ],
-          "tests/settings_tests/tests.py": [
-            {
-              "start": 361,
-              "end": 361
-            }
-          ],
-          "tests/model_inheritance_regress/tests.py": [
-            {
-              "start": 563,
-              "end": 563
-            }
-          ],
-          "tests/gis_tests/geos_tests/test_geos.py": [
-            {
-              "start": 646,
-              "end": 646
-            },
-            {
-              "start": 647,
-              "end": 647
-            },
-            {
-              "start": 652,
-              "end": 652
-            },
-            {
-              "start": 658,
-              "end": 658
-            }
-          ],
-          "tests/aggregation_regress/tests.py": [
-            {
-              "start": 983,
-              "end": 983
-            }
-          ],
-          "tests/handlers/tests.py": [
-            {
-              "start": 206,
-              "end": 206
-            }
-          ],
-          "tests/i18n/tests.py": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 166,
-              "end": 166
-            },
-            {
-              "start": 173,
-              "end": 173
-            }
-          ],
-          "tests/postgres_tests/test_aggregates.py": [
-            {
-              "start": 222,
-              "end": 222
-            }
-          ],
-          "tests/postgres_tests/test_array.py": [
-            {
-              "start": 623,
-              "end": 623
-            }
-          ],
-          "tests/postgres_tests/test_ranges.py": [
-            {
-              "start": 620,
-              "end": 620
-            }
-          ],
-          "tests/queryset_pickle/tests.py": [
-            {
-              "start": 283,
-              "end": 283
-            },
-            {
-              "start": 296,
-              "end": 296
-            }
-          ],
-          "tests/model_formsets/tests.py": [
-            {
-              "start": 431,
-              "end": 431
-            }
-          ],
-          "tests/csrf_tests/tests.py": [
-            {
-              "start": 573,
-              "end": 573
-            }
-          ],
-          "tests/deprecation/test_middleware_mixin.py": [
-            {
-              "start": 21,
-              "end": 21
-            }
-          ],
-          "tests/model_fields/test_jsonfield.py": [
-            {
-              "start": 509,
-              "end": 509
-            }
-          ],
-          "tests/test_client/tests.py": [
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 801,
-              "end": 801
-            }
-          ],
-          "tests/expressions/tests.py": [
-            {
-              "start": 225,
-              "end": 225
-            }
-          ],
-          "tests/one_to_one/tests.py": [
-            {
-              "start": 221,
-              "end": 221
-            }
-          ],
-          "tests/many_to_one/tests.py": [
-            {
-              "start": 172,
-              "end": 172
-            }
-          ],
-          "tests/modeladmin/test_checks.py": [
-            {
-              "start": 1242,
-              "end": 1242
-            }
-          ],
-          "tests/utils_tests/test_lazyobject.py": [
-            {
-              "start": 334,
-              "end": 334
-            }
-          ],
-          "tests/utils_tests/test_http.py": [
-            {
-              "start": 84,
-              "end": 84
-            }
-          ],
-          "tests/utils_tests/test_timezone.py": [
-            {
-              "start": 72,
-              "end": 72
-            },
-            {
-              "start": 81,
-              "end": 81
-            },
-            {
-              "start": 89,
-              "end": 89
-            }
-          ],
-          "tests/annotations/tests.py": [
-            {
-              "start": 160,
-              "end": 160
-            }
-          ],
-          "tests/requests/test_accept_header.py": [
-            {
-              "start": 89,
-              "end": 89
-            }
-          ],
-          "tests/invalid_models_tests/test_ordinary_fields.py": [
-            {
-              "start": 828,
-              "end": 828
-            }
-          ],
-          "tests/lookup/tests.py": [
-            {
-              "start": 569,
-              "end": 569
-            },
-            {
-              "start": 570,
-              "end": 570
-            },
-            {
-              "start": 571,
-              "end": 571
-            },
-            {
-              "start": 572,
-              "end": 572
-            },
-            {
-              "start": 573,
-              "end": 573
-            },
-            {
-              "start": 574,
-              "end": 574
-            },
-            {
-              "start": 575,
-              "end": 575
-            },
-            {
-              "start": 576,
-              "end": 576
-            },
-            {
-              "start": 607,
-              "end": 607
-            },
-            {
-              "start": 616,
-              "end": 616
-            }
-          ],
-          "tests/queries/test_explain.py": [
-            {
-              "start": 21,
-              "end": 21
-            }
-          ],
-          "tests/queries/tests.py": [
-            {
-              "start": 722,
-              "end": 722
-            },
-            {
-              "start": 842,
-              "end": 842
-            },
-            {
-              "start": 846,
-              "end": 846
-            },
-            {
-              "start": 849,
-              "end": 849
-            },
-            {
-              "start": 850,
-              "end": 850
-            },
-            {
-              "start": 2070,
-              "end": 2070
-            },
-            {
-              "start": 2257,
-              "end": 2257
-            },
-            {
-              "start": 2260,
-              "end": 2260
-            },
-            {
-              "start": 2261,
-              "end": 2261
-            },
-            {
-              "start": 2266,
-              "end": 2266
-            },
-            {
-              "start": 2746,
-              "end": 2746
-            },
-            {
-              "start": 2754,
-              "end": 2754
-            },
-            {
-              "start": 2759,
-              "end": 2759
-            },
-            {
-              "start": 2764,
-              "end": 2764
-            },
-            {
-              "start": 2769,
-              "end": 2769
-            },
-            {
-              "start": 2774,
-              "end": 2774
-            },
-            {
-              "start": 2779,
-              "end": 2779
-            }
-          ],
-          "tests/basic/tests.py": [
-            {
-              "start": 310,
-              "end": 310
-            },
-            {
-              "start": 317,
-              "end": 317
-            },
-            {
-              "start": 331,
-              "end": 331
-            },
-            {
-              "start": 341,
-              "end": 341
-            },
-            {
-              "start": 343,
-              "end": 343
-            },
-            {
-              "start": 351,
-              "end": 351
-            }
-          ],
-          "tests/queries/test_qs_combinators.py": [
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 51,
-              "end": 51
-            },
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 69,
-              "end": 69
-            },
-            {
-              "start": 82,
-              "end": 82
-            },
-            {
-              "start": 89,
-              "end": 117
-            },
-            {
-              "start": 91,
-              "end": 91
-            },
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 94,
-              "end": 94
-            },
-            {
-              "start": 95,
-              "end": 95
-            },
-            {
-              "start": 96,
-              "end": 96
-            },
-            {
-              "start": 97,
-              "end": 97
-            },
-            {
-              "start": 98,
-              "end": 98
-            },
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 100,
-              "end": 100
-            },
-            {
-              "start": 105,
-              "end": 105
-            },
-            {
-              "start": 110,
-              "end": 110
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 124,
-              "end": 124
-            },
-            {
-              "start": 130,
-              "end": 130
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 144,
-              "end": 144
-            },
-            {
-              "start": 147,
-              "end": 147
-            },
-            {
-              "start": 150,
-              "end": 150
-            },
-            {
-              "start": 162,
-              "end": 162
-            },
-            {
-              "start": 169,
-              "end": 169
-            },
-            {
-              "start": 177,
-              "end": 177
-            },
-            {
-              "start": 188,
-              "end": 188
-            },
-            {
-              "start": 202,
-              "end": 202
-            },
-            {
-              "start": 205,
-              "end": 205
-            },
-            {
-              "start": 209,
-              "end": 209
-            },
-            {
-              "start": 227,
-              "end": 227
-            },
-            {
-              "start": 235,
-              "end": 235
-            },
-            {
-              "start": 238,
-              "end": 238
-            },
-            {
-              "start": 252,
-              "end": 252
-            },
-            {
-              "start": 260,
-              "end": 260
-            },
-            {
-              "start": 261,
-              "end": 261
-            },
-            {
-              "start": 265,
-              "end": 265
-            },
-            {
-              "start": 268,
-              "end": 268
-            },
-            {
-              "start": 270,
-              "end": 270
-            },
-            {
-              "start": 272,
-              "end": 272
-            },
-            {
-              "start": 274,
-              "end": 274
-            },
-            {
-              "start": 284,
-              "end": 284
-            }
-          ],
-          "tests/messages_tests/test_api.py": [
-            {
-              "start": 30,
-              "end": 30
-            }
-          ],
-          "tests/forms_tests/models.py": [
-            {
-              "start": 30,
-              "end": 30
-            }
-          ],
-          "tests/conditional_processing/views.py": [
-            {
-              "start": 49,
-              "end": 49
-            }
-          ],
-          "tests/get_object_or_404/tests.py": [
-            {
-              "start": 55,
-              "end": 55
-            }
-          ],
-          "tests/backends/base/test_operations.py": [
-            {
-              "start": 72,
-              "end": 72
-            }
-          ],
-          "tests/forms_tests/tests/test_error_messages.py": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 275,
-              "end": 275
-            },
-            {
-              "start": 302,
-              "end": 302
-            },
-            {
-              "start": 308,
-              "end": 308
-            },
-            {
-              "start": 317,
-              "end": 317
-            },
-            {
-              "start": 329,
-              "end": 329
-            }
-          ],
-          "tests/forms_tests/tests/tests.py": [
-            {
-              "start": 59,
-              "end": 59
-            },
-            {
-              "start": 299,
-              "end": 299
-            },
-            {
-              "start": 342,
-              "end": 342
-            }
-          ],
-          "tests/model_inheritance/test_abstract_inheritance.py": [
-            {
-              "start": 195,
-              "end": 195
-            }
-          ],
-          "tests/forms_tests/widget_tests/test_datetimeinput.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/forms_tests/widget_tests/test_multiplehiddeninput.py": [
-            {
-              "start": 61,
-              "end": 61
-            }
-          ],
-          "tests/forms_tests/widget_tests/test_selectmultiple.py": [
-            {
-              "start": 36,
-              "end": 36
-            }
-          ],
-          "tests/forms_tests/widget_tests/test_textinput.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/forms_tests/widget_tests/test_timeinput.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/forms_tests/widget_tests/test_checkboxinput.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "tests/forms_tests/widget_tests/test_splitdatetimewidget.py": [
-            {
-              "start": 16,
-              "end": 16
-            }
-          ],
-          "tests/forms_tests/widget_tests/test_textarea.py": [
-            {
-              "start": 23,
-              "end": 23
-            }
-          ],
-          "tests/forms_tests/widget_tests/test_checkboxselectmultiple.py": [
-            {
-              "start": 33,
-              "end": 33
-            }
-          ],
-          "tests/forms_tests/widget_tests/test_dateinput.py": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "tests/forms_tests/widget_tests/test_nullbooleanselect.py": [
-            {
-              "start": 29,
-              "end": 29
-            }
-          ],
-          "tests/forms_tests/widget_tests/test_select.py": [
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 386,
-              "end": 386
-            }
-          ],
-          "tests/forms_tests/widget_tests/test_selectdatewidget.py": [
-            {
-              "start": 87,
-              "end": 87
-            }
-          ],
-          "tests/urlpatterns_reverse/tests.py": [
-            {
-              "start": 293,
-              "end": 293
-            }
-          ],
-          "tests/defer/models.py": [
-            {
-              "start": 45,
-              "end": 45
-            }
-          ],
-          "tests/delete/tests.py": [
-            {
-              "start": 56,
-              "end": 56
-            },
-            {
-              "start": 647,
-              "end": 647
-            }
-          ],
-          "tests/admin_changelist/tests.py": [
-            {
-              "start": 1069,
-              "end": 1069
-            },
-            {
-              "start": 1165,
-              "end": 1165
-            }
-          ],
-          "tests/db_functions/datetime/test_extract_trunc.py": [
-            {
-              "start": 251,
-              "end": 251
-            },
-            {
-              "start": 695,
-              "end": 695
-            },
-            {
-              "start": 854,
-              "end": 854
-            },
-            {
-              "start": 882,
-              "end": 882
-            }
-          ],
-          "tests/template_tests/filter_tests/test_default_if_none.py": [
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 14,
-              "end": 14
-            }
-          ],
-          "tests/template_tests/filter_tests/test_default.py": [
-            {
-              "start": 56,
-              "end": 56
-            }
-          ],
-          "tests/cache/tests.py": [
-            {
-              "start": 988,
-              "end": 988
-            }
-          ],
-          "tests/template_tests/filter_tests/test_yesno.py": [
-            {
-              "start": 22,
-              "end": 22
-            }
-          ],
-          "tests/template_tests/syntax_tests/test_include.py": [
-            {
-              "start": 258,
-              "end": 258
-            }
-          ],
-          "tests/middleware_exceptions/tests.py": [
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 61,
-              "end": 61
-            },
-            {
-              "start": 303,
-              "end": 303
-            }
-          ],
-          "tests/filtered_relation/tests.py": [
-            {
-              "start": 221,
-              "end": 221
-            },
-            {
-              "start": 228,
-              "end": 228
-            }
-          ],
-          "tests/pagination/tests.py": [
-            {
-              "start": 398,
-              "end": 398
-            }
-          ],
-          "tests/migrations/test_operations.py": [
-            {
-              "start": 1270,
-              "end": 1270
-            }
-          ],
-          "tests/migrations/test_writer.py": [
-            {
-              "start": 655,
-              "end": 655
-            }
-          ],
-          "tests/auth_tests/test_forms.py": [
-            {
-              "start": 264,
-              "end": 264
-            },
-            {
-              "start": 459,
-              "end": 459
-            },
-            {
-              "start": 777,
-              "end": 777
-            }
-          ],
-          "tests/model_forms/tests.py": [
-            {
-              "start": 132,
-              "end": 132
-            },
-            {
-              "start": 1694,
-              "end": 1694
-            },
-            {
-              "start": 1702,
-              "end": 1702
-            },
-            {
-              "start": 1739,
-              "end": 1739
-            },
-            {
-              "start": 1748,
-              "end": 1748
-            },
-            {
-              "start": 1756,
-              "end": 1756
-            },
-            {
-              "start": 1786,
-              "end": 1786
-            },
-            {
-              "start": 1790,
-              "end": 1790
-            },
-            {
-              "start": 1795,
-              "end": 1795
-            },
-            {
-              "start": 1805,
-              "end": 1805
-            },
-            {
-              "start": 1811,
-              "end": 1811
-            },
-            {
-              "start": 1814,
-              "end": 1814
-            },
-            {
-              "start": 1841,
-              "end": 1841
-            },
-            {
-              "start": 1846,
-              "end": 1846
-            },
-            {
-              "start": 1856,
-              "end": 1856
-            },
-            {
-              "start": 1867,
-              "end": 1867
-            },
-            {
-              "start": 1877,
-              "end": 1877
-            },
-            {
-              "start": 1974,
-              "end": 1974
-            },
-            {
-              "start": 2542,
-              "end": 2542
-            },
-            {
-              "start": 2544,
-              "end": 2544
-            }
-          ],
-          "tests/model_forms/test_uuid.py": [
-            {
-              "start": 31,
-              "end": 31
-            }
-          ],
-          "tests/model_forms/test_modelchoicefield.py": [
-            {
-              "start": 182,
-              "end": 182
-            },
-            {
-              "start": 238,
-              "end": 238
-            },
-            {
-              "start": 262,
-              "end": 262
-            },
-            {
-              "start": 291,
-              "end": 291
-            },
-            {
-              "start": 294,
-              "end": 294
-            },
-            {
-              "start": 330,
-              "end": 330
-            },
-            {
-              "start": 334,
-              "end": 334
-            },
-            {
-              "start": 368,
-              "end": 368
-            }
-          ],
-          "django/views/generic/dates.py": [
-            {
-              "start": 387,
-              "end": 387
-            },
-            {
-              "start": 422,
-              "end": 422
-            }
-          ],
-          "django/contrib/gis/geos/geometry.py": [
-            {
-              "start": 162,
-              "end": 162
-            },
-            {
-              "start": 587,
-              "end": 587
-            },
-            {
-              "start": 589,
-              "end": 589
-            },
-            {
-              "start": 591,
-              "end": 591
-            },
-            {
-              "start": 593,
-              "end": 593
-            }
-          ],
-          "django/contrib/gis/gdal/geometries.py": [
-            {
-              "start": 163,
-              "end": 163
-            },
-            {
-              "start": 249,
-              "end": 249
-            },
-            {
-              "start": 493,
-              "end": 493
-            }
-          ],
-          "django/contrib/contenttypes/forms.py": [
-            {
-              "start": 22,
-              "end": 22
+              "start": 1321,
+              "end": 1326
             }
           ],
-          "django/db/models/manager.py": [
+          "django/db/models/query.py": [
             {
-              "start": 204,
-              "end": 204
+              "start": 919,
+              "end": 1004
             }
           ],
           "django/db/models/sql/compiler.py": [
             {
               "start": 433,
               "end": 507
-            },
-            {
-              "start": 437,
-              "end": 437
-            },
-            {
-              "start": 448,
-              "end": 448
-            },
-            {
-              "start": 450,
-              "end": 450
             }
           ],
           "django/db/models/sql/query.py": [
             {
-              "start": 909,
-              "end": 909
-            },
-            {
-              "start": 910,
-              "end": 910
-            },
-            {
-              "start": 1778,
-              "end": 1778
-            },
-            {
               "start": 1778,
               "end": 1784
-            },
-            {
-              "start": 1781,
-              "end": 1781
-            },
-            {
-              "start": 1805,
-              "end": 1805
-            },
-            {
-              "start": 2060,
-              "end": 2060
-            },
-            {
-              "start": 2122,
-              "end": 2122
             }
           ],
-          "django/db/models/expressions.py": [
+          "tests/queries/test_qs_combinators.py": [
             {
-              "start": 276,
-              "end": 276
-            }
-          ],
-          "django/db/models/query.py": [
-            {
-              "start": 919,
-              "end": 919
-            },
-            {
-              "start": 919,
-              "end": 1004
-            },
-            {
-              "start": 922,
-              "end": 922
-            },
-            {
-              "start": 999,
-              "end": 999
-            },
-            {
-              "start": 1387,
-              "end": 1387
-            },
-            {
-              "start": 1392,
-              "end": 1392
-            },
-            {
-              "start": 1393,
-              "end": 1393
-            }
-          ],
-          "django/db/models/fields/related.py": [
-            {
-              "start": 1674,
-              "end": 1674
-            }
-          ],
-          "django/db/models/fields/related_descriptors.py": [
-            {
-              "start": 588,
-              "end": 588
-            }
-          ],
-          "django/db/migrations/autodetector.py": [
-            {
-              "start": 1140,
-              "end": 1140
-            },
-            {
-              "start": 1162,
-              "end": 1162
-            }
-          ],
-          "django/contrib/admin/options.py": [
-            {
-              "start": 2145,
-              "end": 2145
-            }
-          ],
-          "django/contrib/auth/backends.py": [
-            {
-              "start": 139,
-              "end": 139
-            }
-          ],
-          "django/contrib/auth/models.py": [
-            {
-              "start": 189,
-              "end": 189
-            }
-          ],
-          "django/template/defaultfilters.py": [
-            {
-              "start": 759,
-              "end": 759
-            }
-          ],
-          "django/test/utils.py": [
-            {
-              "start": 848,
-              "end": 848
-            }
-          ],
-          "django/forms/models.py": [
-            {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 905,
-              "end": 905
-            },
-            {
-              "start": 1295,
-              "end": 1295
-            },
-            {
-              "start": 1321,
-              "end": 1326
-            },
-            {
-              "start": 1326,
-              "end": 1326
-            }
-          ],
-          "django/test/runner.py": [
-            {
-              "start": 804,
-              "end": 804
-            }
-          ],
-          "django/core/management/__init__.py": [
-            {
-              "start": 152,
-              "end": 152
-            }
-          ],
-          "django/contrib/sessions/middleware.py": [
-            {
-              "start": 35,
-              "end": 35
-            }
-          ],
-          "django/contrib/sessions/backends/base.py": [
-            {
-              "start": 167,
-              "end": 167
-            }
-          ],
-          "django/urls/base.py": [
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "django/db/utils.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/utils/timezone.py": [
-            {
-              "start": 10,
-              "end": 10
-            }
-          ],
-          "django/utils/deprecation.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/utils/translation/reloader.py": [
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "django/utils/translation/trans_real.py": [
-            {
-              "start": 9,
-              "end": 9
-            }
-          ],
-          "django/contrib/staticfiles/handlers.py": [
-            {
-              "start": 4,
-              "end": 4
-            }
-          ],
-          "django/urls/resolvers.py": [
-            {
-              "start": 15,
-              "end": 15
-            }
-          ],
-          "django/test/testcases.py": [
-            {
-              "start": 21,
-              "end": 21
-            }
-          ],
-          "django/test/client.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "django/test/signals.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/core/cache/__init__.py": [
-            {
-              "start": 15,
-              "end": 15
-            }
-          ],
-          "django/core/handlers/base.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "django/core/handlers/exception.py": [
-            {
-              "start": 6,
-              "end": 6
-            }
-          ],
-          "django/core/handlers/asgi.py": [
-            {
-              "start": 6,
-              "end": 6
-            }
-          ],
-          "tests/async/tests.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "tests/template_tests/syntax_tests/i18n/test_blocktranslate.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "tests/template_tests/syntax_tests/i18n/test_translate.py": [
-            {
-              "start": 4,
-              "end": 4
-            }
-          ],
-          "tests/asgi/tests.py": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 8,
-              "end": 8
+              "start": 89,
+              "end": 117
             }
           ]
         },
@@ -5723,150 +1669,231 @@
           {
             "step": 6,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.25,
-              "span": 0.03507358863586439,
-              "line": 0.02601156069364162
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.25,
-              "span": 0.03507358863586439,
-              "line": 0.02601156069364162
+              "file": 0.25,
+              "symbol": 0.375,
+              "span": 0.28088159917990774,
+              "line": 0.28901734104046245
             }
           },
           {
             "step": 8,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.25,
-              "span": 0.03507358863586439,
-              "line": 0.02601156069364162
+              "file": 0.25,
+              "symbol": 0.375,
+              "span": 0.28088159917990774,
+              "line": 0.28901734104046245
             }
           },
           {
             "step": 9,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.25,
-              "span": 0.03507358863586439,
-              "line": 0.02601156069364162
+              "file": 0.5,
+              "symbol": 0.40625,
+              "span": 0.28088159917990774,
+              "line": 0.28901734104046245
             }
           },
           {
             "step": 10,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.25,
-              "span": 0.03507358863586439,
-              "line": 0.02601156069364162
+              "file": 0.5,
+              "symbol": 0.40625,
+              "span": 0.28088159917990774,
+              "line": 0.28901734104046245
             }
           },
           {
             "step": 11,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.25,
-              "span": 0.03507358863586439,
-              "line": 0.02601156069364162
+              "file": 0.5,
+              "symbol": 0.40625,
+              "span": 0.28088159917990774,
+              "line": 0.28901734104046245
             }
           },
           {
             "step": 12,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.25,
-              "span": 0.03507358863586439,
-              "line": 0.02601156069364162
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
             }
           },
           {
             "step": 13,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.25,
-              "span": 0.03507358863586439,
-              "line": 0.02601156069364162
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
             }
           },
           {
             "step": 14,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.25,
-              "span": 0.03507358863586439,
-              "line": 0.02601156069364162
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
             }
           },
           {
             "step": 15,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.25,
-              "span": 0.03507358863586439,
-              "line": 0.02601156069364162
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
             }
           },
           {
             "step": 16,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.25,
-              "span": 0.03507358863586439,
-              "line": 0.02601156069364162
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
             }
           },
           {
             "step": 17,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.25,
-              "span": 0.03507358863586439,
-              "line": 0.02601156069364162
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
             }
           },
           {
             "step": 18,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.28125,
-              "span": 0.03924727246100901,
-              "line": 0.031791907514450865
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
             }
           },
           {
             "step": 19,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.375,
-              "span": 0.04656952478582412,
-              "line": 0.03757225433526012
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
             }
           },
           {
             "step": 20,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.375,
-              "span": 0.04656952478582412,
-              "line": 0.03757225433526012
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
+            }
+          },
+          {
+            "step": 21,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
+            }
+          },
+          {
+            "step": 22,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
+            }
+          },
+          {
+            "step": 23,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
+            }
+          },
+          {
+            "step": 24,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
+            }
+          },
+          {
+            "step": 25,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
+            }
+          },
+          {
+            "step": 26,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
+            }
+          },
+          {
+            "step": 27,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
+            }
+          },
+          {
+            "step": 28,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
+            }
+          },
+          {
+            "step": 29,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.46875,
+              "span": 0.29332942813209345,
+              "line": 0.3063583815028902
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.5625,
-          "symbol": 0.2015625,
-          "span": 0.027663469283151505,
-          "line": 0.020953757225433533
+          "file": 0.3793103448275862,
+          "symbol": 0.3588362068965517,
+          "span": 0.2304944035268007,
+          "line": 0.23998405421566674
         },
         "redundancy": {
-          "file": 0.1145038167938931,
-          "symbol": 0.022012578616352196,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.6206896551724138,
+          "symbol": 0.2018779342723005,
+          "span": 0.21896800067783206,
+          "line": 0.20588235294117652
         }
       },
       "fixOverlap": {
@@ -5885,35 +1912,35 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5823dc7599982de4956d/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5823dc7599982de4956d/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/5823dc7599982de4956d/home/.agents/skills/superpowers/systematic-debugging/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: systematic-debugging\ndescription: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes\n---\n\n# Systematic Debugging\n\n## Overview\n\nRandom fixes waste time and create new bugs. Quick patches mask underlying issues.\n\n**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.\n\n**Violating the letter of this process is violating the spirit of debugging.**\n\n## The Iron Law\n\n```\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST\n```\n\nIf you haven't completed Phase 1, you cannot propose fixes.\n\n## When to Use\n\nUse for ANY technical issue:\n- Test failures\n- Bugs in production\n- Unexpected behavior\n- Performance problems\n- Build failures\n- Integration issues\n\n**Use this ESPECIALLY when:**\n- Under time pressure (emergencies make guessing tempting)\n- \"Just one quick fix\" seems obvious\n- You've already tried multiple fixes\n- Previous fix didn't work\n- You don't fully understand the issue\n\n**Don't skip when:**\n- Issue seems simple (simple bugs have root causes too)\n- You're in a hurry (rushing guarantees rework)\n- Manager wants it fixed NOW (systematic is faster than thrashing)\n\n## The Four Phases\n\nYou MUST complete each phase before proceeding to the next.\n\n### Phase 1: Root Cause Investigation\n\n**BEFORE attempting ANY fix:**\n\n1. **Read Error Messages Carefully**\n   - Don't skip past errors or warnings\n   - They often contain the exact solution\n   - Read stack traces completely\n   - Note line numbers, file paths, error codes\n\n2. **Reproduce Consistently**\n   - Can you trigger it reliably?\n   - What are the exact steps?\n   - Does it happen every time?\n   - If not reproducible \u2192 gather more data, don't guess\n\n3. **Check Recent Changes**\n   - What changed that could cause this?\n   - Git diff, recent commits\n   - New dependencies, config changes\n   - Environmental differences\n\n4. **Gather Evidence in Multi-Component Systems**\n\n   **WHEN system has multiple components (CI \u2192 build \u2192 signing, API \u2192 service \u2192 database):**\n\n   **BEFORE proposing fixes, add diagnostic instrumentation:**\n   ```\n   For EACH component boundary:\n     - Log what data enters component\n     - Log what data exits component\n     - Verify environment/config propagation\n     - Check state at each layer\n\n   Run once to gather evidence showing WHERE it breaks\n   THEN analyze evidence to identify failing component\n   THEN investigate that specific component\n   ```\n\n   **Example (multi-layer system):**\n   ```bash\n   # Layer 1: Workflow\n   echo \"=== Secrets available in workflow: ===\"\n   echo \"IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}\"\n\n   # Layer 2: Build script\n   echo \"=== Env vars in build script: ===\"\n   env | grep IDENTITY || echo \"IDENTITY not in environment\"\n\n   # Layer 3: Signing script\n   echo \"=== Keychain state: ===\"\n   security list-keychains\n   security find-identity -v\n\n   # Layer 4: Actual signing\n   codesign --sign \"$IDENTITY\" --verbose=4 \"$APP\"\n   ```\n\n   **This reveals:** Which layer fails (secrets \u2192 workflow \u2713, workflow \u2192 build \u2717)\n\n5. **Trace Data Flow**\n\n   **WHEN error is deep in call stack:**\n\n   See `root-cause-tracing.md` in this directory for the complete backward tracing technique.\n\n   **Quick version:**\n   - Where does bad value originate?\n   - What called this with bad value?\n   - Keep tracing up until you find the source\n   - Fix at source, not at symptom\n\n### Phase 2: Pattern Analysis\n\n**Find the pattern before fixing:**\n\n1. **Find Working Examples**\n   - Locate similar working code in same codebase\n   - What works that's similar to what's broken?\n\n2. **Compare Against References**\n   - If implementing pattern, read reference implementation COMPLETELY\n   - Don't skim - read every line\n   - Understand the pattern fully before applying\n\n3. **Identify Differences**\n   - What's different between working and broken?\n   - List every difference, however small\n   - Don't assume \"that can't matter\"\n\n4. **Understand Dependencies**\n   - What other components does this need?\n   - \u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/5823dc7599982de4956d/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5823dc7599982de4956d/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
@@ -6210,7 +2237,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/queries/test_qs_combinators.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/queries/test_qs_combinators.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -6281,7 +2317,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/django/db/models/sql/query.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/django/db/models/sql/query.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

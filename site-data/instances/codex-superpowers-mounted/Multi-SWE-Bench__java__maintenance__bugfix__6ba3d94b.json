@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-19T04:32:25Z",
       "completedAt": "2026-05-19T04:35:28Z",
       "durationMs": 182911,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 805964,
@@ -25,6 +40,28 @@
         "total_tokens": 814230,
         "cache_read_input_tokens": 733312
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 26,
+        "readToolCalls": 0,
+        "editToolCalls": 4
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/main/java/com/fasterxml/jackson/core/JsonFactory.java b/src/main/java/com/fasterxml/jackson/core/JsonFactory.java\nindex 08700ff1..d9f386a6 100644\n--- a/src/main/java/com/fasterxml/jackson/core/JsonFactory.java\n+++ b/src/main/java/com/fasterxml/jackson/core/JsonFactory.java\n@@ -276,7 +276,7 @@ public class JsonFactory\n      *\n      * @since 2.15\n      */\n-    final protected StreamReadConstraints _streamReadConstraints;\n+    protected StreamReadConstraints _streamReadConstraints;\n \n     /**\n      * Optional helper object that may decorate input sources, to do\n@@ -778,6 +778,20 @@ public class JsonFactory\n         return _streamReadConstraints;\n     }\n \n+    /**\n+     * Method for overriding stream read constraints for parsers this factory creates.\n+     *\n+     * @param src Constraints to use; if {@code null}, defaults are restored\n+     *\n+     * @return This factory instance (to allow call chaining)\n+     *\n+     * @since 2.15\n+     */\n+    public JsonFactory setStreamReadConstraints(StreamReadConstraints src) {\n+        _streamReadConstraints = (src == null) ? StreamReadConstraints.defaults() : src;\n+        return this;\n+    }\n+\n     /*\n     /**********************************************************\n     /* Configuration, parser configuration\ndiff --git a/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java b/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java\nindex 65a364a2..f42adfec 100644\n--- a/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java\n+++ b/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java\n@@ -4,6 +4,7 @@ import java.io.*;\n import java.util.Iterator;\n \n import com.fasterxml.jackson.core.*;\n+import com.fasterxml.jackson.core.exc.StreamConstraintsException;\n import com.fasterxml.jackson.core.type.ResolvedType;\n import com.fasterxml.jackson.core.type.TypeReference;\n \n@@ -157,6 +158,31 @@ public class JsonFactoryTest\n         assertEquals(0, JSON_F.getFormatGeneratorFeatures());\n     }\n \n+    public void testStreamReadConstraintsSetting() throws Exception\n+    {\n+        JsonFactory f = new JsonFactory();\n+        assertSame(StreamReadConstraints.defaults(), f.streamReadConstraints());\n+\n+        StreamReadConstraints custom = StreamReadConstraints.builder()\n+                .maxNestingDepth(1)\n+                .build();\n+        assertSame(f, f.setStreamReadConstraints(custom));\n+        assertSame(custom, f.streamReadConstraints());\n+\n+        try (JsonParser p = f.createParser(\"[[\\\"value\\\"]]\")) {\n+            assertToken(JsonToken.START_ARRAY, p.nextToken());\n+            try {\n+                p.nextToken();\n+                fail(\"Should not pass\");\n+            } catch (StreamConstraintsException e) {\n+                verifyException(e, \"maximum allowed nesting depth (1)\");\n+            }\n+        }\n+\n+        f.setStreamReadConstraints(null);\n+        assertSame(StreamReadConstraints.defaults(), f.streamReadConstraints());\n+    }\n+\n     // for [core#189]: verify that it's ok to disable recycling\n     // Basically simply exercises basic functionality, to ensure\n     // there are no obvious problems; needed since testing never\n@@ -254,16 +280,22 @@ public class JsonFactoryTest\n                 .build();\n         ObjectCodec codec = new BogusCodec();\n         jf.setCodec(codec);\n+        StreamReadConstraints src = StreamReadConstraints.builder()\n+                .maxNumberLength(1234)\n+                .build();\n+        jf.setStreamReadConstraints(src);\n \n         assertFalse(jf.isEnabled(JsonFactory.Feature.INTERN_FIELD_NAMES));\n         assertTrue(jf.isEnabled(JsonParser.Feature.ALLOW_COMMENTS));\n         assertTrue(jf.isEnabled(JsonGenerator.Feature.ESCAPE_NON_ASCII));\n         assertSame(codec, jf.getCodec());\n+        assertSame(src, jf.streamReadConstraints());\n \n         JsonFactory jf2 = jf.copy();\n         assertFalse(jf2.isEnabled(JsonFactory.Feature.INTERN_FIELD_NAMES));\n         assertTrue(jf2.isEnabled(JsonParser.Feature.ALLOW_COMMENTS));\n         assertTrue(jf2.isEnabled(JsonGenerator.Feature.ESCAPE_NON_ASCII));\n+        assertSame(jf.streamReadConstraints(), jf2.streamReadConstraints());\n         // 16-May-2018, tatu: But! Note that despited [core#460], this should NOT copy it back\n         assertNull(jf2.getCodec());\n \n",
       "finalOutput": {
         "status": "completed",
@@ -107,937 +144,55 @@
         "predSteps": [
           {
             "files": [
-              "LICENSE",
-              "README.md",
-              "SECURITY.md",
-              "create-test-report.sh",
-              "docs/README.md",
-              "docs/javadoc/2.0/index.html",
-              "docs/javadoc/2.1/index.html",
-              "docs/javadoc/2.10/index.html",
-              "docs/javadoc/2.11/index.html",
-              "docs/javadoc/2.12/index.html",
-              "docs/javadoc/2.13/index.html",
-              "docs/javadoc/2.14/index.html",
-              "docs/javadoc/2.2.0/index.html",
-              "docs/javadoc/2.3/index.html",
-              "docs/javadoc/2.4/index.html",
-              "docs/javadoc/2.5/index.html",
-              "docs/javadoc/2.6/index.html",
-              "docs/javadoc/2.7/index.html",
-              "docs/javadoc/2.8/index.html",
-              "docs/javadoc/2.9/index.html",
-              "mvnw.cmd",
-              "pom.xml",
-              "release-notes/CREDITS-2.x",
-              "release-notes/VERSION-2.x",
-              "release.sh",
-              "src/main/java/com/fasterxml/jackson/core/Base64Variant.java",
-              "src/main/java/com/fasterxml/jackson/core/Base64Variants.java",
-              "src/main/java/com/fasterxml/jackson/core/FormatFeature.java",
-              "src/main/java/com/fasterxml/jackson/core/FormatSchema.java",
-              "src/main/java/com/fasterxml/jackson/core/JacksonException.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonEncoding.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonFactoryBuilder.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonGenerationException.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonGenerator.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonLocation.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonParseException.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonParser.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonPointer.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonProcessingException.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonStreamContext.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonToken.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonTokenId.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonpCharacterEscapes.java",
-              "src/main/java/com/fasterxml/jackson/core/ObjectCodec.java",
-              "src/main/java/com/fasterxml/jackson/core/PrettyPrinter.java",
-              "src/main/java/com/fasterxml/jackson/core/SerializableString.java",
-              "src/main/java/com/fasterxml/jackson/core/StreamReadCapability.java",
-              "src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java",
-              "src/main/java/com/fasterxml/jackson/core/StreamReadFeature.java",
-              "src/main/java/com/fasterxml/jackson/core/StreamWriteCapability.java",
-              "src/main/java/com/fasterxml/jackson/core/StreamWriteFeature.java",
-              "src/main/java/com/fasterxml/jackson/core/TSFBuilder.java",
-              "src/main/java/com/fasterxml/jackson/core/TokenStreamFactory.java",
-              "src/main/java/com/fasterxml/jackson/core/TreeCodec.java",
-              "src/main/java/com/fasterxml/jackson/core/TreeNode.java",
-              "src/main/java/com/fasterxml/jackson/core/Version.java",
-              "src/main/java/com/fasterxml/jackson/core/Versioned.java",
-              "src/main/java/com/fasterxml/jackson/core/async/ByteArrayFeeder.java",
-              "src/main/java/com/fasterxml/jackson/core/async/ByteBufferFeeder.java",
-              "src/main/java/com/fasterxml/jackson/core/async/NonBlockingInputFeeder.java",
-              "src/main/java/com/fasterxml/jackson/core/async/package-info.java",
-              "src/main/java/com/fasterxml/jackson/core/base/GeneratorBase.java",
-              "src/main/java/com/fasterxml/jackson/core/base/ParserBase.java",
-              "src/main/java/com/fasterxml/jackson/core/base/ParserMinimalBase.java",
-              "src/main/java/com/fasterxml/jackson/core/base/package-info.java",
-              "src/main/java/com/fasterxml/jackson/core/exc/InputCoercionException.java",
-              "src/main/java/com/fasterxml/jackson/core/exc/StreamConstraintsException.java",
-              "src/main/java/com/fasterxml/jackson/core/exc/StreamReadException.java",
-              "src/main/java/com/fasterxml/jackson/core/exc/StreamWriteException.java",
-              "src/main/java/com/fasterxml/jackson/core/exc/package-info.java",
-              "src/main/java/com/fasterxml/jackson/core/filter/FilteringGeneratorDelegate.java",
-              "src/main/java/com/fasterxml/jackson/core/filter/FilteringParserDelegate.java",
-              "src/main/java/com/fasterxml/jackson/core/filter/JsonPointerBasedFilter.java",
-              "src/main/java/com/fasterxml/jackson/core/filter/TokenFilter.java",
-              "src/main/java/com/fasterxml/jackson/core/filter/TokenFilterContext.java",
-              "src/main/java/com/fasterxml/jackson/core/format/DataFormatDetector.java",
-              "src/main/java/com/fasterxml/jackson/core/format/DataFormatMatcher.java",
-              "src/main/java/com/fasterxml/jackson/core/format/InputAccessor.java",
-              "src/main/java/com/fasterxml/jackson/core/format/MatchStrength.java",
-              "src/main/java/com/fasterxml/jackson/core/format/package-info.java",
-              "src/main/java/com/fasterxml/jackson/core/io/BigDecimalParser.java",
-              "src/main/java/com/fasterxml/jackson/core/io/BigIntegerParser.java",
-              "src/main/java/com/fasterxml/jackson/core/io/CharTypes.java",
-              "src/main/java/com/fasterxml/jackson/core/io/CharacterEscapes.java",
-              "src/main/java/com/fasterxml/jackson/core/io/ContentReference.java",
-              "src/main/java/com/fasterxml/jackson/core/io/DataOutputAsStream.java",
-              "src/main/java/com/fasterxml/jackson/core/io/IOContext.java",
-              "src/main/java/com/fasterxml/jackson/core/io/InputDecorator.java",
-              "src/main/java/com/fasterxml/jackson/core/io/JsonEOFException.java",
-              "src/main/java/com/fasterxml/jackson/core/io/JsonStringEncoder.java",
-              "src/main/java/com/fasterxml/jackson/core/io/MergedStream.java",
-              "src/main/java/com/fasterxml/jackson/core/io/NumberInput.java",
-              "src/main/java/com/fasterxml/jackson/core/io/NumberOutput.java",
-              "src/main/java/com/fasterxml/jackson/core/io/OutputDecorator.java",
-              "src/main/java/com/fasterxml/jackson/core/io/SegmentedStringWriter.java",
-              "src/main/java/com/fasterxml/jackson/core/io/SerializedString.java",
-              "src/main/java/com/fasterxml/jackson/core/io/UTF32Reader.java",
-              "src/main/java/com/fasterxml/jackson/core/io/UTF8Writer.java",
-              "src/main/java/com/fasterxml/jackson/core/io/schubfach/DoubleToDecimal.java",
-              "src/main/java/com/fasterxml/jackson/core/io/schubfach/FloatToDecimal.java",
-              "src/main/java/com/fasterxml/jackson/core/io/schubfach/MathUtils.java",
-              "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java",
-              "src/main/java/com/fasterxml/jackson/core/json/DupDetector.java",
-              "src/main/java/com/fasterxml/jackson/core/json/JsonGeneratorImpl.java",
-              "src/main/java/com/fasterxml/jackson/core/json/JsonReadContext.java",
-              "src/main/java/com/fasterxml/jackson/core/json/JsonReadFeature.java",
-              "src/main/java/com/fasterxml/jackson/core/json/JsonWriteContext.java",
-              "src/main/java/com/fasterxml/jackson/core/json/JsonWriteFeature.java",
-              "src/main/java/com/fasterxml/jackson/core/json/PackageVersion.java.in",
-              "src/main/java/com/fasterxml/jackson/core/json/ReaderBasedJsonParser.java",
-              "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java",
-              "src/main/java/com/fasterxml/jackson/core/json/UTF8JsonGenerator.java",
-              "src/main/java/com/fasterxml/jackson/core/json/UTF8StreamJsonParser.java",
-              "src/main/java/com/fasterxml/jackson/core/json/WriterBasedJsonGenerator.java",
-              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingByteBufferJsonParser.java",
-              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParser.java",
-              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java",
-              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingUtf8JsonParserBase.java",
-              "src/main/java/com/fasterxml/jackson/core/json/async/package-info.java",
-              "src/main/java/com/fasterxml/jackson/core/json/package-info.java",
-              "src/main/java/com/fasterxml/jackson/core/package-info.java",
-              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java",
-              "src/main/java/com/fasterxml/jackson/core/sym/CharsToNameCanonicalizer.java",
-              "src/main/java/com/fasterxml/jackson/core/sym/Name.java",
-              "src/main/java/com/fasterxml/jackson/core/sym/Name1.java",
-              "src/main/java/com/fasterxml/jackson/core/sym/Name2.java",
-              "src/main/java/com/fasterxml/jackson/core/sym/Name3.java",
-              "src/main/java/com/fasterxml/jackson/core/sym/NameN.java",
-              "src/main/java/com/fasterxml/jackson/core/sym/package-info.java",
-              "src/main/java/com/fasterxml/jackson/core/type/ResolvedType.java",
-              "src/main/java/com/fasterxml/jackson/core/type/TypeReference.java",
-              "src/main/java/com/fasterxml/jackson/core/type/WritableTypeId.java",
-              "src/main/java/com/fasterxml/jackson/core/type/package-info.java",
-              "src/main/java/com/fasterxml/jackson/core/util/BufferRecycler.java",
-              "src/main/java/com/fasterxml/jackson/core/util/BufferRecyclers.java",
-              "src/main/java/com/fasterxml/jackson/core/util/ByteArrayBuilder.java",
-              "src/main/java/com/fasterxml/jackson/core/util/DefaultIndenter.java",
-              "src/main/java/com/fasterxml/jackson/core/util/DefaultPrettyPrinter.java",
-              "src/main/java/com/fasterxml/jackson/core/util/Instantiatable.java",
-              "src/main/java/com/fasterxml/jackson/core/util/InternCache.java",
-              "src/main/java/com/fasterxml/jackson/core/util/JacksonFeature.java",
-              "src/main/java/com/fasterxml/jackson/core/util/JacksonFeatureSet.java",
-              "src/main/java/com/fasterxml/jackson/core/util/JsonGeneratorDelegate.java",
-              "src/main/java/com/fasterxml/jackson/core/util/JsonParserDelegate.java",
-              "src/main/java/com/fasterxml/jackson/core/util/JsonParserSequence.java",
-              "src/main/java/com/fasterxml/jackson/core/util/MinimalPrettyPrinter.java",
-              "src/main/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBuffer.java",
-              "src/main/java/com/fasterxml/jackson/core/util/RequestPayload.java",
-              "src/main/java/com/fasterxml/jackson/core/util/Separators.java",
-              "src/main/java/com/fasterxml/jackson/core/util/TextBuffer.java",
-              "src/main/java/com/fasterxml/jackson/core/util/ThreadLocalBufferManager.java",
-              "src/main/java/com/fasterxml/jackson/core/util/VersionUtil.java",
-              "src/main/java/com/fasterxml/jackson/core/util/package-info.java",
-              "src/main/resources/META-INF/NOTICE",
-              "src/main/resources/META-INF/services/com.fasterxml.jackson.core.JsonFactory",
-              "src/moditect/module-info.java",
-              "src/site/site.xml",
-              "src/test/java/com/fasterxml/jackson/core/BaseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/JsonLocationTest.java",
-              "src/test/java/com/fasterxml/jackson/core/JsonpCharacterEscapesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/ParserFeatureDefaultsTest.java",
-              "src/test/java/com/fasterxml/jackson/core/TestExceptions.java",
-              "src/test/java/com/fasterxml/jackson/core/TestJDKSerializability.java",
-              "src/test/java/com/fasterxml/jackson/core/TestVersions.java",
-              "src/test/java/com/fasterxml/jackson/core/VersionTest.java",
-              "src/test/java/com/fasterxml/jackson/core/async/AsyncTestBase.java",
-              "src/test/java/com/fasterxml/jackson/core/base64/Base64BinaryParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/base64/Base64CodecTest.java",
-              "src/test/java/com/fasterxml/jackson/core/base64/Base64GenerationTest.java",
-              "src/test/java/com/fasterxml/jackson/core/base64/Base64Padding912Test.java",
-              "src/test/java/com/fasterxml/jackson/core/constraints/DeeplyNestedContentReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java",
-              "src/test/java/com/fasterxml/jackson/core/filter/BasicGeneratorFilteringTest.java",
-              "src/test/java/com/fasterxml/jackson/core/filter/BasicParserFilteringTest.java",
-              "src/test/java/com/fasterxml/jackson/core/filter/GeneratorFiltering609Test.java",
-              "src/test/java/com/fasterxml/jackson/core/filter/GeneratorFiltering890Test.java",
-              "src/test/java/com/fasterxml/jackson/core/filter/JsonPointerGeneratorFilteringTest.java",
-              "src/test/java/com/fasterxml/jackson/core/filter/JsonPointerParserFilteringTest.java",
-              "src/test/java/com/fasterxml/jackson/core/filter/ParserFiltering700Test.java",
-              "src/test/java/com/fasterxml/jackson/core/format/DataFormatMatcherTest.java",
-              "src/test/java/com/fasterxml/jackson/core/format/TestJsonFormatDetection.java",
-              "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz32208UTF32ParseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz34435ParseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz52688ParseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/BigDecimalParserTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/BigIntegerParserTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/SegmentedStringWriterTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/TestCharTypes.java",
-              "src/test/java/com/fasterxml/jackson/core/io/TestIOContext.java",
-              "src/test/java/com/fasterxml/jackson/core/io/TestJsonStringEncoder.java",
-              "src/test/java/com/fasterxml/jackson/core/io/TestMergedStream.java",
-              "src/test/java/com/fasterxml/jackson/core/io/TestNumberInput.java",
-              "src/test/java/com/fasterxml/jackson/core/io/UTF8WriterTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/doubleparser/ReaderTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/schubfach/DoubleToDecimalChecker.java",
-              "src/test/java/com/fasterxml/jackson/core/io/schubfach/DoubleToDecimalTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/schubfach/DoubleToStringTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/schubfach/FloatToDecimalChecker.java",
-              "src/test/java/com/fasterxml/jackson/core/io/schubfach/FloatToDecimalTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/schubfach/FloatToStringTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/schubfach/MathUtilsTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/schubfach/SchubfachDoubleTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/schubfach/SchubfachFloatTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/schubfach/ToDecimalChecker.java",
-              "src/test/java/com/fasterxml/jackson/core/json/BoundsChecksWithJsonFactoryTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/CustomQuoteCharTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/GeneratorFailFromReaderTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/GeneratorFailTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/GeneratorFeaturesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/InputStreamInitTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/JsonParserClosedCaseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/JsonReadContextTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/OutputStreamInitTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/RawValueWithSurrogatesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/RequestPayloadOnExceptionTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/StringGenerationFromReaderTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/StringGenerationTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/TestCharEscaping.java",
-              "src/test/java/com/fasterxml/jackson/core/json/TestCustomEscaping.java",
-              "src/test/java/com/fasterxml/jackson/core/json/TestDecorators.java",
-              "src/test/java/com/fasterxml/jackson/core/json/TestMaxErrorSize.java",
-              "src/test/java/com/fasterxml/jackson/core/json/TestParserOverrides.java",
-              "src/test/java/com/fasterxml/jackson/core/json/TestRootValues.java",
-              "src/test/java/com/fasterxml/jackson/core/json/TestUnicode.java",
-              "src/test/java/com/fasterxml/jackson/core/json/TestWithTonsaSymbols.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncBinaryParseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncCharEscapingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncCommentParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncConcurrencyByteBufferTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncConcurrencyTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncFieldNamesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncInvalidCharsTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncLocationTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncMissingValuesInArrayTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncMissingValuesInObjectTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNaNHandlingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNonStandardNumberParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNonStdNumberHandlingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNonStdParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNumberCoercionTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNumberDeferredReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncPointerFromContext563Test.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncRootNumbersTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncRootValuesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncScalarArrayTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncScopeMatchingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncSimpleNestedTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncSimpleObjectTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncStringArrayTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncStringObjectTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncTokenFilterTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncUnicodeHandlingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/ConfigTest.java",
-              "src/test/java/com/fasterxml/jackson/core/jsonptr/Fuzz51806JsonPointerParse818Test.java",
-              "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerOOME736Test.java",
-              "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerTest.java",
-              "src/test/java/com/fasterxml/jackson/core/jsonptr/PointerFromContextTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ArrayParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/CommentParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/FastParserNonStandardNumberParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/FastParserNumberParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/FloatParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/LocationDuringReaderParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/LocationDuringStreamParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/LocationInArrayTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/LocationInObjectTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/LocationOffsets455Test.java",
-              "src/test/java/com/fasterxml/jackson/core/read/LocationOffsetsTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NextNameParserTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NextXxxAccessTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NonStandardAposQuotedNamesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NonStandardNumberParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NonStandardParserFeaturesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NonStandardUnquotedNamesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberCoercionTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberDeferredReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserClosingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserDupHandlingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserErrorHandlingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserFeaturesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserLinefeedsTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserScopeMatchingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserSequenceTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserSymbolHandlingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserWithObjectsTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/TrailingCommas616Test.java",
-              "src/test/java/com/fasterxml/jackson/core/read/TrailingCommasTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/UTF32ParseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/UTF8NamesParseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ValueConversionsTest.java",
-              "src/test/java/com/fasterxml/jackson/core/sym/PlaceholderSymbolTableTest.java",
-              "src/test/java/com/fasterxml/jackson/core/sym/SymbolTableMergingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/sym/SymbolsViaParserTest.java",
-              "src/test/java/com/fasterxml/jackson/core/sym/TestByteBasedSymbols.java",
-              "src/test/java/com/fasterxml/jackson/core/sym/TestHashCollisionChars.java",
-              "src/test/java/com/fasterxml/jackson/core/sym/TestSymbolTables.java",
-              "src/test/java/com/fasterxml/jackson/core/sym/TestSymbolsWithMediaItem.java",
-              "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapper.java",
-              "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapperForByteArray.java",
-              "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapperForByteBuffer.java",
-              "src/test/java/com/fasterxml/jackson/core/testsupport/ByteOutputStreamForTesting.java",
-              "src/test/java/com/fasterxml/jackson/core/testsupport/MockDataInput.java",
-              "src/test/java/com/fasterxml/jackson/core/testsupport/StringWriterForTesting.java",
-              "src/test/java/com/fasterxml/jackson/core/testsupport/ThrottledInputStream.java",
-              "src/test/java/com/fasterxml/jackson/core/testsupport/ThrottledReader.java",
-              "src/test/java/com/fasterxml/jackson/core/type/TypeReferenceTest.java",
-              "src/test/java/com/fasterxml/jackson/core/util/ByteArrayBuilderTest.java",
-              "src/test/java/com/fasterxml/jackson/core/util/DefaultIndenterTest.java",
-              "src/test/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBufferTest.java",
-              "src/test/java/com/fasterxml/jackson/core/util/RequestPayloadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/util/SeparatorsTest.java",
-              "src/test/java/com/fasterxml/jackson/core/util/TestCharTypes.java",
-              "src/test/java/com/fasterxml/jackson/core/util/TestDefaultPrettyPrinter.java",
-              "src/test/java/com/fasterxml/jackson/core/util/TestDelegates.java",
-              "src/test/java/com/fasterxml/jackson/core/util/TestNumberPrinting.java",
-              "src/test/java/com/fasterxml/jackson/core/util/TestSerializedString.java",
-              "src/test/java/com/fasterxml/jackson/core/util/TestTextBuffer.java",
-              "src/test/java/com/fasterxml/jackson/core/util/TestVersionUtil.java",
-              "src/test/java/com/fasterxml/jackson/core/util/VersionUtilTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/ArrayGenerationTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/ArrayWriteTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/BoundsChecksWithGeneratorTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/FastDoubleArrayGenerationTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/FastDoubleObjectWriteTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/GeneratorBasicTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/GeneratorCloseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/GeneratorCopyTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/GeneratorDupHandlingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/GeneratorMiscTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/ObjectWriteTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/PrettyPrinterTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/RawStringWriteTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/SerializedStringWriteTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/UTF8GeneratorTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/WriteTypeIdTest.java",
-              "src/test/java/com/fasterxml/jackson/failing/ParserErrorHandling105Test.java",
-              "src/test/java/com/fasterxml/jackson/failing/ParserErrorHandling679Test.java",
-              "src/test/java/com/fasterxml/jackson/failing/ParserFilterEmpty708Test.java",
-              "src/test/java/com/fasterxml/jackson/failing/ParserPrecisionLoss733Test.java",
-              "src/test/java/com/fasterxml/jackson/failing/Surrogate223Test.java",
-              "src/test/java/com/fasterxml/jackson/failing/async/AsyncTokenErrorTest.java",
-              "src/test/java/perf/ConcurrencyReadTest.java",
-              "src/test/java/perf/EnumByBytesLookup.java",
-              "src/test/java/perf/ManualCharAccessTest.java",
-              "src/test/java/perf/ManualFuzzUTF32.java",
-              "src/test/java/perf/ManualIntRead.java",
-              "src/test/java/perf/ManualPerfTestBase.java",
-              "src/test/java/perf/ManualReadPerfWithMedia.java",
-              "src/test/java/perf/ManualSmallTokenRead.java",
-              "src/test/java/perf/MediaItem.java",
-              "src/test/resources/META-INF/maven/foo/bar/foo-bar/pom.properties",
-              "src/test/resources/data/FastDoubleParser_errorcases.txt",
-              "src/test/resources/data/floats-755.json",
-              "src/test/resources/data/fuzz-json-34435.json",
-              "src/test/resources/data/fuzz-json-utf32-32208.json",
-              "src/test/resources/test_0xA0.json"
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
+                {
+                  "start": 240,
+                  "end": 860
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "release-notes/CREDITS-2.x",
-              "release-notes/VERSION-2.x",
-              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonFactoryBuilder.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonParser.java",
-              "src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java",
-              "src/main/java/com/fasterxml/jackson/core/TSFBuilder.java",
-              "src/main/java/com/fasterxml/jackson/core/TokenStreamFactory.java",
-              "src/main/java/com/fasterxml/jackson/core/base/ParserBase.java",
-              "src/main/java/com/fasterxml/jackson/core/exc/StreamConstraintsException.java",
-              "src/main/java/com/fasterxml/jackson/core/io/IOContext.java",
-              "src/main/java/com/fasterxml/jackson/core/io/SegmentedStringWriter.java",
-              "src/main/java/com/fasterxml/jackson/core/json/ReaderBasedJsonParser.java",
-              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java",
-              "src/main/java/com/fasterxml/jackson/core/util/JsonParserDelegate.java",
-              "src/main/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBuffer.java",
-              "src/main/java/com/fasterxml/jackson/core/util/TextBuffer.java",
-              "src/test/java/com/fasterxml/jackson/core/BaseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/TestVersions.java",
-              "src/test/java/com/fasterxml/jackson/core/constraints/DeeplyNestedContentReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java",
-              "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz34435ParseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/io/TestIOContext.java",
-              "src/test/java/com/fasterxml/jackson/core/io/TestMergedStream.java",
-              "src/test/java/com/fasterxml/jackson/core/io/UTF8WriterTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/TestCharEscaping.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncMissingValuesInArrayTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncMissingValuesInObjectTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncStringArrayTest.java",
-              "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerOOME736Test.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/TrailingCommasTest.java",
-              "src/test/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBufferTest.java",
-              "src/test/java/com/fasterxml/jackson/core/util/TestDelegates.java",
-              "src/test/java/com/fasterxml/jackson/core/write/PrettyPrinterTest.java",
-              "src/test/java/com/fasterxml/jackson/core/write/UTF8GeneratorTest.java"
+              "src/main/java/com/fasterxml/jackson/core/JsonFactoryBuilder.java"
             ],
             "spans": {
-              "release-notes/CREDITS-2.x": [
-                {
-                  "start": 312,
-                  "end": 312
-                },
-                {
-                  "start": 314,
-                  "end": 314
-                }
-              ],
-              "release-notes/VERSION-2.x": [
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 27,
-                  "end": 27
-                }
-              ],
               "src/main/java/com/fasterxml/jackson/core/JsonFactoryBuilder.java": [
                 {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 40,
-                  "end": 40
-                },
-                {
-                  "start": 56,
-                  "end": 56
-                },
-                {
-                  "start": 62,
-                  "end": 62
-                },
-                {
-                  "start": 72,
-                  "end": 72
-                },
-                {
-                  "start": 78,
-                  "end": 78
-                },
-                {
-                  "start": 87,
-                  "end": 87
-                },
-                {
-                  "start": 94,
-                  "end": 94
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                },
-                {
-                  "start": 112,
-                  "end": 112
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 127,
-                  "end": 127
-                },
-                {
-                  "start": 141,
-                  "end": 141
-                },
-                {
-                  "start": 155,
-                  "end": 155
-                },
-                {
-                  "start": 169,
-                  "end": 169
-                },
-                {
-                  "start": 194,
-                  "end": 194
-                },
-                {
-                  "start": 212,
-                  "end": 212
+                  "start": 1,
+                  "end": 260
                 }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/TokenStreamFactory.java": [
-                {
-                  "start": 154,
-                  "end": 154
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/io/SegmentedStringWriter.java": [
-                {
-                  "start": 96,
-                  "end": 96
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/JsonParser.java": [
-                {
-                  "start": 515,
-                  "end": 515
-                },
-                {
-                  "start": 516,
-                  "end": 516
-                },
-                {
-                  "start": 1506,
-                  "end": 1506
-                },
-                {
-                  "start": 1571,
-                  "end": 1571
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/base/ParserBase.java": [
-                {
-                  "start": 46,
-                  "end": 46
-                },
-                {
-                  "start": 256,
-                  "end": 256
-                },
-                {
-                  "start": 258,
-                  "end": 258
-                },
-                {
-                  "start": 854,
-                  "end": 854
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/exc/StreamConstraintsException.java": [
-                {
-                  "start": 8,
-                  "end": 8
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/io/IOContext.java": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 65,
-                  "end": 65
-                },
-                {
-                  "start": 123,
-                  "end": 123
-                },
-                {
-                  "start": 127,
-                  "end": 127
-                },
-                {
-                  "start": 156,
-                  "end": 156
-                }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/TSFBuilder.java"
+            ],
+            "spans": {
               "src/main/java/com/fasterxml/jackson/core/TSFBuilder.java": [
                 {
-                  "start": 85,
-                  "end": 85
-                },
-                {
-                  "start": 280,
-                  "end": 280
+                  "start": 1,
+                  "end": 360
                 }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java": [
-                {
-                  "start": 25,
-                  "end": 25
-                },
-                {
-                  "start": 49,
-                  "end": 49
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 137,
-                  "end": 137
-                },
-                {
-                  "start": 147,
-                  "end": 147
-                },
-                {
-                  "start": 157,
-                  "end": 157
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
-                {
-                  "start": 279,
-                  "end": 279
-                },
-                {
-                  "start": 340,
-                  "end": 340
-                },
-                {
-                  "start": 362,
-                  "end": 362
-                },
-                {
-                  "start": 372,
-                  "end": 372
-                },
-                {
-                  "start": 378,
-                  "end": 378
-                },
-                {
-                  "start": 388,
-                  "end": 388
-                },
-                {
-                  "start": 414,
-                  "end": 414
-                },
-                {
-                  "start": 434,
-                  "end": 434
-                },
-                {
-                  "start": 449,
-                  "end": 449
-                },
-                {
-                  "start": 698,
-                  "end": 698
-                },
-                {
-                  "start": 713,
-                  "end": 713
-                },
-                {
-                  "start": 729,
-                  "end": 729
-                },
-                {
-                  "start": 777,
-                  "end": 777
-                },
-                {
-                  "start": 868,
-                  "end": 868
-                },
-                {
-                  "start": 985,
-                  "end": 985
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/json/ReaderBasedJsonParser.java": [
-                {
-                  "start": 315,
-                  "end": 315
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/util/JsonParserDelegate.java": [
-                {
-                  "start": 85,
-                  "end": 85
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBuffer.java": [
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 10,
-                  "end": 10
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java": [
-                {
-                  "start": 378,
-                  "end": 378
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/util/TextBuffer.java": [
-                {
-                  "start": 266,
-                  "end": 266
-                },
-                {
-                  "start": 291,
-                  "end": 291
-                },
-                {
-                  "start": 314,
-                  "end": 314
-                },
-                {
-                  "start": 422,
-                  "end": 422
-                },
-                {
-                  "start": 452,
-                  "end": 452
-                },
-                {
-                  "start": 504,
-                  "end": 504
-                },
-                {
-                  "start": 722,
-                  "end": 722
-                },
-                {
-                  "start": 746,
-                  "end": 746
-                },
-                {
-                  "start": 791,
-                  "end": 791
-                },
-                {
-                  "start": 900,
-                  "end": 900
-                },
-                {
-                  "start": 920,
-                  "end": 920
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/TestVersions.java": [
-                {
-                  "start": 50,
-                  "end": 50
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java": [
-                {
-                  "start": 692,
-                  "end": 692
-                },
-                {
-                  "start": 877,
-                  "end": 877
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java": [
-                {
-                  "start": 116,
-                  "end": 116
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java": [
-                {
-                  "start": 18,
-                  "end": 18
-                },
-                {
-                  "start": 32,
-                  "end": 32
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/constraints/DeeplyNestedContentReadTest.java": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 15,
-                  "end": 15
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerOOME736Test.java": [
-                {
-                  "start": 14,
-                  "end": 14
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBufferTest.java": [
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 43,
-                  "end": 43
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/util/TestDelegates.java": [
-                {
-                  "start": 204,
-                  "end": 204
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java": [
-                {
-                  "start": 707,
-                  "end": 707
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/TrailingCommasTest.java": [
-                {
-                  "start": 25,
-                  "end": 25
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/io/UTF8WriterTest.java": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 153,
-                  "end": 153
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/io/TestMergedStream.java": [
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 15,
-                  "end": 15
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/io/TestIOContext.java": [
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 11,
-                  "end": 11
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/TestCharEscaping.java": [
-                {
-                  "start": 232,
-                  "end": 232
-                },
-                {
-                  "start": 264,
-                  "end": 264
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncMissingValuesInArrayTest.java": [
-                {
-                  "start": 23,
-                  "end": 23
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncMissingValuesInObjectTest.java": [
-                {
-                  "start": 23,
-                  "end": 23
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncStringArrayTest.java": [
-                {
-                  "start": 141,
-                  "end": 141
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz34435ParseTest.java": [
-                {
-                  "start": 20,
-                  "end": 20
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/BaseTest.java": [
-                {
-                  "start": 614,
-                  "end": 614
-                },
-                {
-                  "start": 615,
-                  "end": 615
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/write/PrettyPrinterTest.java": [
-                {
-                  "start": 147,
-                  "end": 147
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/write/UTF8GeneratorTest.java": [
-                {
-                  "start": 21,
-                  "end": 21
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java"
+            ],
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
+                {
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -1052,147 +207,118 @@
           },
           {
             "files": [
-              "src/main/java/com/fasterxml/jackson/core/JsonFactoryBuilder.java"
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
+                {
+                  "start": 860,
+                  "end": 1060
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/main/java/com/fasterxml/jackson/core/TSFBuilder.java"
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java"
-            ],
-            "spans": {},
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
+                {
+                  "start": 1060,
+                  "end": 1240
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/test/java/com/fasterxml/jackson/core/constraints/DeeplyNestedContentReadTest.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/constraints/DeeplyNestedContentReadTest.java": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/test/java/com/fasterxml/jackson/core/json/BoundsChecksWithJsonFactoryTest.java"
             ],
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/json/BoundsChecksWithJsonFactoryTest.java": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java"
+            ],
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
+                {
+                  "start": 220,
+                  "end": 420
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pom.xml"
+            ],
             "spans": {},
             "symbols": {}
           },
           {
             "files": [
-              "src/test/java/com/fasterxml/jackson/core/constraints/DeeplyNestedContentReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java",
-              "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz34435ParseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncStringArrayTest.java",
-              "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerOOME736Test.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/util/TestDelegates.java"
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
             ],
             "spans": {
-              "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java": [
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
                 {
-                  "start": 692,
-                  "end": 692
+                  "start": 270,
+                  "end": 800
                 }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncStringArrayTest.java": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java"
+            ],
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
                 {
-                  "start": 141,
-                  "end": 141
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz34435ParseTest.java": [
-                {
-                  "start": 20,
-                  "end": 20
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java": [
-                {
-                  "start": 32,
-                  "end": 32
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java": [
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 36,
-                  "end": 36
-                },
-                {
-                  "start": 42,
-                  "end": 42
-                },
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 67,
-                  "end": 67
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerOOME736Test.java": [
-                {
-                  "start": 14,
-                  "end": 14
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/constraints/DeeplyNestedContentReadTest.java": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/util/TestDelegates.java": [
-                {
-                  "start": 208,
-                  "end": 208
-                },
-                {
-                  "start": 219,
-                  "end": 219
+                  "start": 1,
+                  "end": 340
                 }
               ]
             },
@@ -1200,540 +326,23 @@
           }
         ],
         "predFiles": [
-          "LICENSE",
-          "README.md",
-          "SECURITY.md",
-          "create-test-report.sh",
-          "docs/README.md",
-          "docs/javadoc/2.0/index.html",
-          "docs/javadoc/2.1/index.html",
-          "docs/javadoc/2.10/index.html",
-          "docs/javadoc/2.11/index.html",
-          "docs/javadoc/2.12/index.html",
-          "docs/javadoc/2.13/index.html",
-          "docs/javadoc/2.14/index.html",
-          "docs/javadoc/2.2.0/index.html",
-          "docs/javadoc/2.3/index.html",
-          "docs/javadoc/2.4/index.html",
-          "docs/javadoc/2.5/index.html",
-          "docs/javadoc/2.6/index.html",
-          "docs/javadoc/2.7/index.html",
-          "docs/javadoc/2.8/index.html",
-          "docs/javadoc/2.9/index.html",
-          "mvnw.cmd",
-          "pom.xml",
-          "release-notes/CREDITS-2.x",
-          "release-notes/VERSION-2.x",
-          "release.sh",
-          "src/main/java/com/fasterxml/jackson/core/Base64Variant.java",
-          "src/main/java/com/fasterxml/jackson/core/Base64Variants.java",
-          "src/main/java/com/fasterxml/jackson/core/FormatFeature.java",
-          "src/main/java/com/fasterxml/jackson/core/FormatSchema.java",
-          "src/main/java/com/fasterxml/jackson/core/JacksonException.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonEncoding.java",
           "src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonFactoryBuilder.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonGenerationException.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonGenerator.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonLocation.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonParseException.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonParser.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonPointer.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonProcessingException.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonStreamContext.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonToken.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonTokenId.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonpCharacterEscapes.java",
-          "src/main/java/com/fasterxml/jackson/core/ObjectCodec.java",
-          "src/main/java/com/fasterxml/jackson/core/PrettyPrinter.java",
-          "src/main/java/com/fasterxml/jackson/core/SerializableString.java",
-          "src/main/java/com/fasterxml/jackson/core/StreamReadCapability.java",
-          "src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java",
-          "src/main/java/com/fasterxml/jackson/core/StreamReadFeature.java",
-          "src/main/java/com/fasterxml/jackson/core/StreamWriteCapability.java",
-          "src/main/java/com/fasterxml/jackson/core/StreamWriteFeature.java",
           "src/main/java/com/fasterxml/jackson/core/TSFBuilder.java",
-          "src/main/java/com/fasterxml/jackson/core/TokenStreamFactory.java",
-          "src/main/java/com/fasterxml/jackson/core/TreeCodec.java",
-          "src/main/java/com/fasterxml/jackson/core/TreeNode.java",
-          "src/main/java/com/fasterxml/jackson/core/Version.java",
-          "src/main/java/com/fasterxml/jackson/core/Versioned.java",
-          "src/main/java/com/fasterxml/jackson/core/async/ByteArrayFeeder.java",
-          "src/main/java/com/fasterxml/jackson/core/async/ByteBufferFeeder.java",
-          "src/main/java/com/fasterxml/jackson/core/async/NonBlockingInputFeeder.java",
-          "src/main/java/com/fasterxml/jackson/core/async/package-info.java",
-          "src/main/java/com/fasterxml/jackson/core/base/GeneratorBase.java",
-          "src/main/java/com/fasterxml/jackson/core/base/ParserBase.java",
-          "src/main/java/com/fasterxml/jackson/core/base/ParserMinimalBase.java",
-          "src/main/java/com/fasterxml/jackson/core/base/package-info.java",
-          "src/main/java/com/fasterxml/jackson/core/exc/InputCoercionException.java",
-          "src/main/java/com/fasterxml/jackson/core/exc/StreamConstraintsException.java",
-          "src/main/java/com/fasterxml/jackson/core/exc/StreamReadException.java",
-          "src/main/java/com/fasterxml/jackson/core/exc/StreamWriteException.java",
-          "src/main/java/com/fasterxml/jackson/core/exc/package-info.java",
-          "src/main/java/com/fasterxml/jackson/core/filter/FilteringGeneratorDelegate.java",
-          "src/main/java/com/fasterxml/jackson/core/filter/FilteringParserDelegate.java",
-          "src/main/java/com/fasterxml/jackson/core/filter/JsonPointerBasedFilter.java",
-          "src/main/java/com/fasterxml/jackson/core/filter/TokenFilter.java",
-          "src/main/java/com/fasterxml/jackson/core/filter/TokenFilterContext.java",
-          "src/main/java/com/fasterxml/jackson/core/format/DataFormatDetector.java",
-          "src/main/java/com/fasterxml/jackson/core/format/DataFormatMatcher.java",
-          "src/main/java/com/fasterxml/jackson/core/format/InputAccessor.java",
-          "src/main/java/com/fasterxml/jackson/core/format/MatchStrength.java",
-          "src/main/java/com/fasterxml/jackson/core/format/package-info.java",
-          "src/main/java/com/fasterxml/jackson/core/io/BigDecimalParser.java",
-          "src/main/java/com/fasterxml/jackson/core/io/BigIntegerParser.java",
-          "src/main/java/com/fasterxml/jackson/core/io/CharTypes.java",
-          "src/main/java/com/fasterxml/jackson/core/io/CharacterEscapes.java",
-          "src/main/java/com/fasterxml/jackson/core/io/ContentReference.java",
-          "src/main/java/com/fasterxml/jackson/core/io/DataOutputAsStream.java",
-          "src/main/java/com/fasterxml/jackson/core/io/IOContext.java",
-          "src/main/java/com/fasterxml/jackson/core/io/InputDecorator.java",
-          "src/main/java/com/fasterxml/jackson/core/io/JsonEOFException.java",
-          "src/main/java/com/fasterxml/jackson/core/io/JsonStringEncoder.java",
-          "src/main/java/com/fasterxml/jackson/core/io/MergedStream.java",
-          "src/main/java/com/fasterxml/jackson/core/io/NumberInput.java",
-          "src/main/java/com/fasterxml/jackson/core/io/NumberOutput.java",
-          "src/main/java/com/fasterxml/jackson/core/io/OutputDecorator.java",
-          "src/main/java/com/fasterxml/jackson/core/io/SegmentedStringWriter.java",
-          "src/main/java/com/fasterxml/jackson/core/io/SerializedString.java",
-          "src/main/java/com/fasterxml/jackson/core/io/UTF32Reader.java",
-          "src/main/java/com/fasterxml/jackson/core/io/UTF8Writer.java",
-          "src/main/java/com/fasterxml/jackson/core/io/schubfach/DoubleToDecimal.java",
-          "src/main/java/com/fasterxml/jackson/core/io/schubfach/FloatToDecimal.java",
-          "src/main/java/com/fasterxml/jackson/core/io/schubfach/MathUtils.java",
-          "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java",
-          "src/main/java/com/fasterxml/jackson/core/json/DupDetector.java",
-          "src/main/java/com/fasterxml/jackson/core/json/JsonGeneratorImpl.java",
-          "src/main/java/com/fasterxml/jackson/core/json/JsonReadContext.java",
-          "src/main/java/com/fasterxml/jackson/core/json/JsonReadFeature.java",
-          "src/main/java/com/fasterxml/jackson/core/json/JsonWriteContext.java",
-          "src/main/java/com/fasterxml/jackson/core/json/JsonWriteFeature.java",
-          "src/main/java/com/fasterxml/jackson/core/json/PackageVersion.java.in",
-          "src/main/java/com/fasterxml/jackson/core/json/ReaderBasedJsonParser.java",
-          "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java",
-          "src/main/java/com/fasterxml/jackson/core/json/UTF8JsonGenerator.java",
-          "src/main/java/com/fasterxml/jackson/core/json/UTF8StreamJsonParser.java",
-          "src/main/java/com/fasterxml/jackson/core/json/WriterBasedJsonGenerator.java",
-          "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingByteBufferJsonParser.java",
-          "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParser.java",
-          "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java",
-          "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingUtf8JsonParserBase.java",
-          "src/main/java/com/fasterxml/jackson/core/json/async/package-info.java",
-          "src/main/java/com/fasterxml/jackson/core/json/package-info.java",
-          "src/main/java/com/fasterxml/jackson/core/package-info.java",
-          "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java",
-          "src/main/java/com/fasterxml/jackson/core/sym/CharsToNameCanonicalizer.java",
-          "src/main/java/com/fasterxml/jackson/core/sym/Name.java",
-          "src/main/java/com/fasterxml/jackson/core/sym/Name1.java",
-          "src/main/java/com/fasterxml/jackson/core/sym/Name2.java",
-          "src/main/java/com/fasterxml/jackson/core/sym/Name3.java",
-          "src/main/java/com/fasterxml/jackson/core/sym/NameN.java",
-          "src/main/java/com/fasterxml/jackson/core/sym/package-info.java",
-          "src/main/java/com/fasterxml/jackson/core/type/ResolvedType.java",
-          "src/main/java/com/fasterxml/jackson/core/type/TypeReference.java",
-          "src/main/java/com/fasterxml/jackson/core/type/WritableTypeId.java",
-          "src/main/java/com/fasterxml/jackson/core/type/package-info.java",
-          "src/main/java/com/fasterxml/jackson/core/util/BufferRecycler.java",
-          "src/main/java/com/fasterxml/jackson/core/util/BufferRecyclers.java",
-          "src/main/java/com/fasterxml/jackson/core/util/ByteArrayBuilder.java",
-          "src/main/java/com/fasterxml/jackson/core/util/DefaultIndenter.java",
-          "src/main/java/com/fasterxml/jackson/core/util/DefaultPrettyPrinter.java",
-          "src/main/java/com/fasterxml/jackson/core/util/Instantiatable.java",
-          "src/main/java/com/fasterxml/jackson/core/util/InternCache.java",
-          "src/main/java/com/fasterxml/jackson/core/util/JacksonFeature.java",
-          "src/main/java/com/fasterxml/jackson/core/util/JacksonFeatureSet.java",
-          "src/main/java/com/fasterxml/jackson/core/util/JsonGeneratorDelegate.java",
-          "src/main/java/com/fasterxml/jackson/core/util/JsonParserDelegate.java",
-          "src/main/java/com/fasterxml/jackson/core/util/JsonParserSequence.java",
-          "src/main/java/com/fasterxml/jackson/core/util/MinimalPrettyPrinter.java",
-          "src/main/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBuffer.java",
-          "src/main/java/com/fasterxml/jackson/core/util/RequestPayload.java",
-          "src/main/java/com/fasterxml/jackson/core/util/Separators.java",
-          "src/main/java/com/fasterxml/jackson/core/util/TextBuffer.java",
-          "src/main/java/com/fasterxml/jackson/core/util/ThreadLocalBufferManager.java",
-          "src/main/java/com/fasterxml/jackson/core/util/VersionUtil.java",
-          "src/main/java/com/fasterxml/jackson/core/util/package-info.java",
-          "src/main/resources/META-INF/NOTICE",
-          "src/main/resources/META-INF/services/com.fasterxml.jackson.core.JsonFactory",
-          "src/moditect/module-info.java",
-          "src/site/site.xml",
-          "src/test/java/com/fasterxml/jackson/core/BaseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/JsonLocationTest.java",
-          "src/test/java/com/fasterxml/jackson/core/JsonpCharacterEscapesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/ParserFeatureDefaultsTest.java",
-          "src/test/java/com/fasterxml/jackson/core/TestExceptions.java",
-          "src/test/java/com/fasterxml/jackson/core/TestJDKSerializability.java",
-          "src/test/java/com/fasterxml/jackson/core/TestVersions.java",
-          "src/test/java/com/fasterxml/jackson/core/VersionTest.java",
-          "src/test/java/com/fasterxml/jackson/core/async/AsyncTestBase.java",
-          "src/test/java/com/fasterxml/jackson/core/base64/Base64BinaryParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/base64/Base64CodecTest.java",
-          "src/test/java/com/fasterxml/jackson/core/base64/Base64GenerationTest.java",
-          "src/test/java/com/fasterxml/jackson/core/base64/Base64Padding912Test.java",
-          "src/test/java/com/fasterxml/jackson/core/constraints/DeeplyNestedContentReadTest.java",
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java",
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java",
-          "src/test/java/com/fasterxml/jackson/core/filter/BasicGeneratorFilteringTest.java",
-          "src/test/java/com/fasterxml/jackson/core/filter/BasicParserFilteringTest.java",
-          "src/test/java/com/fasterxml/jackson/core/filter/GeneratorFiltering609Test.java",
-          "src/test/java/com/fasterxml/jackson/core/filter/GeneratorFiltering890Test.java",
-          "src/test/java/com/fasterxml/jackson/core/filter/JsonPointerGeneratorFilteringTest.java",
-          "src/test/java/com/fasterxml/jackson/core/filter/JsonPointerParserFilteringTest.java",
-          "src/test/java/com/fasterxml/jackson/core/filter/ParserFiltering700Test.java",
-          "src/test/java/com/fasterxml/jackson/core/format/DataFormatMatcherTest.java",
-          "src/test/java/com/fasterxml/jackson/core/format/TestJsonFormatDetection.java",
-          "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz32208UTF32ParseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz34435ParseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz52688ParseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/io/BigDecimalParserTest.java",
-          "src/test/java/com/fasterxml/jackson/core/io/BigIntegerParserTest.java",
-          "src/test/java/com/fasterxml/jackson/core/io/SegmentedStringWriterTest.java",
-          "src/test/java/com/fasterxml/jackson/core/io/TestCharTypes.java",
-          "src/test/java/com/fasterxml/jackson/core/io/TestIOContext.java",
-          "src/test/java/com/fasterxml/jackson/core/io/TestJsonStringEncoder.java",
-          "src/test/java/com/fasterxml/jackson/core/io/TestMergedStream.java",
-          "src/test/java/com/fasterxml/jackson/core/io/TestNumberInput.java",
-          "src/test/java/com/fasterxml/jackson/core/io/UTF8WriterTest.java",
-          "src/test/java/com/fasterxml/jackson/core/io/doubleparser/ReaderTest.java",
-          "src/test/java/com/fasterxml/jackson/core/io/schubfach/DoubleToDecimalChecker.java",
-          "src/test/java/com/fasterxml/jackson/core/io/schubfach/DoubleToDecimalTest.java",
-          "src/test/java/com/fasterxml/jackson/core/io/schubfach/DoubleToStringTest.java",
-          "src/test/java/com/fasterxml/jackson/core/io/schubfach/FloatToDecimalChecker.java",
-          "src/test/java/com/fasterxml/jackson/core/io/schubfach/FloatToDecimalTest.java",
-          "src/test/java/com/fasterxml/jackson/core/io/schubfach/FloatToStringTest.java",
-          "src/test/java/com/fasterxml/jackson/core/io/schubfach/MathUtilsTest.java",
-          "src/test/java/com/fasterxml/jackson/core/io/schubfach/SchubfachDoubleTest.java",
-          "src/test/java/com/fasterxml/jackson/core/io/schubfach/SchubfachFloatTest.java",
-          "src/test/java/com/fasterxml/jackson/core/io/schubfach/ToDecimalChecker.java",
-          "src/test/java/com/fasterxml/jackson/core/json/BoundsChecksWithJsonFactoryTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/CustomQuoteCharTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/GeneratorFailFromReaderTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/GeneratorFailTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/GeneratorFeaturesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/InputStreamInitTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/JsonParserClosedCaseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/JsonReadContextTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/OutputStreamInitTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/RawValueWithSurrogatesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/RequestPayloadOnExceptionTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/StringGenerationFromReaderTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/StringGenerationTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/TestCharEscaping.java",
-          "src/test/java/com/fasterxml/jackson/core/json/TestCustomEscaping.java",
-          "src/test/java/com/fasterxml/jackson/core/json/TestDecorators.java",
-          "src/test/java/com/fasterxml/jackson/core/json/TestMaxErrorSize.java",
-          "src/test/java/com/fasterxml/jackson/core/json/TestParserOverrides.java",
-          "src/test/java/com/fasterxml/jackson/core/json/TestRootValues.java",
-          "src/test/java/com/fasterxml/jackson/core/json/TestUnicode.java",
-          "src/test/java/com/fasterxml/jackson/core/json/TestWithTonsaSymbols.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncBinaryParseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncCharEscapingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncCommentParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncConcurrencyByteBufferTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncConcurrencyTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncFieldNamesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncInvalidCharsTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncLocationTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncMissingValuesInArrayTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncMissingValuesInObjectTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNaNHandlingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNonStandardNumberParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNonStdNumberHandlingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNonStdParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNumberCoercionTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNumberDeferredReadTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncPointerFromContext563Test.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncRootNumbersTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncRootValuesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncScalarArrayTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncScopeMatchingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncSimpleNestedTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncSimpleObjectTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncStringArrayTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncStringObjectTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncTokenFilterTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncUnicodeHandlingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/ConfigTest.java",
-          "src/test/java/com/fasterxml/jackson/core/jsonptr/Fuzz51806JsonPointerParse818Test.java",
-          "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerOOME736Test.java",
-          "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerTest.java",
-          "src/test/java/com/fasterxml/jackson/core/jsonptr/PointerFromContextTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ArrayParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/CommentParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/FastParserNonStandardNumberParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/FastParserNumberParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/FloatParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/LocationDuringReaderParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/LocationDuringStreamParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/LocationInArrayTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/LocationInObjectTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/LocationOffsets455Test.java",
-          "src/test/java/com/fasterxml/jackson/core/read/LocationOffsetsTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NextNameParserTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NextXxxAccessTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NonStandardAposQuotedNamesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NonStandardNumberParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NonStandardParserFeaturesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NonStandardUnquotedNamesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NumberCoercionTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NumberDeferredReadTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserClosingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserDupHandlingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserErrorHandlingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserFeaturesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserLinefeedsTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserScopeMatchingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserSequenceTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserSymbolHandlingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserWithObjectsTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/TrailingCommas616Test.java",
-          "src/test/java/com/fasterxml/jackson/core/read/TrailingCommasTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/UTF32ParseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/UTF8NamesParseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ValueConversionsTest.java",
-          "src/test/java/com/fasterxml/jackson/core/sym/PlaceholderSymbolTableTest.java",
-          "src/test/java/com/fasterxml/jackson/core/sym/SymbolTableMergingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/sym/SymbolsViaParserTest.java",
-          "src/test/java/com/fasterxml/jackson/core/sym/TestByteBasedSymbols.java",
-          "src/test/java/com/fasterxml/jackson/core/sym/TestHashCollisionChars.java",
-          "src/test/java/com/fasterxml/jackson/core/sym/TestSymbolTables.java",
-          "src/test/java/com/fasterxml/jackson/core/sym/TestSymbolsWithMediaItem.java",
-          "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapper.java",
-          "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapperForByteArray.java",
-          "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapperForByteBuffer.java",
-          "src/test/java/com/fasterxml/jackson/core/testsupport/ByteOutputStreamForTesting.java",
-          "src/test/java/com/fasterxml/jackson/core/testsupport/MockDataInput.java",
-          "src/test/java/com/fasterxml/jackson/core/testsupport/StringWriterForTesting.java",
-          "src/test/java/com/fasterxml/jackson/core/testsupport/ThrottledInputStream.java",
-          "src/test/java/com/fasterxml/jackson/core/testsupport/ThrottledReader.java",
-          "src/test/java/com/fasterxml/jackson/core/type/TypeReferenceTest.java",
-          "src/test/java/com/fasterxml/jackson/core/util/ByteArrayBuilderTest.java",
-          "src/test/java/com/fasterxml/jackson/core/util/DefaultIndenterTest.java",
-          "src/test/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBufferTest.java",
-          "src/test/java/com/fasterxml/jackson/core/util/RequestPayloadTest.java",
-          "src/test/java/com/fasterxml/jackson/core/util/SeparatorsTest.java",
-          "src/test/java/com/fasterxml/jackson/core/util/TestCharTypes.java",
-          "src/test/java/com/fasterxml/jackson/core/util/TestDefaultPrettyPrinter.java",
-          "src/test/java/com/fasterxml/jackson/core/util/TestDelegates.java",
-          "src/test/java/com/fasterxml/jackson/core/util/TestNumberPrinting.java",
-          "src/test/java/com/fasterxml/jackson/core/util/TestSerializedString.java",
-          "src/test/java/com/fasterxml/jackson/core/util/TestTextBuffer.java",
-          "src/test/java/com/fasterxml/jackson/core/util/TestVersionUtil.java",
-          "src/test/java/com/fasterxml/jackson/core/util/VersionUtilTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/ArrayGenerationTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/ArrayWriteTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/BoundsChecksWithGeneratorTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/FastDoubleArrayGenerationTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/FastDoubleObjectWriteTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/GeneratorBasicTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/GeneratorCloseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/GeneratorCopyTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/GeneratorDupHandlingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/GeneratorMiscTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/ObjectWriteTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/PrettyPrinterTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/RawStringWriteTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/SerializedStringWriteTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/UTF8GeneratorTest.java",
-          "src/test/java/com/fasterxml/jackson/core/write/WriteTypeIdTest.java",
-          "src/test/java/com/fasterxml/jackson/failing/ParserErrorHandling105Test.java",
-          "src/test/java/com/fasterxml/jackson/failing/ParserErrorHandling679Test.java",
-          "src/test/java/com/fasterxml/jackson/failing/ParserFilterEmpty708Test.java",
-          "src/test/java/com/fasterxml/jackson/failing/ParserPrecisionLoss733Test.java",
-          "src/test/java/com/fasterxml/jackson/failing/Surrogate223Test.java",
-          "src/test/java/com/fasterxml/jackson/failing/async/AsyncTokenErrorTest.java",
-          "src/test/java/perf/ConcurrencyReadTest.java",
-          "src/test/java/perf/EnumByBytesLookup.java",
-          "src/test/java/perf/ManualCharAccessTest.java",
-          "src/test/java/perf/ManualFuzzUTF32.java",
-          "src/test/java/perf/ManualIntRead.java",
-          "src/test/java/perf/ManualPerfTestBase.java",
-          "src/test/java/perf/ManualReadPerfWithMedia.java",
-          "src/test/java/perf/ManualSmallTokenRead.java",
-          "src/test/java/perf/MediaItem.java",
-          "src/test/resources/META-INF/maven/foo/bar/foo-bar/pom.properties",
-          "src/test/resources/data/FastDoubleParser_errorcases.txt",
-          "src/test/resources/data/floats-755.json",
-          "src/test/resources/data/fuzz-json-34435.json",
-          "src/test/resources/data/fuzz-json-utf32-32208.json",
-          "src/test/resources/test_0xA0.json"
+          "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java"
         ],
         "predSpans": {
-          "release-notes/CREDITS-2.x": [
+          "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
             {
-              "start": 312,
-              "end": 312
+              "start": 273,
+              "end": 340
             },
             {
-              "start": 314,
-              "end": 314
-            }
-          ],
-          "release-notes/VERSION-2.x": [
-            {
-              "start": 19,
-              "end": 19
+              "start": 351,
+              "end": 414
             },
             {
-              "start": 27,
-              "end": 27
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/JsonFactoryBuilder.java": [
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 40,
-              "end": 40
-            },
-            {
-              "start": 56,
-              "end": 56
-            },
-            {
-              "start": 62,
-              "end": 62
-            },
-            {
-              "start": 72,
-              "end": 72
-            },
-            {
-              "start": 78,
-              "end": 78
-            },
-            {
-              "start": 87,
-              "end": 87
-            },
-            {
-              "start": 94,
-              "end": 94
-            },
-            {
-              "start": 103,
-              "end": 103
-            },
-            {
-              "start": 112,
-              "end": 112
-            },
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 127,
-              "end": 127
-            },
-            {
-              "start": 141,
-              "end": 141
-            },
-            {
-              "start": 155,
-              "end": 155
-            },
-            {
-              "start": 169,
-              "end": 169
-            },
-            {
-              "start": 194,
-              "end": 194
-            },
-            {
-              "start": 212,
-              "end": 212
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/TokenStreamFactory.java": [
-            {
-              "start": 154,
-              "end": 154
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/io/SegmentedStringWriter.java": [
-            {
-              "start": 96,
-              "end": 96
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/JsonParser.java": [
-            {
-              "start": 515,
-              "end": 515
-            },
-            {
-              "start": 516,
-              "end": 516
-            },
-            {
-              "start": 1506,
-              "end": 1506
-            },
-            {
-              "start": 1571,
-              "end": 1571
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/base/ParserBase.java": [
-            {
-              "start": 46,
-              "end": 46
-            },
-            {
-              "start": 256,
-              "end": 256
-            },
-            {
-              "start": 258,
-              "end": 258
-            },
-            {
-              "start": 854,
-              "end": 854
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/exc/StreamConstraintsException.java": [
-            {
-              "start": 8,
-              "end": 8
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/io/IOContext.java": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 65,
-              "end": 65
-            },
-            {
-              "start": 123,
-              "end": 123
-            },
-            {
-              "start": 127,
-              "end": 127
-            },
-            {
-              "start": 156,
-              "end": 156
+              "start": 776,
+              "end": 793
             }
           ],
           "src/main/java/com/fasterxml/jackson/core/TSFBuilder.java": [
@@ -1742,410 +351,8 @@
               "end": 85
             },
             {
-              "start": 85,
-              "end": 85
-            },
-            {
               "start": 272,
               "end": 284
-            },
-            {
-              "start": 280,
-              "end": 280
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java": [
-            {
-              "start": 25,
-              "end": 25
-            },
-            {
-              "start": 49,
-              "end": 49
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 130,
-              "end": 130
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 137,
-              "end": 137
-            },
-            {
-              "start": 147,
-              "end": 147
-            },
-            {
-              "start": 157,
-              "end": 157
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
-            {
-              "start": 273,
-              "end": 340
-            },
-            {
-              "start": 279,
-              "end": 279
-            },
-            {
-              "start": 340,
-              "end": 340
-            },
-            {
-              "start": 351,
-              "end": 414
-            },
-            {
-              "start": 362,
-              "end": 362
-            },
-            {
-              "start": 372,
-              "end": 372
-            },
-            {
-              "start": 378,
-              "end": 378
-            },
-            {
-              "start": 388,
-              "end": 388
-            },
-            {
-              "start": 414,
-              "end": 414
-            },
-            {
-              "start": 434,
-              "end": 434
-            },
-            {
-              "start": 449,
-              "end": 449
-            },
-            {
-              "start": 698,
-              "end": 698
-            },
-            {
-              "start": 713,
-              "end": 713
-            },
-            {
-              "start": 729,
-              "end": 729
-            },
-            {
-              "start": 776,
-              "end": 793
-            },
-            {
-              "start": 777,
-              "end": 777
-            },
-            {
-              "start": 868,
-              "end": 868
-            },
-            {
-              "start": 985,
-              "end": 985
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/json/ReaderBasedJsonParser.java": [
-            {
-              "start": 315,
-              "end": 315
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/util/JsonParserDelegate.java": [
-            {
-              "start": 85,
-              "end": 85
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBuffer.java": [
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 10,
-              "end": 10
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java": [
-            {
-              "start": 378,
-              "end": 378
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/util/TextBuffer.java": [
-            {
-              "start": 266,
-              "end": 266
-            },
-            {
-              "start": 291,
-              "end": 291
-            },
-            {
-              "start": 314,
-              "end": 314
-            },
-            {
-              "start": 422,
-              "end": 422
-            },
-            {
-              "start": 452,
-              "end": 452
-            },
-            {
-              "start": 504,
-              "end": 504
-            },
-            {
-              "start": 722,
-              "end": 722
-            },
-            {
-              "start": 746,
-              "end": 746
-            },
-            {
-              "start": 791,
-              "end": 791
-            },
-            {
-              "start": 900,
-              "end": 900
-            },
-            {
-              "start": 920,
-              "end": 920
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/TestVersions.java": [
-            {
-              "start": 50,
-              "end": 50
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java": [
-            {
-              "start": 692,
-              "end": 692
-            },
-            {
-              "start": 877,
-              "end": 877
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java": [
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 42,
-              "end": 42
-            },
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 67,
-              "end": 67
-            },
-            {
-              "start": 116,
-              "end": 116
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java": [
-            {
-              "start": 18,
-              "end": 18
-            },
-            {
-              "start": 32,
-              "end": 32
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/constraints/DeeplyNestedContentReadTest.java": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 34,
-              "end": 34
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerOOME736Test.java": [
-            {
-              "start": 14,
-              "end": 14
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBufferTest.java": [
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 43,
-              "end": 43
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/util/TestDelegates.java": [
-            {
-              "start": 204,
-              "end": 204
-            },
-            {
-              "start": 208,
-              "end": 208
-            },
-            {
-              "start": 219,
-              "end": 219
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java": [
-            {
-              "start": 707,
-              "end": 707
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/TrailingCommasTest.java": [
-            {
-              "start": 25,
-              "end": 25
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/io/UTF8WriterTest.java": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 153,
-              "end": 153
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/io/TestMergedStream.java": [
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 15,
-              "end": 15
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/io/TestIOContext.java": [
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 11,
-              "end": 11
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/TestCharEscaping.java": [
-            {
-              "start": 232,
-              "end": 232
-            },
-            {
-              "start": 264,
-              "end": 264
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncMissingValuesInArrayTest.java": [
-            {
-              "start": 23,
-              "end": 23
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncMissingValuesInObjectTest.java": [
-            {
-              "start": 23,
-              "end": 23
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncStringArrayTest.java": [
-            {
-              "start": 141,
-              "end": 141
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz34435ParseTest.java": [
-            {
-              "start": 20,
-              "end": 20
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/BaseTest.java": [
-            {
-              "start": 614,
-              "end": 614
-            },
-            {
-              "start": 615,
-              "end": 615
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/write/PrettyPrinterTest.java": [
-            {
-              "start": 147,
-              "end": 147
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/write/UTF8GeneratorTest.java": [
-            {
-              "start": 21,
-              "end": 21
             }
           ],
           "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
@@ -2180,105 +387,141 @@
           {
             "step": 1,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 1.0,
+              "file": 0.5,
               "symbol": 1.0,
-              "span": 0.19187675070028012,
-              "line": 0.08
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 1.0,
+              "file": 0.5,
               "symbol": 1.0,
-              "span": 0.19187675070028012,
-              "line": 0.08
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 1.0,
+              "file": 0.5,
               "symbol": 1.0,
-              "span": 0.19187675070028012,
-              "line": 0.08
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 1.0,
+              "file": 0.5,
               "symbol": 1.0,
-              "span": 0.19187675070028012,
-              "line": 0.08
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 1.0,
+              "file": 0.5,
               "symbol": 1.0,
-              "span": 0.19187675070028012,
-              "line": 0.08
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 1.0,
+              "file": 0.5,
               "symbol": 1.0,
-              "span": 0.19187675070028012,
-              "line": 0.08
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 8,
             "coverage": {
-              "file": 1.0,
+              "file": 0.5,
               "symbol": 1.0,
-              "span": 0.19187675070028012,
-              "line": 0.08
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 9,
             "coverage": {
-              "file": 1.0,
+              "file": 0.5,
               "symbol": 1.0,
-              "span": 0.19187675070028012,
-              "line": 0.08
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 10,
             "coverage": {
-              "file": 1.0,
+              "file": 0.5,
               "symbol": 1.0,
-              "span": 0.19187675070028012,
-              "line": 0.08
+              "span": 0.4733893557422969,
+              "line": 0.52
+            }
+          },
+          {
+            "step": 11,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
+            }
+          },
+          {
+            "step": 12,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
+            }
+          },
+          {
+            "step": 13,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
+            }
+          },
+          {
+            "step": 14,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           }
         ],
         "aucCoverage": {
-          "file": 1.0,
-          "symbol": 0.9,
-          "span": 0.1726890756302521,
-          "line": 0.072
+          "file": 0.5,
+          "symbol": 1.0,
+          "span": 0.4733893557422969,
+          "line": 0.52
         },
         "redundancy": {
-          "file": 0.13126491646778038,
-          "symbol": 0.13157894736842102,
-          "span": 0.08075601374570451,
-          "line": 0.06201550387596899
+          "file": 0.4285714285714286,
+          "symbol": 0.26171875,
+          "span": 0.2777751555257668,
+          "line": 0.25006839945280435
         }
       },
       "fixOverlap": {
@@ -2426,22 +669,58 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",
@@ -2606,9 +885,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-19T04:32:24Z",
       "completedAt": "2026-05-19T04:36:16Z",
       "durationMs": 231781,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 894267,
@@ -2617,6 +911,28 @@
         "total_tokens": 905054,
         "cache_read_input_tokens": 814336
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 33,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/main/java/com/fasterxml/jackson/core/JsonFactory.java b/src/main/java/com/fasterxml/jackson/core/JsonFactory.java\nindex 08700ff1..d9c10b6e 100644\n--- a/src/main/java/com/fasterxml/jackson/core/JsonFactory.java\n+++ b/src/main/java/com/fasterxml/jackson/core/JsonFactory.java\n@@ -276,7 +276,7 @@ public class JsonFactory\n      *\n      * @since 2.15\n      */\n-    final protected StreamReadConstraints _streamReadConstraints;\n+    protected StreamReadConstraints _streamReadConstraints;\n \n     /**\n      * Optional helper object that may decorate input sources, to do\n@@ -778,6 +778,26 @@ public class JsonFactory\n         return _streamReadConstraints;\n     }\n \n+    /**\n+     * Method for overriding {@link StreamReadConstraints} defined for\n+     * {@link JsonParser} instances created by this factory.\n+     *<p>\n+     * Preferred way to configure constraints is by using\n+     * {@link JsonFactoryBuilder#streamReadConstraints(StreamReadConstraints)},\n+     * but this method is available for cases where the factory is configured\n+     * after construction.\n+     *\n+     * @param src Constraints to use; if {@code null}, defaults are used\n+     *\n+     * @return This factory instance (to allow call chaining)\n+     *\n+     * @since 2.15\n+     */\n+    public JsonFactory setStreamReadConstraints(StreamReadConstraints src) {\n+        _streamReadConstraints = (src == null) ? StreamReadConstraints.defaults() : src;\n+        return this;\n+    }\n+\n     /*\n     /**********************************************************\n     /* Configuration, parser configuration\ndiff --git a/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java b/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java\nindex 65a364a2..2e4def06 100644\n--- a/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java\n+++ b/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java\n@@ -4,6 +4,7 @@ import java.io.*;\n import java.util.Iterator;\n \n import com.fasterxml.jackson.core.*;\n+import com.fasterxml.jackson.core.exc.StreamConstraintsException;\n import com.fasterxml.jackson.core.type.ResolvedType;\n import com.fasterxml.jackson.core.type.TypeReference;\n \n@@ -157,6 +158,28 @@ public class JsonFactoryTest\n         assertEquals(0, JSON_F.getFormatGeneratorFeatures());\n     }\n \n+    public void testSetStreamReadConstraints() throws Exception\n+    {\n+        JsonFactory f = new JsonFactory();\n+        StreamReadConstraints constraints = StreamReadConstraints.builder()\n+                .maxNestingDepth(1)\n+                .build();\n+\n+        assertSame(f, f.setStreamReadConstraints(constraints));\n+        assertSame(constraints, f.streamReadConstraints());\n+\n+        try (JsonParser p = f.createParser(\"[[\\\"value\\\"]]\")) {\n+            assertToken(JsonToken.START_ARRAY, p.nextToken());\n+            p.nextToken();\n+            fail(\"Should not pass\");\n+        } catch (StreamConstraintsException e) {\n+            verifyException(e, \"maximum allowed nesting depth\");\n+        }\n+\n+        assertSame(f, f.setStreamReadConstraints(null));\n+        assertSame(StreamReadConstraints.defaults(), f.streamReadConstraints());\n+    }\n+\n     // for [core#189]: verify that it's ok to disable recycling\n     // Basically simply exercises basic functionality, to ensure\n     // there are no obvious problems; needed since testing never\n",
       "finalOutput": {
         "status": "completed",
@@ -2681,16 +997,58 @@
         "predSteps": [
           {
             "files": [
-              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
-              "src/main/java/com/fasterxml/jackson/core/JsonFactoryBuilder.java",
-              "src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java",
-              "src/main/java/com/fasterxml/jackson/core/TSFBuilder.java",
-              "src/main/java/com/fasterxml/jackson/core/TokenStreamFactory.java",
-              "src/main/resources/META-INF/services/com.fasterxml.jackson.core.JsonFactory",
-              "src/test/java/com/fasterxml/jackson/core/json/BoundsChecksWithJsonFactoryTest.java",
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
+                {
+                  "start": 240,
+                  "end": 860
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
               "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/TSFBuilder.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/TSFBuilder.java": [
+                {
+                  "start": 240,
+                  "end": 330
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/test/java/com/fasterxml/jackson/core/json/BoundsChecksWithJsonFactoryTest.java"
+            ],
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/json/BoundsChecksWithJsonFactoryTest.java": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -2702,159 +1060,41 @@
           },
           {
             "files": [
-              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java"
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/main/java/com/fasterxml/jackson/core/TSFBuilder.java"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/test/java/com/fasterxml/jackson/core/json/BoundsChecksWithJsonFactoryTest.java"
-            ],
-            "spans": {},
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
+                {
+                  "start": 860,
+                  "end": 1120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "pom.xml"
             ],
-            "spans": {},
+            "spans": {
+              "pom.xml": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/test/java/com/fasterxml/jackson/core/constraints/DeeplyNestedContentReadTest.java"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java",
-              "src/test/java/com/fasterxml/jackson/core/filter/GeneratorFiltering609Test.java",
-              "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz34435ParseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncStringArrayTest.java",
-              "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerOOME736Test.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBufferTest.java",
-              "src/test/java/com/fasterxml/jackson/core/util/TestDelegates.java"
-            ],
             "spans": {
-              "src/test/java/com/fasterxml/jackson/core/filter/GeneratorFiltering609Test.java": [
+              "src/test/java/com/fasterxml/jackson/core/constraints/DeeplyNestedContentReadTest.java": [
                 {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                },
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 40,
-                  "end": 40
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 67,
-                  "end": 67
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz34435ParseTest.java": [
-                {
-                  "start": 20,
-                  "end": 20
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java": [
-                {
-                  "start": 692,
-                  "end": 692
-                },
-                {
-                  "start": 877,
-                  "end": 877
-                },
-                {
-                  "start": 880,
-                  "end": 880
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncStringArrayTest.java": [
-                {
-                  "start": 141,
-                  "end": 141
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java": [
-                {
-                  "start": 116,
-                  "end": 116
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java": [
-                {
-                  "start": 32,
-                  "end": 32
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerOOME736Test.java": [
-                {
-                  "start": 14,
-                  "end": 14
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBufferTest.java": [
-                {
-                  "start": 44,
-                  "end": 44
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/util/TestDelegates.java": [
-                {
-                  "start": 205,
-                  "end": 205
-                },
-                {
-                  "start": 208,
-                  "end": 208
-                },
-                {
-                  "start": 219,
-                  "end": 219
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -2864,22 +1104,11 @@
             "files": [
               "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java"
-            ],
             "spans": {
-              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
+              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java": [
                 {
-                  "start": 168,
-                  "end": 168
-                },
-                {
-                  "start": 179,
-                  "end": 179
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -2887,36 +1116,27 @@
           },
           {
             "files": [
-              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
+                {
+                  "start": 270,
+                  "end": 805
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
               "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java"
             ],
             "spans": {
               "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
                 {
-                  "start": 168,
-                  "end": 168
-                },
-                {
-                  "start": 169,
-                  "end": 169
-                },
-                {
-                  "start": 179,
-                  "end": 179
-                },
-                {
-                  "start": 180,
-                  "end": 180
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
-                {
-                  "start": 777,
-                  "end": 777
-                },
-                {
-                  "start": 796,
-                  "end": 796
+                  "start": 150,
+                  "end": 185
                 }
               ]
             },
@@ -2924,158 +1144,11 @@
           }
         ],
         "predFiles": [
-          "pom.xml",
           "src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
-          "src/main/java/com/fasterxml/jackson/core/JsonFactoryBuilder.java",
-          "src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java",
           "src/main/java/com/fasterxml/jackson/core/TSFBuilder.java",
-          "src/main/java/com/fasterxml/jackson/core/TokenStreamFactory.java",
-          "src/main/resources/META-INF/services/com.fasterxml.jackson.core.JsonFactory",
-          "src/test/java/com/fasterxml/jackson/core/constraints/DeeplyNestedContentReadTest.java",
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java",
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java",
-          "src/test/java/com/fasterxml/jackson/core/filter/GeneratorFiltering609Test.java",
-          "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz34435ParseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/BoundsChecksWithJsonFactoryTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncStringArrayTest.java",
-          "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerOOME736Test.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBufferTest.java",
-          "src/test/java/com/fasterxml/jackson/core/util/TestDelegates.java"
+          "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java"
         ],
         "predSpans": {
-          "src/test/java/com/fasterxml/jackson/core/filter/GeneratorFiltering609Test.java": [
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 40,
-              "end": 40
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 67,
-              "end": 67
-            },
-            {
-              "start": 69,
-              "end": 69
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/fuzz/Fuzz34435ParseTest.java": [
-            {
-              "start": 20,
-              "end": 20
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java": [
-            {
-              "start": 692,
-              "end": 692
-            },
-            {
-              "start": 877,
-              "end": 877
-            },
-            {
-              "start": 880,
-              "end": 880
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncStringArrayTest.java": [
-            {
-              "start": 141,
-              "end": 141
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java": [
-            {
-              "start": 116,
-              "end": 116
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java": [
-            {
-              "start": 32,
-              "end": 32
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerOOME736Test.java": [
-            {
-              "start": 14,
-              "end": 14
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/util/ReadConstrainedTextBufferTest.java": [
-            {
-              "start": 44,
-              "end": 44
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/util/TestDelegates.java": [
-            {
-              "start": 205,
-              "end": 205
-            },
-            {
-              "start": 208,
-              "end": 208
-            },
-            {
-              "start": 219,
-              "end": 219
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
-            {
-              "start": 161,
-              "end": 180
-            },
-            {
-              "start": 168,
-              "end": 168
-            },
-            {
-              "start": 169,
-              "end": 169
-            },
-            {
-              "start": 179,
-              "end": 179
-            },
-            {
-              "start": 180,
-              "end": 180
-            }
-          ],
           "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
             {
               "start": 273,
@@ -3088,20 +1161,18 @@
             {
               "start": 776,
               "end": 798
-            },
-            {
-              "start": 777,
-              "end": 777
-            },
-            {
-              "start": 796,
-              "end": 796
             }
           ],
           "src/main/java/com/fasterxml/jackson/core/TSFBuilder.java": [
             {
               "start": 274,
               "end": 281
+            }
+          ],
+          "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
+            {
+              "start": 161,
+              "end": 180
             }
           ]
         },
@@ -3124,150 +1195,114 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 5,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
-            }
-          },
-          {
-            "step": 12,
-            "coverage": {
-              "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
-            }
-          },
-          {
-            "step": 13,
-            "coverage": {
-              "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
-            }
-          },
-          {
-            "step": 14,
-            "coverage": {
-              "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
-            }
-          },
-          {
-            "step": 15,
-            "coverage": {
-              "file": 0.5,
               "symbol": 1.0,
-              "span": 0.0,
-              "line": 0.0
+              "span": 0.4733893557422969,
+              "line": 0.52
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.36666666666666664,
-          "symbol": 0.06666666666666667,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.5,
+          "symbol": 1.0,
+          "span": 0.47338935574229696,
+          "line": 0.52
         },
         "redundancy": {
-          "file": 0.2857142857142857,
-          "symbol": 0.06666666666666665,
-          "span": 0.018036072144288595,
-          "line": 0.06666666666666665
+          "file": 0.36363636363636365,
+          "symbol": 0.23566878980891715,
+          "span": 0.2529659933520839,
+          "line": 0.21663516068052935
         }
       },
       "fixOverlap": {
@@ -3286,28 +1321,28 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/2bce8cb4c29dd005485a/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/2bce8cb4c29dd005485a/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/2bce8cb4c29dd005485a/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/2bce8cb4c29dd005485a/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
@@ -3478,7 +1513,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3490,7 +1534,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",

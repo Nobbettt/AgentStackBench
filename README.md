@@ -182,10 +182,14 @@ The static frontend lives in `frontend/` and reads distilled public data from `s
 After a run suite has finished, export frontend-ready comparison data from `results/`:
 
 ```bash
-python3 scripts/export_comparison_data.py --suite-dir results/run_suites/codex-superpowers-mounted
+python3 scripts/export_comparison_data.py --suite-dir results/run_suites/codex-superpowers-mounted --artifact-suffix aligned
 ```
 
-By default this writes `site-data/comparison.json` and per-instance detail payloads under `site-data/instances/`.
+By default this writes the comparison summary to `site-data/comparison.json`, lazy-loaded task-level bundles to `site-data/comparison-data/<comparison-id>/{index,metrics,trajectory}.json`, and per-instance detail payloads to `site-data/instances/<comparison-id>/<instance-id>.json`.
+
+Context F1 in the exported comparison is a macro-average across file, block, line, and symbol F1 for valid evaluations. Pooled context levels are exported as diagnostics, not as the primary score. Empty retrieval trajectories are scored as empty trajectory retrieval when a final context answer exists, and aligned trajectory artifacts must be selected explicitly with `--artifact-suffix aligned`.
+
+For reviewable result updates, keep code changes separate from generated data changes. Put exporter, evaluator, and frontend code in one commit or PR, then refresh `site-data/**` and `results/run_suites/**/public-artifacts/**` in a separate artifact commit. The artifact commit should state the exact export command, the source suite directory, the artifact suffix, and the verification commands used, so reviewers can audit methodology separately from generated JSON churn.
 
 ```bash
 npm ci --prefix frontend

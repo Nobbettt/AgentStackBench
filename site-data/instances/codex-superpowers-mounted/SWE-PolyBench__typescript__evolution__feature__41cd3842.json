@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-18T21:44:00Z",
       "completedAt": "2026-05-18T21:49:13Z",
       "durationMs": 313734,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1215898,
@@ -25,6 +40,28 @@
         "total_tokens": 1230762,
         "cache_read_input_tokens": 1113088
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 35,
+        "readToolCalls": 0,
+        "editToolCalls": 4
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/node/app.ts b/src/node/app.ts\nindex 13871355..ef050db1 100644\n--- a/src/node/app.ts\n+++ b/src/node/app.ts\n@@ -11,7 +11,7 @@ import { disposer } from \"./http\"\n import { isNodeJSErrnoException } from \"./util\"\n import { handleUpgrade } from \"./wsRouter\"\n \n-type ListenOptions = Pick<DefaultedArgs, \"socket\" | \"port\" | \"host\">\n+type ListenOptions = Pick<DefaultedArgs, \"socket\" | \"socket-mode\" | \"port\" | \"host\">\n \n export interface App extends Disposable {\n   /** Handles regular HTTP requests. */\n@@ -22,29 +22,40 @@ export interface App extends Disposable {\n   server: http.Server\n }\n \n-const listen = (server: http.Server, { host, port, socket }: ListenOptions) => {\n+const unlinkSocketPath = async (socketPath: string): Promise<void> => {\n+  try {\n+    await fs.unlink(socketPath)\n+  } catch (error: any) {\n+    handleArgsSocketCatchError(error)\n+  }\n+}\n+\n+const listen = (server: http.Server, { host, port, socket, \"socket-mode\": socketMode }: ListenOptions) => {\n   return new Promise<void>(async (resolve, reject) => {\n     server.on(\"error\", reject)\n \n-    const onListen = () => {\n-      // Promise resolved earlier so this is an unrelated error.\n-      server.off(\"error\", reject)\n-      server.on(\"error\", (err) => util.logError(logger, \"http server error\", err))\n+    const onListen = async () => {\n+      try {\n+        if (socket && typeof socketMode !== \"undefined\" && process.platform !== \"win32\") {\n+          await fs.chmod(socket, socketMode)\n+        }\n \n-      resolve()\n-    }\n+        // Promise resolved earlier so this is an unrelated error.\n+        server.off(\"error\", reject)\n+        server.on(\"error\", (err) => util.logError(logger, \"http server error\", err))\n \n-    if (socket) {\n-      try {\n-        await fs.unlink(socket)\n-      } catch (error: any) {\n-        handleArgsSocketCatchError(error)\n+        resolve()\n+      } catch (error) {\n+        server.close(() => reject(error))\n       }\n+    }\n \n-      server.listen(socket, onListen)\n+    if (socket) {\n+      await unlinkSocketPath(socket)\n+      server.listen(socket, () => void onListen())\n     } else {\n       // [] is the correct format when using :: but Node errors with them.\n-      server.listen(port, host.replace(/^\\[|\\]$/g, \"\"), onListen)\n+      server.listen(port, host.replace(/^\\[|\\]$/g, \"\"), () => void onListen())\n     }\n   })\n }\n@@ -66,14 +77,24 @@ export const createApp = async (args: DefaultedArgs): Promise<App> => {\n       )\n     : http.createServer(router)\n \n-  const dispose = disposer(server)\n+  const disposeServer = disposer(server)\n \n   await listen(server, args)\n \n   const wsRouter = express()\n   handleUpgrade(wsRouter, server)\n \n-  return { router, wsRouter, server, dispose }\n+  return {\n+    router,\n+    wsRouter,\n+    server,\n+    dispose: async () => {\n+      await disposeServer()\n+      if (args.socket) {\n+        await unlinkSocketPath(args.socket)\n+      }\n+    },\n+  }\n }\n \n /**\ndiff --git a/src/node/cli.ts b/src/node/cli.ts\nindex 9928db1c..10b2bb42 100644\n--- a/src/node/cli.ts\n+++ b/src/node/cli.ts\n@@ -56,6 +56,7 @@ export interface UserProvidedArgs {\n   open?: boolean\n   \"bind-addr\"?: string\n   socket?: string\n+  \"socket-mode\"?: number\n   version?: boolean\n   \"proxy-domain\"?: string[]\n   \"reuse-window\"?: boolean\n@@ -175,6 +176,10 @@ const options: Options<Required<UserProvidedArgs>> = {\n   port: { type: \"number\", description: \"\" },\n \n   socket: { type: \"string\", path: true, description: \"Path to a socket (bind-addr will be ignored).\" },\n+  \"socket-mode\": {\n+    type: \"number\",\n+    description: \"File mode to use on the socket. Only applies when using --socket.\",\n+  },\n   version: { type: \"boolean\", short: \"v\", description: \"Display version information.\" },\n   _: { type: \"string[]\" },\n \n@@ -375,6 +380,14 @@ export const parse = (\n           ;(args[key] as string[]).push(value)\n           break\n         case \"number\":\n+          if (key === \"socket-mode\") {\n+            if (!/^[0-7]{3,4}$/.test(value)) {\n+              throw error(`--${key} must be an octal number`)\n+            }\n+            ;(args[key] as number) = parseInt(value, 8)\n+            break\n+          }\n+\n           ;(args[key] as number) = parseInt(value, 10)\n           if (isNaN(args[key] as number)) {\n             throw error(`--${key} must be a number`)\ndiff --git a/test/unit/node/app.test.ts b/test/unit/node/app.test.ts\nindex 79279ceb..9e270c7c 100644\n--- a/test/unit/node/app.test.ts\n+++ b/test/unit/node/app.test.ts\n@@ -9,6 +9,7 @@ import { generateCertificate } from \"../../../src/node/util\"\n import { clean, mockLogger, getAvailablePort, tmpdir } from \"../../utils/helpers\"\n \n describe(\"createApp\", () => {\n+  let chmodSpy: jest.SpyInstance\n   let unlinkSpy: jest.SpyInstance\n   let port: number\n   let tmpDirPath: string\n@@ -30,6 +31,7 @@ describe(\"createApp\", () => {\n     // You have to import individually, like we do here with promises\n     // then you can spy on those modules methods, like unlink.\n     // See: https://github.com/aelbore/esbuild-jest/issues/26#issuecomment-893763840\n+    chmodSpy = jest.spyOn(promises, \"chmod\")\n     unlinkSpy = jest.spyOn(promises, \"unlink\")\n     port = await getAvailablePort()\n   })\n@@ -51,7 +53,7 @@ describe(\"createApp\", () => {\n     expect(app.server).toBeInstanceOf(http.Server)\n \n     // Cleanup\n-    app.dispose()\n+    await app.dispose()\n   })\n \n   it(\"should handle error events on the server\", async () => {\n@@ -70,7 +72,7 @@ describe(\"createApp\", () => {\n     expect(logger.error).toHaveBeenCalledWith(`http server error: ${testError.message} ${testError.stack}`)\n \n     // Cleanup\n-    app.dispose()\n+    await app.dispose()\n   })\n \n   it(\"should reject errors that happen before the server can listen\", async () => {\n@@ -89,7 +91,7 @@ describe(\"createApp\", () => {\n       app.server.emit(\"error\", testError)\n \n       // Cleanup\n-      app.dispose()\n+      await app.dispose()\n     }\n \n     expect(() => masterBall()).rejects.toThrow(`listen EACCES: permission denied 127.0.0.1:${port}`)\n@@ -104,7 +106,36 @@ describe(\"createApp\", () => {\n     const app = await createApp(defaultArgs)\n \n     expect(unlinkSpy).toHaveBeenCalledTimes(1)\n-    app.dispose()\n+    await app.dispose()\n+  })\n+\n+  it(\"should chmod the socket after listening when socket-mode is provided\", async () => {\n+    const socketPath = path.join(tmpDirPath, \"chmod-socket\")\n+    const defaultArgs = await setDefaults({\n+      socket: socketPath,\n+      \"socket-mode\": 0o770,\n+    })\n+\n+    const app = await createApp(defaultArgs)\n+\n+    expect(chmodSpy).toHaveBeenCalledTimes(1)\n+    expect(chmodSpy).toHaveBeenCalledWith(socketPath, 0o770)\n+\n+    await app.dispose()\n+  })\n+\n+  it(\"should remove the socket when the app is disposed\", async () => {\n+    const socketPath = path.join(tmpDirPath, \"dispose-socket\")\n+    const defaultArgs = await setDefaults({\n+      socket: socketPath,\n+    })\n+\n+    const app = await createApp(defaultArgs)\n+\n+    await promises.access(socketPath)\n+    await app.dispose()\n+\n+    await expect(promises.access(socketPath)).rejects.toThrow(\"ENOENT\")\n   })\n \n   it(\"should create an https server if args.cert exists\", async () => {\n@@ -122,7 +153,7 @@ describe(\"createApp\", () => {\n     expect(app.server).toBeInstanceOf(https.Server)\n \n     // Cleanup\n-    app.dispose()\n+    await app.dispose()\n   })\n })\n \ndiff --git a/test/unit/node/cli.test.ts b/test/unit/node/cli.test.ts\nindex 108f2e84..65f4f698 100644\n--- a/test/unit/node/cli.test.ts\n+++ b/test/unit/node/cli.test.ts\n@@ -73,6 +73,8 @@ describe(\"parser\", () => {\n \n           \"--socket=mumble\",\n \n+          \"--socket-mode=0770\",\n+\n           \"3\",\n \n           [\"--user-data-dir\", \"path/to/user/dir\"],\n@@ -110,6 +112,7 @@ describe(\"parser\", () => {\n       open: true,\n       port: 8081,\n       socket: path.resolve(\"mumble\"),\n+      \"socket-mode\": 0o770,\n       verbose: true,\n       version: true,\n       \"bind-addr\": \"192.169.0.1:8080\",\n@@ -211,6 +214,7 @@ describe(\"parser\", () => {\n     expect(() => parse([\"--port\", \"foo\"])).toThrowError(/--port must be a number/)\n     expect(() => parse([\"--auth\", \"invalid\"])).toThrowError(/--auth valid values: \\[password, none\\]/)\n     expect(() => parse([\"--log\", \"invalid\"])).toThrowError(/--log valid values: \\[trace, debug, info, warn, error\\]/)\n+    expect(() => parse([\"--socket-mode\", \"888\"])).toThrowError(/--socket-mode must be an octal number/)\n   })\n \n   it(\"should error if the option doesn't exist\", () => {\n",
       "finalOutput": {
         "status": "completed",
@@ -96,793 +133,55 @@
         "predSteps": [
           {
             "files": [
-              "CHANGELOG.md",
-              "LICENSE.txt",
-              "ThirdPartyNotices.txt",
-              "ci/README.md",
-              "ci/build/build-code-server.sh",
-              "ci/build/build-lib.sh",
-              "ci/build/build-packages.sh",
-              "ci/build/build-release.sh",
-              "ci/build/build-standalone-release.sh",
-              "ci/build/build-vscode.sh",
-              "ci/build/clean.sh",
-              "ci/build/code-server-nfpm.sh",
-              "ci/build/code-server-user.service",
-              "ci/build/code-server.sh",
-              "ci/build/code-server@.service",
-              "ci/build/nfpm.yaml",
-              "ci/build/npm-postinstall.sh",
-              "ci/build/release-github-assets.sh",
-              "ci/build/release-github-draft.sh",
-              "ci/build/release-prep.sh",
-              "ci/build/test-standalone-release.sh",
-              "ci/dev/audit.sh",
-              "ci/dev/ci.sh",
-              "ci/dev/fmt.sh",
-              "ci/dev/gen_icons.sh",
-              "ci/dev/lint.sh",
-              "ci/dev/postinstall.sh",
-              "ci/dev/test-e2e.sh",
-              "ci/dev/test-scripts.sh",
-              "ci/dev/test-unit.sh",
-              "ci/dev/watch.ts",
-              "ci/helm-chart/Chart.yaml",
-              "ci/helm-chart/templates/NOTES.txt",
-              "ci/helm-chart/templates/_helpers.tpl",
-              "ci/helm-chart/templates/deployment.yaml",
-              "ci/helm-chart/templates/ingress.yaml",
-              "ci/helm-chart/templates/pvc.yaml",
-              "ci/helm-chart/templates/secrets.yaml",
-              "ci/helm-chart/templates/service.yaml",
-              "ci/helm-chart/templates/serviceaccount.yaml",
-              "ci/helm-chart/templates/tests/test-connection.yaml",
-              "ci/helm-chart/values.yaml",
-              "ci/lib.sh",
-              "ci/release-image/Dockerfile",
-              "ci/release-image/docker-bake.hcl",
-              "ci/release-image/entrypoint.sh",
-              "ci/steps/brew-bump.sh",
-              "ci/steps/docker-buildx-push.sh",
-              "ci/steps/publish-npm.sh",
-              "ci/steps/steps-lib.sh",
-              "docs/CODE_OF_CONDUCT.md",
-              "docs/CONTRIBUTING.md",
-              "docs/FAQ.md",
-              "docs/MAINTAINING.md",
-              "docs/README.md",
-              "docs/SECURITY.md",
-              "docs/android.md",
-              "docs/assets/screenshot.png",
-              "docs/collaboration.md",
-              "docs/guide.md",
-              "docs/helm.md",
-              "docs/install.md",
-              "docs/ios.md",
-              "docs/ipad.md",
-              "docs/link.md",
-              "docs/manifest.json",
-              "docs/npm.md",
-              "docs/requirements.md",
-              "docs/termux.md",
-              "docs/triage.md",
-              "docs/upgrade.md",
-              "install.sh",
-              "package.json",
-              "renovate.json",
-              "src/browser/favicon.afdesign",
-              "src/browser/media/favicon-dark-support.svg",
-              "src/browser/media/favicon.ico",
-              "src/browser/media/favicon.svg",
-              "src/browser/media/pwa-icon-192.png",
-              "src/browser/media/pwa-icon-512.png",
-              "src/browser/media/pwa-icon.png",
-              "src/browser/pages/error.css",
-              "src/browser/pages/error.html",
-              "src/browser/pages/global.css",
-              "src/browser/pages/login.css",
-              "src/browser/pages/login.html",
-              "src/browser/robots.txt",
-              "src/common/emitter.ts",
-              "src/common/http.ts",
-              "src/common/util.ts",
-              "src/node/app.ts",
-              "src/node/cli.ts",
-              "src/node/coder_cloud.ts",
-              "src/node/constants.ts",
-              "src/node/entry.ts",
-              "src/node/heart.ts",
-              "src/node/http.ts",
-              "src/node/main.ts",
-              "src/node/plugin.ts",
-              "src/node/proxy.ts",
-              "src/node/routes/apps.ts",
-              "src/node/routes/domainProxy.ts",
-              "src/node/routes/errors.ts",
-              "src/node/routes/health.ts",
-              "src/node/routes/index.ts",
-              "src/node/routes/login.ts",
-              "src/node/routes/logout.ts",
-              "src/node/routes/pathProxy.ts",
-              "src/node/routes/update.ts",
-              "src/node/routes/vscode.ts",
-              "src/node/settings.ts",
-              "src/node/socket.ts",
-              "src/node/update.ts",
-              "src/node/util.ts",
-              "src/node/wrapper.ts",
-              "src/node/wsRouter.ts",
-              "test/e2e/baseFixture.ts",
-              "test/e2e/codeServer.test.ts",
-              "test/e2e/extensions.test.ts",
-              "test/e2e/extensions/test-extension/extension.ts",
-              "test/e2e/extensions/test-extension/package.json",
-              "test/e2e/extensions/test-extension/tsconfig.json",
-              "test/e2e/extensions/test-extension/yarn.lock",
-              "test/e2e/github.test.ts",
-              "test/e2e/globalSetup.test.ts",
-              "test/e2e/login.test.ts",
-              "test/e2e/logout.test.ts",
-              "test/e2e/models/CodeServer.ts",
-              "test/e2e/openHelpAbout.test.ts",
-              "test/e2e/terminal.test.ts",
-              "test/package.json",
-              "test/playwright.config.ts",
-              "test/scripts/build-lib.bats",
-              "test/scripts/install.bats",
-              "test/scripts/steps-lib.bats",
-              "test/tsconfig.json",
-              "test/unit/common/emitter.test.ts",
-              "test/unit/common/http.test.ts",
-              "test/unit/common/util.test.ts",
-              "test/unit/helpers.test.ts",
-              "test/unit/node/app.test.ts",
-              "test/unit/node/cli.test.ts",
-              "test/unit/node/constants.test.ts",
-              "test/unit/node/http.test.ts",
-              "test/unit/node/plugin.test.ts",
-              "test/unit/node/proxy.test.ts",
-              "test/unit/node/routes/errors.test.ts",
-              "test/unit/node/routes/health.test.ts",
-              "test/unit/node/routes/login.test.ts",
-              "test/unit/node/routes/static.test.ts",
-              "test/unit/node/routes/vscode.test.ts",
-              "test/unit/node/settings.test.ts",
-              "test/unit/node/socket.test.ts",
-              "test/unit/node/test-plugin/Makefile",
-              "test/unit/node/test-plugin/package.json",
-              "test/unit/node/test-plugin/public/icon.svg",
-              "test/unit/node/test-plugin/public/index.html",
-              "test/unit/node/test-plugin/src/index.ts",
-              "test/unit/node/test-plugin/tsconfig.json",
-              "test/unit/node/test-plugin/yarn.lock",
-              "test/unit/node/update.test.ts",
-              "test/unit/node/util.test.ts",
-              "test/utils/constants.ts",
-              "test/utils/cssStub.ts",
-              "test/utils/globalE2eSetup.ts",
-              "test/utils/globalUnitSetup.ts",
-              "test/utils/helpers.ts",
-              "test/utils/httpserver.ts",
-              "test/utils/integration.ts",
-              "test/utils/wtfnode.ts",
-              "test/yarn.lock",
-              "tsconfig.json",
-              "typings/httpolyglot/index.d.ts",
-              "typings/pluginapi.d.ts",
-              "vendor/package.json",
-              "vendor/postinstall.sh",
-              "vendor/yarn.lock",
-              "yarn.lock"
+              "src/node/cli.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/node/cli.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "CHANGELOG.md",
-              "docs/CONTRIBUTING.md",
-              "docs/FAQ.md",
-              "docs/guide.md",
-              "src/node/app.ts",
-              "src/node/cli.ts",
-              "src/node/coder_cloud.ts",
-              "src/node/entry.ts",
-              "src/node/http.ts",
-              "src/node/main.ts",
-              "src/node/plugin.ts",
-              "src/node/routes/errors.ts",
-              "src/node/routes/index.ts",
-              "src/node/routes/pathProxy.ts",
-              "src/node/routes/vscode.ts",
-              "src/node/socket.ts",
-              "src/node/util.ts",
-              "src/node/wsRouter.ts",
-              "test/unit/node/app.test.ts",
-              "test/unit/node/cli.test.ts",
-              "test/unit/node/plugin.test.ts",
-              "test/unit/node/routes/health.test.ts",
-              "test/unit/node/socket.test.ts",
-              "test/utils/httpserver.ts",
-              "typings/pluginapi.d.ts"
+              "src/node/app.ts"
             ],
             "spans": {
-              "CHANGELOG.md": [
-                {
-                  "start": 51,
-                  "end": 51
-                }
-              ],
-              "src/node/coder_cloud.ts": [
-                {
-                  "start": 38,
-                  "end": 38
-                }
-              ],
-              "test/utils/httpserver.ts": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 65,
-                  "end": 65
-                },
-                {
-                  "start": 77,
-                  "end": 77
-                },
-                {
-                  "start": 79,
-                  "end": 79
-                },
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 94,
-                  "end": 94
-                }
-              ],
-              "test/unit/node/cli.test.ts": [
-                {
-                  "start": 74,
-                  "end": 74
-                },
-                {
-                  "start": 112,
-                  "end": 112
-                },
-                {
-                  "start": 229,
-                  "end": 229
-                },
-                {
-                  "start": 231,
-                  "end": 231
-                },
-                {
-                  "start": 232,
-                  "end": 232
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 272,
-                  "end": 272
-                },
-                {
-                  "start": 284,
-                  "end": 284
-                },
-                {
-                  "start": 450,
-                  "end": 450
-                },
-                {
-                  "start": 458,
-                  "end": 458
-                },
-                {
-                  "start": 459,
-                  "end": 459
-                },
-                {
-                  "start": 468,
-                  "end": 468
-                },
-                {
-                  "start": 471,
-                  "end": 471
-                },
-                {
-                  "start": 696,
-                  "end": 696
-                },
-                {
-                  "start": 697,
-                  "end": 697
-                }
-              ],
-              "src/node/routes/index.ts": [
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 110,
-                  "end": 110
-                }
-              ],
-              "src/node/routes/vscode.ts": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 18,
-                  "end": 18
-                },
-                {
-                  "start": 98,
-                  "end": 98
-                },
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 148,
-                  "end": 148
-                },
-                {
-                  "start": 153,
-                  "end": 153
-                }
-              ],
-              "src/node/routes/errors.ts": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 66,
-                  "end": 66
-                }
-              ],
-              "src/node/routes/pathProxy.ts": [
-                {
-                  "start": 48,
-                  "end": 48
-                }
-              ],
-              "test/unit/node/socket.test.ts": [
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 56,
-                  "end": 56
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                },
-                {
-                  "start": 83,
-                  "end": 83
-                }
-              ],
-              "test/unit/node/plugin.test.ts": [
-                {
-                  "start": 103,
-                  "end": 103
-                }
-              ],
-              "test/unit/node/app.test.ts": [
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 98,
-                  "end": 98
-                },
-                {
-                  "start": 101,
-                  "end": 101
-                }
-              ],
-              "test/unit/node/routes/health.test.ts": [
-                {
-                  "start": 22,
-                  "end": 22
-                }
-              ],
-              "src/node/wsRouter.ts": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 18,
-                  "end": 18
-                },
-                {
-                  "start": 24,
-                  "end": 24
-                },
-                {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 32,
-                  "end": 32
-                },
-                {
-                  "start": 40,
-                  "end": 40
-                },
-                {
-                  "start": 41,
-                  "end": 41
-                },
-                {
-                  "start": 49,
-                  "end": 49
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 54,
-                  "end": 54
-                }
-              ],
-              "src/node/util.ts": [
-                {
-                  "start": 392,
-                  "end": 392
-                },
-                {
-                  "start": 394,
-                  "end": 394
-                },
-                {
-                  "start": 443,
-                  "end": 443
-                },
-                {
-                  "start": 447,
-                  "end": 447
-                },
-                {
-                  "start": 448,
-                  "end": 448
-                },
-                {
-                  "start": 449,
-                  "end": 449
-                },
-                {
-                  "start": 450,
-                  "end": 450
-                }
-              ],
-              "src/node/http.ts": [
-                {
-                  "start": 230,
-                  "end": 230
-                },
-                {
-                  "start": 233,
-                  "end": 233
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 236,
-                  "end": 236
-                },
-                {
-                  "start": 237,
-                  "end": 237
-                },
-                {
-                  "start": 239,
-                  "end": 239
-                },
-                {
-                  "start": 259,
-                  "end": 259
-                },
-                {
-                  "start": 261,
-                  "end": 261
-                },
-                {
-                  "start": 262,
-                  "end": 262
-                },
-                {
-                  "start": 266,
-                  "end": 266
-                },
-                {
-                  "start": 267,
-                  "end": 267
-                },
-                {
-                  "start": 268,
-                  "end": 268
-                }
-              ],
               "src/node/app.ts": [
                 {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 25,
-                  "end": 25
-                },
-                {
-                  "start": 37,
-                  "end": 37
-                },
-                {
-                  "start": 39,
-                  "end": 39
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 83,
-                  "end": 83
-                },
-                {
-                  "start": 96,
-                  "end": 96
-                },
-                {
-                  "start": 114,
-                  "end": 114
-                },
-                {
-                  "start": 125,
-                  "end": 125
+                  "start": 1,
+                  "end": 220
                 }
-              ],
-              "src/node/entry.ts": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "test/unit/node/app.test.ts"
+            ],
+            "spans": {
+              "test/unit/node/app.test.ts": [
                 {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 57,
-                  "end": 57
+                  "start": 1,
+                  "end": 220
                 }
-              ],
-              "src/node/plugin.ts": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "test/unit/node/cli.test.ts"
+            ],
+            "spans": {
+              "test/unit/node/cli.test.ts": [
                 {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 122,
-                  "end": 122
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                }
-              ],
-              "src/node/cli.ts": [
-                {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 177,
-                  "end": 177
-                },
-                {
-                  "start": 515,
-                  "end": 515
-                },
-                {
-                  "start": 703,
-                  "end": 703
-                },
-                {
-                  "start": 749,
-                  "end": 749
-                },
-                {
-                  "start": 751,
-                  "end": 751
-                },
-                {
-                  "start": 752,
-                  "end": 752
-                },
-                {
-                  "start": 753,
-                  "end": 753
-                },
-                {
-                  "start": 754,
-                  "end": 754
-                }
-              ],
-              "src/node/main.ts": [
-                {
-                  "start": 46,
-                  "end": 46
-                },
-                {
-                  "start": 75,
-                  "end": 75
-                }
-              ],
-              "src/node/socket.ts": [
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                },
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 35,
-                  "end": 35
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 49,
-                  "end": 49
-                },
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 59,
-                  "end": 59
-                }
-              ],
-              "docs/CONTRIBUTING.md": [
-                {
-                  "start": 258,
-                  "end": 258
-                }
-              ],
-              "docs/guide.md": [
-                {
-                  "start": 264,
-                  "end": 264
-                }
-              ],
-              "docs/FAQ.md": [
-                {
-                  "start": 347,
-                  "end": 347
-                }
-              ],
-              "typings/pluginapi.d.ts": [
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 105,
-                  "end": 105
-                },
-                {
-                  "start": 110,
-                  "end": 110
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 121,
-                  "end": 121
-                },
-                {
-                  "start": 123,
-                  "end": 123
-                },
-                {
-                  "start": 230,
-                  "end": 230
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 236,
-                  "end": 236
+                  "start": 1,
+                  "end": 360
                 }
               ]
             },
@@ -892,79 +191,11 @@
             "files": [
               "src/node/cli.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/node/app.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "test/unit/node/app.test.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "test/unit/node/cli.test.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/node/app.ts",
-              "src/node/cli.ts",
-              "src/node/socket.ts",
-              "test/unit/node/app.test.ts",
-              "test/unit/node/cli.test.ts"
-            ],
             "spans": {
-              "test/unit/node/cli.test.ts": [
-                {
-                  "start": 112,
-                  "end": 112
-                },
-                {
-                  "start": 232,
-                  "end": 232
-                },
-                {
-                  "start": 284,
-                  "end": 284
-                }
-              ],
-              "test/unit/node/app.test.ts": [
-                {
-                  "start": 101,
-                  "end": 101
-                }
-              ],
-              "src/node/app.ts": [
-                {
-                  "start": 125,
-                  "end": 125
-                }
-              ],
-              "src/node/socket.ts": [
-                {
-                  "start": 33,
-                  "end": 33
-                }
-              ],
               "src/node/cli.ts": [
                 {
-                  "start": 177,
-                  "end": 177
-                },
-                {
-                  "start": 515,
-                  "end": 515
+                  "start": 260,
+                  "end": 860
                 }
               ]
             },
@@ -981,98 +212,11 @@
             "files": [
               "src/node/util.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/common/util.ts",
-              "src/node/socket.ts",
-              "test/unit/common/util.test.ts",
-              "test/unit/node/util.test.ts",
-              "test/yarn.lock"
-            ],
             "spans": {
-              "test/yarn.lock": [
+              "src/node/util.ts": [
                 {
-                  "start": 1185,
-                  "end": 1185
-                },
-                {
-                  "start": 1187,
-                  "end": 1187
-                },
-                {
-                  "start": 3197,
-                  "end": 3197
-                }
-              ],
-              "src/common/util.ts": [
-                {
-                  "start": 16,
-                  "end": 16
-                }
-              ],
-              "test/unit/common/util.test.ts": [
-                {
-                  "start": 46,
-                  "end": 46
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 48,
-                  "end": 48
-                },
-                {
-                  "start": 49,
-                  "end": 49
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 51,
-                  "end": 51
-                },
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 56,
-                  "end": 56
-                }
-              ],
-              "test/unit/node/util.test.ts": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 392,
-                  "end": 392
-                }
-              ],
-              "src/node/socket.ts": [
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 41,
-                  "end": 41
+                  "start": 1,
+                  "end": 200
                 }
               ]
             },
@@ -1082,154 +226,25 @@
             "files": [
               "src/node/http.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/node/http.ts": [
+                {
+                  "start": 1,
+                  "end": 340
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "test/utils/helpers.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/node/app.ts",
-              "src/node/cli.ts",
-              "src/node/http.ts",
-              "src/node/main.ts",
-              "src/node/routes/index.ts",
-              "src/node/routes/vscode.ts",
-              "src/node/wrapper.ts",
-              "test/unit/node/cli.test.ts"
-            ],
             "spans": {
-              "test/unit/node/cli.test.ts": [
+              "test/utils/helpers.ts": [
                 {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 710,
-                  "end": 710
-                },
-                {
-                  "start": 727,
-                  "end": 727
-                },
-                {
-                  "start": 735,
-                  "end": 735
-                }
-              ],
-              "src/node/wrapper.ts": [
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 64,
-                  "end": 64
-                },
-                {
-                  "start": 174,
-                  "end": 174
-                },
-                {
-                  "start": 220,
+                  "start": 1,
                   "end": 220
-                },
-                {
-                  "start": 276,
-                  "end": 276
-                }
-              ],
-              "src/node/cli.ts": [
-                {
-                  "start": 38,
-                  "end": 38
-                },
-                {
-                  "start": 429,
-                  "end": 429
-                },
-                {
-                  "start": 451,
-                  "end": 451
-                },
-                {
-                  "start": 560,
-                  "end": 560
-                },
-                {
-                  "start": 764,
-                  "end": 764
-                }
-              ],
-              "src/node/http.ts": [
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 32,
-                  "end": 32
-                }
-              ],
-              "src/node/app.ts": [
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                }
-              ],
-              "src/node/main.ts": [
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                },
-                {
-                  "start": 38,
-                  "end": 38
-                },
-                {
-                  "start": 46,
-                  "end": 46
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                }
-              ],
-              "src/node/routes/index.ts": [
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 33,
-                  "end": 33
-                }
-              ],
-              "src/node/routes/vscode.ts": [
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 130,
-                  "end": 130
                 }
               ]
             },
@@ -1239,1002 +254,258 @@
             "files": [
               "src/node/entry.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/node/entry.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/node/main.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/node/main.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/node/wrapper.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/node/wrapper.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "test/unit/node/cli.test.ts"
+            ],
+            "spans": {
+              "test/unit/node/cli.test.ts": [
+                {
+                  "start": 360,
+                  "end": 860
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "test/unit/node/app.test.ts"
+            ],
+            "spans": {
+              "test/unit/node/app.test.ts": [
+                {
+                  "start": 220,
+                  "end": 320
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/node/app.ts",
+              "src/node/cli.ts",
+              "test/unit/node/app.test.ts",
+              "test/unit/node/cli.test.ts"
+            ],
+            "spans": {
+              "src/node/cli.ts": [
+                {
+                  "start": 30,
+                  "end": 220
+                }
+              ],
+              "src/node/app.ts": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ],
+              "test/unit/node/cli.test.ts": [
+                {
+                  "start": 1,
+                  "end": 140
+                }
+              ],
+              "test/unit/node/app.test.ts": [
+                {
+                  "start": 1,
+                  "end": 140
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/node/app.ts"
+            ],
+            "spans": {
+              "src/node/app.ts": [
+                {
+                  "start": 1,
+                  "end": 140
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/node/cli.ts"
+            ],
+            "spans": {
+              "src/node/cli.ts": [
+                {
+                  "start": 40,
+                  "end": 230
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "test/unit/node/app.test.ts"
+            ],
+            "spans": {
+              "test/unit/node/app.test.ts": [
+                {
+                  "start": 1,
+                  "end": 170
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "test/unit/node/cli.test.ts"
+            ],
+            "spans": {
+              "test/unit/node/cli.test.ts": [
+                {
+                  "start": 45,
+                  "end": 130
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "ci/dev/test-unit.sh"
             ],
-            "spans": {},
+            "spans": {
+              "ci/dev/test-unit.sh": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/node/app.ts",
+              "src/node/cli.ts",
+              "test/unit/node/app.test.ts",
+              "test/unit/node/cli.test.ts"
+            ],
+            "spans": {
+              "src/node/cli.ts": [
+                {
+                  "start": 40,
+                  "end": 210
+                },
+                {
+                  "start": 330,
+                  "end": 410
+                }
+              ],
+              "src/node/app.ts": [
+                {
+                  "start": 1,
+                  "end": 110
+                }
+              ],
+              "test/unit/node/cli.test.ts": [
+                {
+                  "start": 47,
+                  "end": 190
+                }
+              ],
+              "test/unit/node/app.test.ts": [
+                {
+                  "start": 1,
+                  "end": 160
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "CHANGELOG.md",
-          "LICENSE.txt",
-          "ThirdPartyNotices.txt",
-          "ci/README.md",
-          "ci/build/build-code-server.sh",
-          "ci/build/build-lib.sh",
-          "ci/build/build-packages.sh",
-          "ci/build/build-release.sh",
-          "ci/build/build-standalone-release.sh",
-          "ci/build/build-vscode.sh",
-          "ci/build/clean.sh",
-          "ci/build/code-server-nfpm.sh",
-          "ci/build/code-server-user.service",
-          "ci/build/code-server.sh",
-          "ci/build/code-server@.service",
-          "ci/build/nfpm.yaml",
-          "ci/build/npm-postinstall.sh",
-          "ci/build/release-github-assets.sh",
-          "ci/build/release-github-draft.sh",
-          "ci/build/release-prep.sh",
-          "ci/build/test-standalone-release.sh",
-          "ci/dev/audit.sh",
-          "ci/dev/ci.sh",
-          "ci/dev/fmt.sh",
-          "ci/dev/gen_icons.sh",
-          "ci/dev/lint.sh",
-          "ci/dev/postinstall.sh",
-          "ci/dev/test-e2e.sh",
-          "ci/dev/test-scripts.sh",
-          "ci/dev/test-unit.sh",
-          "ci/dev/watch.ts",
-          "ci/helm-chart/Chart.yaml",
-          "ci/helm-chart/templates/NOTES.txt",
-          "ci/helm-chart/templates/_helpers.tpl",
-          "ci/helm-chart/templates/deployment.yaml",
-          "ci/helm-chart/templates/ingress.yaml",
-          "ci/helm-chart/templates/pvc.yaml",
-          "ci/helm-chart/templates/secrets.yaml",
-          "ci/helm-chart/templates/service.yaml",
-          "ci/helm-chart/templates/serviceaccount.yaml",
-          "ci/helm-chart/templates/tests/test-connection.yaml",
-          "ci/helm-chart/values.yaml",
-          "ci/lib.sh",
-          "ci/release-image/Dockerfile",
-          "ci/release-image/docker-bake.hcl",
-          "ci/release-image/entrypoint.sh",
-          "ci/steps/brew-bump.sh",
-          "ci/steps/docker-buildx-push.sh",
-          "ci/steps/publish-npm.sh",
-          "ci/steps/steps-lib.sh",
-          "docs/CODE_OF_CONDUCT.md",
-          "docs/CONTRIBUTING.md",
-          "docs/FAQ.md",
-          "docs/MAINTAINING.md",
-          "docs/README.md",
-          "docs/SECURITY.md",
-          "docs/android.md",
-          "docs/assets/screenshot.png",
-          "docs/collaboration.md",
-          "docs/guide.md",
-          "docs/helm.md",
-          "docs/install.md",
-          "docs/ios.md",
-          "docs/ipad.md",
-          "docs/link.md",
-          "docs/manifest.json",
-          "docs/npm.md",
-          "docs/requirements.md",
-          "docs/termux.md",
-          "docs/triage.md",
-          "docs/upgrade.md",
-          "install.sh",
-          "package.json",
-          "renovate.json",
-          "src/browser/favicon.afdesign",
-          "src/browser/media/favicon-dark-support.svg",
-          "src/browser/media/favicon.ico",
-          "src/browser/media/favicon.svg",
-          "src/browser/media/pwa-icon-192.png",
-          "src/browser/media/pwa-icon-512.png",
-          "src/browser/media/pwa-icon.png",
-          "src/browser/pages/error.css",
-          "src/browser/pages/error.html",
-          "src/browser/pages/global.css",
-          "src/browser/pages/login.css",
-          "src/browser/pages/login.html",
-          "src/browser/robots.txt",
-          "src/common/emitter.ts",
-          "src/common/http.ts",
-          "src/common/util.ts",
           "src/node/app.ts",
           "src/node/cli.ts",
-          "src/node/coder_cloud.ts",
-          "src/node/constants.ts",
-          "src/node/entry.ts",
-          "src/node/heart.ts",
-          "src/node/http.ts",
-          "src/node/main.ts",
-          "src/node/plugin.ts",
-          "src/node/proxy.ts",
-          "src/node/routes/apps.ts",
-          "src/node/routes/domainProxy.ts",
-          "src/node/routes/errors.ts",
-          "src/node/routes/health.ts",
-          "src/node/routes/index.ts",
-          "src/node/routes/login.ts",
-          "src/node/routes/logout.ts",
-          "src/node/routes/pathProxy.ts",
-          "src/node/routes/update.ts",
-          "src/node/routes/vscode.ts",
-          "src/node/settings.ts",
-          "src/node/socket.ts",
-          "src/node/update.ts",
-          "src/node/util.ts",
-          "src/node/wrapper.ts",
-          "src/node/wsRouter.ts",
-          "test/e2e/baseFixture.ts",
-          "test/e2e/codeServer.test.ts",
-          "test/e2e/extensions.test.ts",
-          "test/e2e/extensions/test-extension/extension.ts",
-          "test/e2e/extensions/test-extension/package.json",
-          "test/e2e/extensions/test-extension/tsconfig.json",
-          "test/e2e/extensions/test-extension/yarn.lock",
-          "test/e2e/github.test.ts",
-          "test/e2e/globalSetup.test.ts",
-          "test/e2e/login.test.ts",
-          "test/e2e/logout.test.ts",
-          "test/e2e/models/CodeServer.ts",
-          "test/e2e/openHelpAbout.test.ts",
-          "test/e2e/terminal.test.ts",
-          "test/package.json",
-          "test/playwright.config.ts",
-          "test/scripts/build-lib.bats",
-          "test/scripts/install.bats",
-          "test/scripts/steps-lib.bats",
-          "test/tsconfig.json",
-          "test/unit/common/emitter.test.ts",
-          "test/unit/common/http.test.ts",
-          "test/unit/common/util.test.ts",
-          "test/unit/helpers.test.ts",
           "test/unit/node/app.test.ts",
-          "test/unit/node/cli.test.ts",
-          "test/unit/node/constants.test.ts",
-          "test/unit/node/http.test.ts",
-          "test/unit/node/plugin.test.ts",
-          "test/unit/node/proxy.test.ts",
-          "test/unit/node/routes/errors.test.ts",
-          "test/unit/node/routes/health.test.ts",
-          "test/unit/node/routes/login.test.ts",
-          "test/unit/node/routes/static.test.ts",
-          "test/unit/node/routes/vscode.test.ts",
-          "test/unit/node/settings.test.ts",
-          "test/unit/node/socket.test.ts",
-          "test/unit/node/test-plugin/Makefile",
-          "test/unit/node/test-plugin/package.json",
-          "test/unit/node/test-plugin/public/icon.svg",
-          "test/unit/node/test-plugin/public/index.html",
-          "test/unit/node/test-plugin/src/index.ts",
-          "test/unit/node/test-plugin/tsconfig.json",
-          "test/unit/node/test-plugin/yarn.lock",
-          "test/unit/node/update.test.ts",
-          "test/unit/node/util.test.ts",
-          "test/utils/constants.ts",
-          "test/utils/cssStub.ts",
-          "test/utils/globalE2eSetup.ts",
-          "test/utils/globalUnitSetup.ts",
-          "test/utils/helpers.ts",
-          "test/utils/httpserver.ts",
-          "test/utils/integration.ts",
-          "test/utils/wtfnode.ts",
-          "test/yarn.lock",
-          "tsconfig.json",
-          "typings/httpolyglot/index.d.ts",
-          "typings/pluginapi.d.ts",
-          "vendor/package.json",
-          "vendor/postinstall.sh",
-          "vendor/yarn.lock",
-          "yarn.lock"
+          "test/unit/node/cli.test.ts"
         ],
         "predSpans": {
-          "CHANGELOG.md": [
-            {
-              "start": 51,
-              "end": 51
-            }
-          ],
-          "src/node/coder_cloud.ts": [
-            {
-              "start": 38,
-              "end": 38
-            }
-          ],
-          "test/utils/httpserver.ts": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 65,
-              "end": 65
-            },
-            {
-              "start": 77,
-              "end": 77
-            },
-            {
-              "start": 79,
-              "end": 79
-            },
-            {
-              "start": 82,
-              "end": 82
-            },
-            {
-              "start": 86,
-              "end": 86
-            },
-            {
-              "start": 94,
-              "end": 94
-            }
-          ],
-          "test/unit/node/cli.test.ts": [
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 47,
-              "end": 119
-            },
-            {
-              "start": 74,
-              "end": 74
-            },
-            {
-              "start": 112,
-              "end": 112
-            },
-            {
-              "start": 174,
-              "end": 180
-            },
-            {
-              "start": 229,
-              "end": 229
-            },
-            {
-              "start": 231,
-              "end": 231
-            },
-            {
-              "start": 232,
-              "end": 232
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 272,
-              "end": 272
-            },
-            {
-              "start": 284,
-              "end": 284
-            },
-            {
-              "start": 450,
-              "end": 450
-            },
-            {
-              "start": 458,
-              "end": 458
-            },
-            {
-              "start": 459,
-              "end": 459
-            },
-            {
-              "start": 468,
-              "end": 468
-            },
-            {
-              "start": 471,
-              "end": 471
-            },
-            {
-              "start": 696,
-              "end": 696
-            },
-            {
-              "start": 697,
-              "end": 697
-            },
-            {
-              "start": 710,
-              "end": 710
-            },
-            {
-              "start": 727,
-              "end": 727
-            },
-            {
-              "start": 735,
-              "end": 735
-            }
-          ],
-          "src/node/routes/index.ts": [
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 110,
-              "end": 110
-            }
-          ],
-          "src/node/routes/vscode.ts": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 18,
-              "end": 18
-            },
-            {
-              "start": 98,
-              "end": 98
-            },
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 130,
-              "end": 130
-            },
-            {
-              "start": 148,
-              "end": 148
-            },
-            {
-              "start": 153,
-              "end": 153
-            }
-          ],
-          "src/node/routes/errors.ts": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 66,
-              "end": 66
-            }
-          ],
-          "src/node/routes/pathProxy.ts": [
-            {
-              "start": 48,
-              "end": 48
-            }
-          ],
-          "test/unit/node/socket.test.ts": [
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 56,
-              "end": 56
-            },
-            {
-              "start": 81,
-              "end": 81
-            },
-            {
-              "start": 83,
-              "end": 83
-            }
-          ],
-          "test/unit/node/plugin.test.ts": [
-            {
-              "start": 103,
-              "end": 103
-            }
-          ],
-          "test/unit/node/app.test.ts": [
-            {
-              "start": 11,
-              "end": 157
-            },
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 98,
-              "end": 98
-            },
-            {
-              "start": 101,
-              "end": 101
-            }
-          ],
-          "test/unit/node/routes/health.test.ts": [
-            {
-              "start": 22,
-              "end": 22
-            }
-          ],
-          "src/node/wsRouter.ts": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 18,
-              "end": 18
-            },
-            {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 32,
-              "end": 32
-            },
-            {
-              "start": 40,
-              "end": 40
-            },
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
-              "start": 49,
-              "end": 49
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 54,
-              "end": 54
-            }
-          ],
-          "src/node/util.ts": [
-            {
-              "start": 392,
-              "end": 392
-            },
-            {
-              "start": 394,
-              "end": 394
-            },
-            {
-              "start": 443,
-              "end": 443
-            },
-            {
-              "start": 447,
-              "end": 447
-            },
-            {
-              "start": 448,
-              "end": 448
-            },
-            {
-              "start": 449,
-              "end": 449
-            },
-            {
-              "start": 450,
-              "end": 450
-            }
-          ],
-          "src/node/http.ts": [
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 32,
-              "end": 32
-            },
-            {
-              "start": 230,
-              "end": 230
-            },
-            {
-              "start": 233,
-              "end": 233
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 236,
-              "end": 236
-            },
-            {
-              "start": 237,
-              "end": 237
-            },
-            {
-              "start": 239,
-              "end": 239
-            },
-            {
-              "start": 259,
-              "end": 259
-            },
-            {
-              "start": 261,
-              "end": 261
-            },
-            {
-              "start": 262,
-              "end": 262
-            },
-            {
-              "start": 266,
-              "end": 266
-            },
-            {
-              "start": 267,
-              "end": 267
-            },
-            {
-              "start": 268,
-              "end": 268
-            }
-          ],
-          "src/node/app.ts": [
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 14,
-              "end": 98
-            },
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 25,
-              "end": 25
-            },
-            {
-              "start": 37,
-              "end": 37
-            },
-            {
-              "start": 39,
-              "end": 39
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 83,
-              "end": 83
-            },
-            {
-              "start": 96,
-              "end": 96
-            },
-            {
-              "start": 114,
-              "end": 114
-            },
-            {
-              "start": 125,
-              "end": 125
-            }
-          ],
-          "src/node/entry.ts": [
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 57,
-              "end": 57
-            }
-          ],
-          "src/node/plugin.ts": [
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 122,
-              "end": 122
-            },
-            {
-              "start": 130,
-              "end": 130
-            }
-          ],
           "src/node/cli.ts": [
-            {
-              "start": 38,
-              "end": 38
-            },
             {
               "start": 40,
               "end": 60
-            },
-            {
-              "start": 58,
-              "end": 58
             },
             {
               "start": 127,
               "end": 183
             },
             {
-              "start": 177,
-              "end": 177
-            },
-            {
               "start": 372,
               "end": 395
-            },
-            {
-              "start": 429,
-              "end": 429
-            },
-            {
-              "start": 451,
-              "end": 451
-            },
-            {
-              "start": 515,
-              "end": 515
-            },
-            {
-              "start": 560,
-              "end": 560
-            },
-            {
-              "start": 703,
-              "end": 703
-            },
-            {
-              "start": 749,
-              "end": 749
-            },
-            {
-              "start": 751,
-              "end": 751
-            },
-            {
-              "start": 752,
-              "end": 752
-            },
-            {
-              "start": 753,
-              "end": 753
-            },
-            {
-              "start": 754,
-              "end": 754
-            },
-            {
-              "start": 764,
-              "end": 764
             }
           ],
-          "src/node/main.ts": [
+          "src/node/app.ts": [
             {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 38,
-              "end": 38
-            },
-            {
-              "start": 46,
-              "end": 46
-            },
-            {
-              "start": 75,
-              "end": 75
-            },
-            {
-              "start": 91,
-              "end": 91
+              "start": 14,
+              "end": 98
             }
           ],
-          "src/node/socket.ts": [
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 35,
-              "end": 35
-            },
-            {
-              "start": 41,
-              "end": 41
-            },
+          "test/unit/node/cli.test.ts": [
             {
               "start": 47,
-              "end": 47
-            },
-            {
-              "start": 49,
-              "end": 49
-            },
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 58,
-              "end": 58
-            },
-            {
-              "start": 59,
-              "end": 59
-            }
-          ],
-          "docs/CONTRIBUTING.md": [
-            {
-              "start": 258,
-              "end": 258
-            }
-          ],
-          "docs/guide.md": [
-            {
-              "start": 264,
-              "end": 264
-            }
-          ],
-          "docs/FAQ.md": [
-            {
-              "start": 347,
-              "end": 347
-            }
-          ],
-          "typings/pluginapi.d.ts": [
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 105,
-              "end": 105
-            },
-            {
-              "start": 110,
-              "end": 110
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 121,
-              "end": 121
-            },
-            {
-              "start": 123,
-              "end": 123
-            },
-            {
-              "start": 230,
-              "end": 230
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 236,
-              "end": 236
-            }
-          ],
-          "test/yarn.lock": [
-            {
-              "start": 1185,
-              "end": 1185
-            },
-            {
-              "start": 1187,
-              "end": 1187
-            },
-            {
-              "start": 3197,
-              "end": 3197
-            }
-          ],
-          "src/common/util.ts": [
-            {
-              "start": 16,
-              "end": 16
-            }
-          ],
-          "test/unit/common/util.test.ts": [
-            {
-              "start": 46,
-              "end": 46
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 48,
-              "end": 48
-            },
-            {
-              "start": 49,
-              "end": 49
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 51,
-              "end": 51
-            },
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 56,
-              "end": 56
-            }
-          ],
-          "test/unit/node/util.test.ts": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 392,
-              "end": 392
-            }
-          ],
-          "src/node/wrapper.ts": [
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 64,
-              "end": 64
+              "end": 119
             },
             {
               "start": 174,
-              "end": 174
-            },
+              "end": 180
+            }
+          ],
+          "test/unit/node/app.test.ts": [
             {
-              "start": 220,
-              "end": 220
-            },
-            {
-              "start": 276,
-              "end": 276
+              "start": 11,
+              "end": 157
             }
           ]
         },
@@ -2254,37 +525,37 @@
           {
             "step": 1,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.3333333333333333,
+              "span": 0.22975301550832855,
+              "line": 0.20689655172413793
             }
           },
           {
             "step": 2,
             "coverage": {
               "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "symbol": 0.6666666666666666,
+              "span": 0.9230327398047099,
+              "line": 0.896551724137931
             }
           },
           {
             "step": 3,
             "coverage": {
               "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "symbol": 0.6666666666666666,
+              "span": 0.9230327398047099,
+              "line": 0.896551724137931
             }
           },
           {
             "step": 4,
             "coverage": {
               "file": 1.0,
-              "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "symbol": 0.6666666666666666,
+              "span": 0.9230327398047099,
+              "line": 0.896551724137931
             }
           },
           {
@@ -2292,8 +563,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -2301,8 +572,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -2310,8 +581,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -2319,8 +590,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -2328,8 +599,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -2337,8 +608,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -2346,8 +617,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -2355,8 +626,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -2364,8 +635,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -2373,8 +644,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -2382,8 +653,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -2391,8 +662,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -2400,22 +671,58 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.22286042504307868,
-              "line": 0.13793103448275862
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 18,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 19,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 20,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 21,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 1.0,
-          "symbol": 0.9411764705882353,
-          "span": 0.20975098827583882,
-          "line": 0.12981744421906696
+          "file": 0.9761904761904762,
+          "symbol": 0.9206349206349206,
+          "span": 0.9523262492820218,
+          "line": 0.9474548440065682
         },
         "redundancy": {
-          "file": 0.23605150214592274,
-          "symbol": 0.17500000000000004,
-          "span": 0.05658081525045633,
-          "line": 0.053763440860215006
+          "file": 0.5555555555555556,
+          "symbol": 0.21666666666666667,
+          "span": 0.3714816598995252,
+          "line": 0.33070190492534757
         }
       },
       "fixOverlap": {
@@ -2602,22 +909,58 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/node/cli.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/node/cli.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/node/app.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/node/app.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/test/unit/node/cli.test.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/test/unit/node/cli.test.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/test/unit/node/app.test.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/test/unit/node/app.test.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2750,9 +1093,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-18T21:44:01Z",
       "completedAt": "2026-05-18T21:55:59Z",
       "durationMs": 717988,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 4613463,
@@ -2761,6 +1119,28 @@
         "total_tokens": 4644808,
         "cache_read_input_tokens": 4492160
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 67,
+        "readToolCalls": 0,
+        "editToolCalls": 8
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/node/app.ts b/src/node/app.ts\nindex 13871355..6a7ddfda 100644\n--- a/src/node/app.ts\n+++ b/src/node/app.ts\n@@ -1,9 +1,11 @@\n import { logger } from \"@coder/logger\"\n+import * as cp from \"child_process\"\n import compression from \"compression\"\n import express, { Express } from \"express\"\n import { promises as fs } from \"fs\"\n import http from \"http\"\n import * as httpolyglot from \"httpolyglot\"\n+import { promisify } from \"util\"\n import { Disposable } from \"../common/emitter\"\n import * as util from \"../common/util\"\n import { DefaultedArgs } from \"./cli\"\n@@ -11,7 +13,78 @@ import { disposer } from \"./http\"\n import { isNodeJSErrnoException } from \"./util\"\n import { handleUpgrade } from \"./wsRouter\"\n \n-type ListenOptions = Pick<DefaultedArgs, \"socket\" | \"port\" | \"host\">\n+type ListenOptions = Pick<DefaultedArgs, \"socket\" | \"port\" | \"host\" | \"socket-mode\" | \"socket-owner\" | \"socket-group\">\n+\n+const execFile = promisify(cp.execFile)\n+\n+const parseSocketMode = (mode: string): number => parseInt(mode, 8)\n+\n+const tryResolveName = async (command: string, args: string[], regex: RegExp): Promise<number | undefined> => {\n+  try {\n+    const { stdout } = await execFile(command, args)\n+    const match = stdout.match(regex)\n+    if (match) {\n+      return parseInt(match[1], 10)\n+    }\n+  } catch (error) {\n+    if (isNodeJSErrnoException(error) && error.code === \"ENOENT\") {\n+      return undefined\n+    }\n+\n+    return undefined\n+  }\n+\n+  return undefined\n+}\n+\n+const resolveSocketUid = async (owner: string): Promise<number> => {\n+  if (/^\\d+$/.test(owner)) {\n+    return parseInt(owner, 10)\n+  }\n+\n+  const uid = await tryResolveName(\"id\", [\"-u\", owner], /^\\s*(\\d+)\\s*$/m)\n+  if (typeof uid !== \"undefined\") {\n+    return uid\n+  }\n+\n+  throw new Error(`Could not resolve socket owner \"${owner}\"`)\n+}\n+\n+const resolveSocketGid = async (group: string): Promise<number> => {\n+  if (/^\\d+$/.test(group)) {\n+    return parseInt(group, 10)\n+  }\n+\n+  const gid = await tryResolveName(\"getent\", [\"group\", group], /^[^:]*:[^:]*:(\\d+):/m)\n+  if (typeof gid !== \"undefined\") {\n+    return gid\n+  }\n+\n+  const dscacheutilGid = await tryResolveName(\"dscacheutil\", [\"-q\", \"group\", \"-a\", \"name\", group], /gid:\\s*(\\d+)/m)\n+  if (typeof dscacheutilGid !== \"undefined\") {\n+    return dscacheutilGid\n+  }\n+\n+  const dsclGid = await tryResolveName(\"dscl\", [\".\", \"-read\", `/Groups/${group}`, \"PrimaryGroupID\"], /PrimaryGroupID:\\s*(\\d+)/m)\n+  if (typeof dsclGid !== \"undefined\") {\n+    return dsclGid\n+  }\n+\n+  throw new Error(`Could not resolve socket group \"${group}\"`)\n+}\n+\n+const setSocketMetadata = async (socketPath: string, args: ListenOptions): Promise<void> => {\n+  if (args[\"socket-mode\"]) {\n+    await fs.chmod(socketPath, parseSocketMode(args[\"socket-mode\"]))\n+  }\n+\n+  if (args[\"socket-owner\"] || args[\"socket-group\"]) {\n+    const stat = await fs.stat(socketPath)\n+    const uid = args[\"socket-owner\"] ? await resolveSocketUid(args[\"socket-owner\"]) : stat.uid\n+    const gid = args[\"socket-group\"] ? await resolveSocketGid(args[\"socket-group\"]) : stat.gid\n+    await fs.chown(socketPath, uid, gid)\n+  }\n+}\n \n export interface App extends Disposable {\n   /** Handles regular HTTP requests. */\n@@ -22,16 +95,24 @@ export interface App extends Disposable {\n   server: http.Server\n }\n \n-const listen = (server: http.Server, { host, port, socket }: ListenOptions) => {\n+const listen = (server: http.Server, args: ListenOptions) => {\n+  const { host, port, socket } = args\n   return new Promise<void>(async (resolve, reject) => {\n     server.on(\"error\", reject)\n \n-    const onListen = () => {\n+    const onListen = async () => {\n       // Promise resolved earlier so this is an unrelated error.\n       server.off(\"error\", reject)\n       server.on(\"error\", (err) => util.logError(logger, \"http server error\", err))\n \n-      resolve()\n+      try {\n+        if (socket) {\n+          await setSocketMetadata(socket, args)\n+        }\n+        resolve()\n+      } catch (error: any) {\n+        server.close(() => reject(error))\n+      }\n     }\n \n     if (socket) {\n@@ -66,13 +147,24 @@ export const createApp = async (args: DefaultedArgs): Promise<App> => {\n       )\n     : http.createServer(router)\n \n-  const dispose = disposer(server)\n+  const serverDispose = disposer(server)\n \n   await listen(server, args)\n \n   const wsRouter = express()\n   handleUpgrade(wsRouter, server)\n \n+  const dispose = async () => {\n+    await serverDispose()\n+    if (args.socket) {\n+      try {\n+        await fs.unlink(args.socket)\n+      } catch (error: any) {\n+        handleArgsSocketCatchError(error)\n+      }\n+    }\n+  }\n+\n   return { router, wsRouter, server, dispose }\n }\n \ndiff --git a/src/node/cli.ts b/src/node/cli.ts\nindex 9928db1c..144769bd 100644\n--- a/src/node/cli.ts\n+++ b/src/node/cli.ts\n@@ -56,6 +56,9 @@ export interface UserProvidedArgs {\n   open?: boolean\n   \"bind-addr\"?: string\n   socket?: string\n+  \"socket-mode\"?: string\n+  \"socket-owner\"?: string\n+  \"socket-group\"?: string\n   version?: boolean\n   \"proxy-domain\"?: string[]\n   \"reuse-window\"?: boolean\n@@ -175,6 +178,9 @@ const options: Options<Required<UserProvidedArgs>> = {\n   port: { type: \"number\", description: \"\" },\n \n   socket: { type: \"string\", path: true, description: \"Path to a socket (bind-addr will be ignored).\" },\n+  \"socket-mode\": { type: \"string\", description: \"File mode for the socket (for example 0700 or 0770).\" },\n+  \"socket-owner\": { type: \"string\", description: \"User or UID that should own the socket.\" },\n+  \"socket-group\": { type: \"string\", description: \"Group or GID that should own the socket.\" },\n   version: { type: \"boolean\", short: \"v\", description: \"Display version information.\" },\n   _: { type: \"string[]\" },\n \n@@ -275,6 +281,44 @@ export function splitOnFirstEquals(str: string): string[] {\n   return split\n }\n \n+const socketModeRegex = /^[0-7]{3,4}$/\n+\n+const validateSocketMode = (mode: string): void => {\n+  if (!socketModeRegex.test(mode)) {\n+    throw new Error(\"--socket-mode must be a valid octal file mode\")\n+  }\n+}\n+\n+const parseSocketOption = (\n+  value: string,\n+  error: (msg: string) => Error,\n+): Pick<UserProvidedArgs, \"socket\" | \"socket-mode\" | \"socket-owner\" | \"socket-group\"> => {\n+  const parts = value.split(\",\")\n+  if (parts.length > 4 || parts[0] === \"\") {\n+    throw error(\"--socket must be in the format path[,mode[,owner[,group]]]\")\n+  }\n+\n+  const [socketPath, socketMode, socketOwner, socketGroup] = parts\n+  const socketArgs: Pick<UserProvidedArgs, \"socket\" | \"socket-mode\" | \"socket-owner\" | \"socket-group\"> = {\n+    socket: path.resolve(socketPath),\n+  }\n+\n+  if (socketMode) {\n+    validateSocketMode(socketMode)\n+    socketArgs[\"socket-mode\"] = socketMode\n+  }\n+\n+  if (socketOwner) {\n+    socketArgs[\"socket-owner\"] = socketOwner\n+  }\n+\n+  if (socketGroup) {\n+    socketArgs[\"socket-group\"] = socketGroup\n+  }\n+\n+  return socketArgs\n+}\n+\n /**\n  * Parse arguments into UserProvidedArgs.  This should not go beyond checking\n  * that arguments are valid types and have values when required.\n@@ -360,6 +404,11 @@ export const parse = (\n         continue\n       }\n \n+      if (key === \"socket\") {\n+        Object.assign(args, parseSocketOption(value, error))\n+        continue\n+      }\n+\n       if (option.path) {\n         value = path.resolve(value)\n       }\n@@ -408,6 +457,10 @@ export const parse = (\n     throw new Error(\"--cert-key is missing\")\n   }\n \n+  if (args[\"socket-mode\"]) {\n+    validateSocketMode(args[\"socket-mode\"])\n+  }\n+\n   logger.debug(() => [\n     `parsed ${opts?.configFile ? \"config\" : \"command line\"}`,\n     field(\"args\", {\n@@ -513,6 +566,9 @@ export async function setDefaults(cliArgs: UserProvidedArgs, configArgs?: Config\n     args.host = \"localhost\"\n     args.port = 0\n     args.socket = undefined\n+    args[\"socket-mode\"] = undefined\n+    args[\"socket-owner\"] = undefined\n+    args[\"socket-group\"] = undefined\n     args.cert = undefined\n     args.auth = AuthType.None\n   }\ndiff --git a/test/unit/node/app.test.ts b/test/unit/node/app.test.ts\nindex 79279ceb..b848e2bc 100644\n--- a/test/unit/node/app.test.ts\n+++ b/test/unit/node/app.test.ts\n@@ -10,6 +10,8 @@ import { clean, mockLogger, getAvailablePort, tmpdir } from \"../../utils/helpers\n \n describe(\"createApp\", () => {\n   let unlinkSpy: jest.SpyInstance\n+  let chmodSpy: jest.SpyInstance\n+  let chownSpy: jest.SpyInstance\n   let port: number\n   let tmpDirPath: string\n   let tmpFilePath: string\n@@ -31,6 +33,8 @@ describe(\"createApp\", () => {\n     // then you can spy on those modules methods, like unlink.\n     // See: https://github.com/aelbore/esbuild-jest/issues/26#issuecomment-893763840\n     unlinkSpy = jest.spyOn(promises, \"unlink\")\n+    chmodSpy = jest.spyOn(promises, \"chmod\").mockResolvedValue(undefined)\n+    chownSpy = jest.spyOn(promises, \"chown\").mockResolvedValue(undefined)\n     port = await getAvailablePort()\n   })\n \n@@ -107,6 +111,35 @@ describe(\"createApp\", () => {\n     app.dispose()\n   })\n \n+  it(\"should set socket permissions after listening on the socket\", async () => {\n+    const defaultArgs = await setDefaults({\n+      socket: tmpFilePath,\n+      \"socket-mode\": \"0770\",\n+      \"socket-owner\": \"10\",\n+      \"socket-group\": \"20\",\n+    })\n+\n+    const app = await createApp(defaultArgs)\n+\n+    expect(chmodSpy).toHaveBeenCalledWith(tmpFilePath, 0o770)\n+    expect(chownSpy).toHaveBeenCalledWith(tmpFilePath, 10, 20)\n+\n+    await app.dispose()\n+  })\n+\n+  it(\"should remove the socket when disposed\", async () => {\n+    const defaultArgs = await setDefaults({\n+      socket: tmpFilePath,\n+    })\n+\n+    const app = await createApp(defaultArgs)\n+    await promises.access(tmpFilePath)\n+\n+    await app.dispose()\n+\n+    await expect(promises.access(tmpFilePath)).rejects.toThrow(\"ENOENT\")\n+  })\n+\n   it(\"should create an https server if args.cert exists\", async () => {\n     const testCertificate = await generateCertificate(\"localhost\")\n     const cert = new OptionalString(testCertificate.cert)\ndiff --git a/test/unit/node/cli.test.ts b/test/unit/node/cli.test.ts\nindex 108f2e84..64ccef7f 100644\n--- a/test/unit/node/cli.test.ts\n+++ b/test/unit/node/cli.test.ts\n@@ -234,6 +234,23 @@ describe(\"parser\", () => {\n     expect(() => parse([\"--cert\", \"--socket-path-value\"])).toThrowError(/Unknown option --socket-path-value/)\n   })\n \n+  it(\"should parse socket mode, owner, and group from --socket\", () => {\n+    expect(parse([\"--socket\", \"mumble,0770,alice,staff\"])).toEqual({\n+      socket: path.resolve(\"mumble\"),\n+      \"socket-mode\": \"0770\",\n+      \"socket-owner\": \"alice\",\n+      \"socket-group\": \"staff\",\n+    })\n+  })\n+\n+  it(\"should parse socket group without requiring a socket owner\", () => {\n+    expect(parse([\"--socket\", \"mumble,0770,,staff\"])).toEqual({\n+      socket: path.resolve(\"mumble\"),\n+      \"socket-mode\": \"0770\",\n+      \"socket-group\": \"staff\",\n+    })\n+  })\n+\n   it(\"should allow positional arguments before options\", async () => {\n     expect(parse([\"test\", \"--auth\", \"none\"])).toEqual({\n       _: [\"test\"],\n",
       "finalOutput": {
         "status": "completed",
@@ -2833,895 +1213,13 @@
         "predSteps": [
           {
             "files": [
-              "ci/build/build-code-server.sh",
-              "ci/build/code-server-nfpm.sh",
-              "ci/build/code-server-user.service",
-              "ci/build/code-server.sh",
-              "ci/build/code-server@.service",
-              "ci/build/test-standalone-release.sh",
-              "ci/dev/test-e2e.sh",
-              "ci/dev/test-scripts.sh",
-              "ci/dev/test-unit.sh",
-              "ci/helm-chart/templates/tests/test-connection.yaml",
-              "ci/release-image/entrypoint.sh",
-              "src/node/cli.ts",
-              "src/node/entry.ts",
-              "src/node/main.ts",
-              "src/node/routes/domainProxy.ts",
-              "src/node/socket.ts",
-              "test/e2e/baseFixture.ts",
-              "test/e2e/codeServer.test.ts",
-              "test/e2e/extensions.test.ts",
-              "test/e2e/extensions/test-extension/extension.ts",
-              "test/e2e/extensions/test-extension/package.json",
-              "test/e2e/extensions/test-extension/tsconfig.json",
-              "test/e2e/extensions/test-extension/yarn.lock",
-              "test/e2e/github.test.ts",
-              "test/e2e/globalSetup.test.ts",
-              "test/e2e/login.test.ts",
-              "test/e2e/logout.test.ts",
-              "test/e2e/models/CodeServer.ts",
-              "test/e2e/openHelpAbout.test.ts",
-              "test/e2e/terminal.test.ts",
-              "test/package.json",
-              "test/playwright.config.ts",
-              "test/scripts/build-lib.bats",
-              "test/scripts/install.bats",
-              "test/scripts/steps-lib.bats",
-              "test/tsconfig.json",
-              "test/unit/common/emitter.test.ts",
-              "test/unit/common/http.test.ts",
-              "test/unit/common/util.test.ts",
-              "test/unit/helpers.test.ts",
-              "test/unit/node/app.test.ts",
-              "test/unit/node/cli.test.ts",
-              "test/unit/node/constants.test.ts",
-              "test/unit/node/http.test.ts",
-              "test/unit/node/plugin.test.ts",
-              "test/unit/node/proxy.test.ts",
-              "test/unit/node/routes/errors.test.ts",
-              "test/unit/node/routes/health.test.ts",
-              "test/unit/node/routes/login.test.ts",
-              "test/unit/node/routes/static.test.ts",
-              "test/unit/node/routes/vscode.test.ts",
-              "test/unit/node/settings.test.ts",
-              "test/unit/node/socket.test.ts",
-              "test/unit/node/test-plugin/Makefile",
-              "test/unit/node/test-plugin/package.json",
-              "test/unit/node/test-plugin/public/icon.svg",
-              "test/unit/node/test-plugin/public/index.html",
-              "test/unit/node/test-plugin/src/index.ts",
-              "test/unit/node/test-plugin/tsconfig.json",
-              "test/unit/node/test-plugin/yarn.lock",
-              "test/unit/node/update.test.ts",
-              "test/unit/node/util.test.ts",
-              "test/utils/constants.ts",
-              "test/utils/cssStub.ts",
-              "test/utils/globalE2eSetup.ts",
-              "test/utils/globalUnitSetup.ts",
-              "test/utils/helpers.ts",
-              "test/utils/httpserver.ts",
-              "test/utils/integration.ts",
-              "test/utils/wtfnode.ts",
-              "test/yarn.lock"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "CHANGELOG.md",
-              "docs/CONTRIBUTING.md",
-              "docs/FAQ.md",
-              "docs/README.md",
-              "docs/guide.md",
-              "docs/ipad.md",
-              "docs/requirements.md",
-              "src/node/app.ts",
-              "src/node/cli.ts",
-              "src/node/coder_cloud.ts",
-              "src/node/entry.ts",
-              "src/node/http.ts",
-              "src/node/main.ts",
-              "src/node/plugin.ts",
-              "src/node/routes/errors.ts",
-              "src/node/routes/index.ts",
-              "src/node/routes/pathProxy.ts",
-              "src/node/routes/vscode.ts",
-              "src/node/socket.ts",
-              "src/node/util.ts",
-              "src/node/wsRouter.ts",
-              "test/unit/node/app.test.ts",
-              "test/unit/node/cli.test.ts",
-              "test/unit/node/plugin.test.ts",
-              "test/unit/node/routes/health.test.ts",
-              "test/unit/node/socket.test.ts",
-              "test/utils/httpserver.ts",
-              "typings/pluginapi.d.ts"
+              "test/unit/node/app.test.ts"
             ],
             "spans": {
-              "CHANGELOG.md": [
-                {
-                  "start": 51,
-                  "end": 51
-                }
-              ],
-              "docs/README.md": [
-                {
-                  "start": 25,
-                  "end": 25
-                }
-              ],
-              "docs/CONTRIBUTING.md": [
-                {
-                  "start": 258,
-                  "end": 258
-                },
-                {
-                  "start": 266,
-                  "end": 266
-                },
-                {
-                  "start": 286,
-                  "end": 286
-                },
-                {
-                  "start": 288,
-                  "end": 288
-                }
-              ],
-              "docs/guide.md": [
-                {
-                  "start": 61,
-                  "end": 61
-                },
-                {
-                  "start": 264,
-                  "end": 264
-                },
-                {
-                  "start": 351,
-                  "end": 351
-                },
-                {
-                  "start": 355,
-                  "end": 355
-                }
-              ],
-              "test/utils/httpserver.ts": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 65,
-                  "end": 65
-                },
-                {
-                  "start": 77,
-                  "end": 77
-                },
-                {
-                  "start": 79,
-                  "end": 79
-                },
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 94,
-                  "end": 94
-                }
-              ],
-              "test/unit/node/socket.test.ts": [
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 35,
-                  "end": 35
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 56,
-                  "end": 56
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                },
-                {
-                  "start": 83,
-                  "end": 83
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                }
-              ],
-              "test/unit/node/plugin.test.ts": [
-                {
-                  "start": 103,
-                  "end": 103
-                }
-              ],
-              "test/unit/node/cli.test.ts": [
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 74,
-                  "end": 74
-                },
-                {
-                  "start": 112,
-                  "end": 112
-                },
-                {
-                  "start": 229,
-                  "end": 229
-                },
-                {
-                  "start": 231,
-                  "end": 231
-                },
-                {
-                  "start": 232,
-                  "end": 232
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 272,
-                  "end": 272
-                },
-                {
-                  "start": 284,
-                  "end": 284
-                },
-                {
-                  "start": 450,
-                  "end": 450
-                },
-                {
-                  "start": 458,
-                  "end": 458
-                },
-                {
-                  "start": 459,
-                  "end": 459
-                },
-                {
-                  "start": 468,
-                  "end": 468
-                },
-                {
-                  "start": 471,
-                  "end": 471
-                },
-                {
-                  "start": 672,
-                  "end": 672
-                },
-                {
-                  "start": 673,
-                  "end": 673
-                },
-                {
-                  "start": 677,
-                  "end": 677
-                },
-                {
-                  "start": 684,
-                  "end": 684
-                },
-                {
-                  "start": 692,
-                  "end": 692
-                },
-                {
-                  "start": 696,
-                  "end": 696
-                },
-                {
-                  "start": 697,
-                  "end": 697
-                },
-                {
-                  "start": 700,
-                  "end": 700
-                },
-                {
-                  "start": 704,
-                  "end": 704
-                },
-                {
-                  "start": 705,
-                  "end": 705
-                }
-              ],
               "test/unit/node/app.test.ts": [
                 {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 41,
-                  "end": 41
-                },
-                {
-                  "start": 98,
-                  "end": 98
-                },
-                {
-                  "start": 101,
-                  "end": 101
-                },
-                {
-                  "start": 182,
-                  "end": 182
-                },
-                {
-                  "start": 194,
-                  "end": 194
-                },
-                {
-                  "start": 201,
-                  "end": 201
-                },
-                {
-                  "start": 204,
-                  "end": 204
-                },
-                {
-                  "start": 214,
-                  "end": 214
-                },
-                {
-                  "start": 225,
-                  "end": 225
-                },
-                {
-                  "start": 235,
-                  "end": 235
-                }
-              ],
-              "docs/FAQ.md": [
-                {
-                  "start": 347,
-                  "end": 347
-                }
-              ],
-              "docs/ipad.md": [
-                {
-                  "start": 160,
-                  "end": 160
-                },
-                {
-                  "start": 197,
-                  "end": 197
-                }
-              ],
-              "docs/requirements.md": [
-                {
-                  "start": 16,
-                  "end": 16
-                }
-              ],
-              "test/unit/node/routes/health.test.ts": [
-                {
-                  "start": 22,
-                  "end": 22
-                }
-              ],
-              "typings/pluginapi.d.ts": [
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 100,
-                  "end": 100
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 105,
-                  "end": 105
-                },
-                {
-                  "start": 110,
-                  "end": 110
-                },
-                {
-                  "start": 112,
-                  "end": 112
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 121,
-                  "end": 121
-                },
-                {
-                  "start": 123,
-                  "end": 123
-                },
-                {
-                  "start": 230,
-                  "end": 230
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 236,
-                  "end": 236
-                }
-              ],
-              "src/node/routes/errors.ts": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 66,
-                  "end": 66
-                }
-              ],
-              "src/node/routes/vscode.ts": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 18,
-                  "end": 18
-                },
-                {
-                  "start": 98,
-                  "end": 98
-                },
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 100,
-                  "end": 100
-                },
-                {
-                  "start": 148,
-                  "end": 148
-                },
-                {
-                  "start": 153,
-                  "end": 153
-                }
-              ],
-              "src/node/routes/index.ts": [
-                {
-                  "start": 78,
-                  "end": 78
-                },
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 110,
-                  "end": 110
-                }
-              ],
-              "src/node/routes/pathProxy.ts": [
-                {
-                  "start": 48,
-                  "end": 48
-                }
-              ],
-              "src/node/wsRouter.ts": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 18,
-                  "end": 18
-                },
-                {
-                  "start": 24,
-                  "end": 24
-                },
-                {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 32,
-                  "end": 32
-                },
-                {
-                  "start": 35,
-                  "end": 35
-                },
-                {
-                  "start": 40,
-                  "end": 40
-                },
-                {
-                  "start": 41,
-                  "end": 41
-                },
-                {
-                  "start": 49,
-                  "end": 49
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 54,
-                  "end": 54
-                }
-              ],
-              "src/node/coder_cloud.ts": [
-                {
-                  "start": 38,
-                  "end": 38
-                }
-              ],
-              "src/node/util.ts": [
-                {
-                  "start": 392,
-                  "end": 392
-                },
-                {
-                  "start": 394,
-                  "end": 394
-                },
-                {
-                  "start": 443,
-                  "end": 443
-                },
-                {
-                  "start": 447,
-                  "end": 447
-                },
-                {
-                  "start": 448,
-                  "end": 448
-                },
-                {
-                  "start": 449,
-                  "end": 449
-                },
-                {
-                  "start": 450,
-                  "end": 450
-                }
-              ],
-              "src/node/http.ts": [
-                {
-                  "start": 230,
-                  "end": 230
-                },
-                {
-                  "start": 233,
-                  "end": 233
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 236,
-                  "end": 236
-                },
-                {
-                  "start": 237,
-                  "end": 237
-                },
-                {
-                  "start": 239,
-                  "end": 239
-                },
-                {
-                  "start": 259,
-                  "end": 259
-                },
-                {
-                  "start": 261,
-                  "end": 261
-                },
-                {
-                  "start": 262,
-                  "end": 262
-                },
-                {
-                  "start": 266,
-                  "end": 266
-                },
-                {
-                  "start": 267,
-                  "end": 267
-                },
-                {
-                  "start": 268,
-                  "end": 268
-                }
-              ],
-              "src/node/entry.ts": [
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                }
-              ],
-              "src/node/app.ts": [
-                {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 25,
-                  "end": 25
-                },
-                {
-                  "start": 37,
-                  "end": 37
-                },
-                {
-                  "start": 39,
-                  "end": 39
-                },
-                {
-                  "start": 41,
-                  "end": 41
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 83,
-                  "end": 83
-                },
-                {
-                  "start": 96,
-                  "end": 96
-                },
-                {
-                  "start": 114,
-                  "end": 114
-                },
-                {
-                  "start": 125,
-                  "end": 125
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                }
-              ],
-              "src/node/cli.ts": [
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 177,
-                  "end": 177
-                },
-                {
-                  "start": 515,
-                  "end": 515
-                },
-                {
-                  "start": 703,
-                  "end": 703
-                },
-                {
-                  "start": 705,
-                  "end": 705
-                },
-                {
-                  "start": 709,
-                  "end": 709
-                },
-                {
-                  "start": 742,
-                  "end": 742
-                },
-                {
-                  "start": 749,
-                  "end": 749
-                },
-                {
-                  "start": 751,
-                  "end": 751
-                },
-                {
-                  "start": 752,
-                  "end": 752
-                },
-                {
-                  "start": 753,
-                  "end": 753
-                },
-                {
-                  "start": 754,
-                  "end": 754
-                }
-              ],
-              "src/node/plugin.ts": [
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 122,
-                  "end": 122
-                },
-                {
-                  "start": 130,
-                  "end": 130
-                }
-              ],
-              "src/node/main.ts": [
-                {
-                  "start": 46,
-                  "end": 46
-                },
-                {
-                  "start": 75,
-                  "end": 75
-                }
-              ],
-              "src/node/socket.ts": [
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                },
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 35,
-                  "end": 35
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 49,
-                  "end": 49
-                },
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 59,
-                  "end": 59
-                },
-                {
-                  "start": 75,
-                  "end": 75
-                },
-                {
-                  "start": 94,
-                  "end": 94
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -3729,16 +1227,58 @@
           },
           {
             "files": [
-              "test/unit/node/app.test.ts"
+              "src/node/app.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/node/app.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/node/app.ts"
+              "src/node/cli.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/node/cli.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "test/unit/node/cli.test.ts"
+            ],
+            "spans": {
+              "test/unit/node/cli.test.ts": [
+                {
+                  "start": 1,
+                  "end": 340
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/node/cli.ts"
+            ],
+            "spans": {
+              "src/node/cli.ts": [
+                {
+                  "start": 560,
+                  "end": 860
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -3750,9 +1290,16 @@
           },
           {
             "files": [
-              "test/unit/node/cli.test.ts"
+              "src/node/cli.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/node/cli.ts": [
+                {
+                  "start": 260,
+                  "end": 560
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -3764,42 +1311,139 @@
           },
           {
             "files": [
-              "src/node/cli.ts",
-              "src/node/socket.ts",
-              "test/unit/node/app.test.ts",
-              "test/unit/node/cli.test.ts"
+              "src/node/http.ts"
             ],
             "spans": {
-              "test/unit/node/cli.test.ts": [
+              "src/node/http.ts": [
                 {
-                  "start": 112,
-                  "end": 112
-                },
-                {
-                  "start": 232,
-                  "end": 232
-                },
-                {
-                  "start": 284,
-                  "end": 284
+                  "start": 200,
+                  "end": 320
                 }
-              ],
-              "test/unit/node/app.test.ts": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/node/http.ts"
+            ],
+            "spans": {
+              "src/node/http.ts": [
                 {
-                  "start": 101,
-                  "end": 101
+                  "start": 1,
+                  "end": 140
                 }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "test/package.json"
+            ],
+            "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/node/util.ts"
+            ],
+            "spans": {
+              "src/node/util.ts": [
+                {
+                  "start": 120,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/node/util.ts"
+            ],
+            "spans": {
+              "src/node/util.ts": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "ci/dev/test-unit.sh"
+            ],
+            "spans": {
+              "ci/dev/test-unit.sh": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "test/utils/globalUnitSetup.ts"
+            ],
+            "spans": {
+              "test/utils/globalUnitSetup.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "test/utils/helpers.ts"
+            ],
+            "spans": {
+              "test/utils/helpers.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "test/utils/constants.ts"
+            ],
+            "spans": {
+              "test/utils/constants.ts": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tsconfig.json"
+            ],
+            "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/node/cli.ts"
+            ],
+            "spans": {
               "src/node/cli.ts": [
                 {
-                  "start": 177,
-                  "end": 177
-                }
-              ],
-              "src/node/socket.ts": [
-                {
-                  "start": 33,
-                  "end": 33
+                  "start": 40,
+                  "end": 190
                 }
               ]
             },
@@ -3812,8 +1456,8 @@
             "spans": {
               "src/node/cli.ts": [
                 {
-                  "start": 229,
-                  "end": 229
+                  "start": 250,
+                  "end": 390
                 }
               ]
             },
@@ -3821,168 +1465,55 @@
           },
           {
             "files": [
-              "src/common/util.ts",
-              "src/node/socket.ts",
-              "test/e2e/baseFixture.ts",
-              "test/e2e/models/CodeServer.ts",
-              "test/unit/common/util.test.ts",
-              "test/unit/node/test-plugin/tsconfig.json",
-              "test/unit/node/util.test.ts",
-              "test/yarn.lock"
-            ],
-            "spans": {
-              "src/common/util.ts": [
-                {
-                  "start": 16,
-                  "end": 16
-                }
-              ],
-              "test/yarn.lock": [
-                {
-                  "start": 1185,
-                  "end": 1185
-                },
-                {
-                  "start": 1187,
-                  "end": 1187
-                },
-                {
-                  "start": 3197,
-                  "end": 3197
-                }
-              ],
-              "test/unit/common/util.test.ts": [
-                {
-                  "start": 46,
-                  "end": 46
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 48,
-                  "end": 48
-                },
-                {
-                  "start": 49,
-                  "end": 49
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 51,
-                  "end": 51
-                },
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 56,
-                  "end": 56
-                }
-              ],
-              "test/unit/node/util.test.ts": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 392,
-                  "end": 392
-                }
-              ],
-              "test/e2e/baseFixture.ts": [
-                {
-                  "start": 3,
-                  "end": 3
-                }
-              ],
-              "test/e2e/models/CodeServer.ts": [
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 461,
-                  "end": 461
-                }
-              ],
-              "src/node/socket.ts": [
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 41,
-                  "end": 41
-                }
-              ],
-              "test/unit/node/test-plugin/tsconfig.json": [
-                {
-                  "start": 35,
-                  "end": 35
-                }
-              ]
-            },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/node/http.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "test/package.json"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/node/app.ts",
-              "src/node/cli.ts",
               "test/unit/node/cli.test.ts"
             ],
             "spans": {
               "test/unit/node/cli.test.ts": [
                 {
-                  "start": 458,
-                  "end": 458
+                  "start": 220,
+                  "end": 270
                 }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/node/cli.ts"
+            ],
+            "spans": {
+              "src/node/cli.ts": [
+                {
+                  "start": 40,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/node/cli.ts"
+            ],
+            "spans": {
+              "src/node/cli.ts": [
+                {
+                  "start": 260,
+                  "end": 390
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/node/app.ts"
+            ],
+            "spans": {
               "src/node/app.ts": [
                 {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 125,
-                  "end": 125
-                }
-              ],
-              "src/node/cli.ts": [
-                {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 515,
-                  "end": 515
+                  "start": 1,
+                  "end": 190
                 }
               ]
             },
@@ -3990,92 +1521,13 @@
           },
           {
             "files": [
-              "src/node/coder_cloud.ts",
-              "src/node/util.ts",
-              "src/node/wrapper.ts",
-              "test/e2e/models/CodeServer.ts",
-              "test/e2e/terminal.test.ts",
-              "test/unit/node/util.test.ts"
+              "test/unit/node/app.test.ts"
             ],
             "spans": {
-              "src/node/util.ts": [
+              "test/unit/node/app.test.ts": [
                 {
-                  "start": 2,
-                  "end": 2
-                },
-                {
-                  "start": 408,
-                  "end": 408
-                }
-              ],
-              "src/node/coder_cloud.ts": [
-                {
-                  "start": 2,
-                  "end": 2
-                },
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "src/node/wrapper.ts": [
-                {
-                  "start": 2,
-                  "end": 2
-                },
-                {
-                  "start": 286,
-                  "end": 286
-                },
-                {
-                  "start": 309,
-                  "end": 309
-                },
-                {
-                  "start": 311,
-                  "end": 311
-                }
-              ],
-              "test/e2e/terminal.test.ts": [
-                {
-                  "start": 1,
-                  "end": 1
-                }
-              ],
-              "test/e2e/models/CodeServer.ts": [
-                {
-                  "start": 2,
-                  "end": 2
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 100,
-                  "end": 100
-                }
-              ],
-              "test/unit/node/util.test.ts": [
-                {
-                  "start": 1,
-                  "end": 1
-                },
-                {
-                  "start": 371,
-                  "end": 371
-                },
-                {
-                  "start": 406,
-                  "end": 406
-                },
-                {
-                  "start": 410,
-                  "end": 410
+                  "start": 80,
+                  "end": 150
                 }
               ]
             },
@@ -4083,77 +1535,27 @@
           },
           {
             "files": [
-              "src/node/util.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "ci/dev/test-unit.sh"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "test/utils/globalUnitSetup.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "test/utils/helpers.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "test/utils/constants.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tsconfig.json"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/node/cli.ts",
-              "src/node/main.ts",
-              "src/node/routes/vscode.ts"
+              "src/node/cli.ts"
             ],
             "spans": {
               "src/node/cli.ts": [
                 {
-                  "start": 819,
-                  "end": 819
+                  "start": 500,
+                  "end": 550
                 }
-              ],
-              "src/node/main.ts": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/node/cli.ts"
+            ],
+            "spans": {
+              "src/node/cli.ts": [
                 {
-                  "start": 35,
-                  "end": 35
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                }
-              ],
-              "src/node/routes/vscode.ts": [
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 123,
-                  "end": 123
+                  "start": 550,
+                  "end": 610
                 }
               ]
             },
@@ -4161,805 +1563,20 @@
           }
         ],
         "predFiles": [
-          "CHANGELOG.md",
-          "ci/build/build-code-server.sh",
-          "ci/build/code-server-nfpm.sh",
-          "ci/build/code-server-user.service",
-          "ci/build/code-server.sh",
-          "ci/build/code-server@.service",
-          "ci/build/test-standalone-release.sh",
-          "ci/dev/test-e2e.sh",
-          "ci/dev/test-scripts.sh",
-          "ci/dev/test-unit.sh",
-          "ci/helm-chart/templates/tests/test-connection.yaml",
-          "ci/release-image/entrypoint.sh",
-          "docs/CONTRIBUTING.md",
-          "docs/FAQ.md",
-          "docs/README.md",
-          "docs/guide.md",
-          "docs/ipad.md",
-          "docs/requirements.md",
-          "package.json",
-          "src/common/util.ts",
           "src/node/app.ts",
           "src/node/cli.ts",
-          "src/node/coder_cloud.ts",
-          "src/node/entry.ts",
-          "src/node/http.ts",
-          "src/node/main.ts",
-          "src/node/plugin.ts",
-          "src/node/routes/domainProxy.ts",
-          "src/node/routes/errors.ts",
-          "src/node/routes/index.ts",
-          "src/node/routes/pathProxy.ts",
-          "src/node/routes/vscode.ts",
-          "src/node/socket.ts",
-          "src/node/util.ts",
-          "src/node/wrapper.ts",
-          "src/node/wsRouter.ts",
-          "test/e2e/baseFixture.ts",
-          "test/e2e/codeServer.test.ts",
-          "test/e2e/extensions.test.ts",
-          "test/e2e/extensions/test-extension/extension.ts",
-          "test/e2e/extensions/test-extension/package.json",
-          "test/e2e/extensions/test-extension/tsconfig.json",
-          "test/e2e/extensions/test-extension/yarn.lock",
-          "test/e2e/github.test.ts",
-          "test/e2e/globalSetup.test.ts",
-          "test/e2e/login.test.ts",
-          "test/e2e/logout.test.ts",
-          "test/e2e/models/CodeServer.ts",
-          "test/e2e/openHelpAbout.test.ts",
-          "test/e2e/terminal.test.ts",
-          "test/package.json",
-          "test/playwright.config.ts",
-          "test/scripts/build-lib.bats",
-          "test/scripts/install.bats",
-          "test/scripts/steps-lib.bats",
-          "test/tsconfig.json",
-          "test/unit/common/emitter.test.ts",
-          "test/unit/common/http.test.ts",
-          "test/unit/common/util.test.ts",
-          "test/unit/helpers.test.ts",
           "test/unit/node/app.test.ts",
-          "test/unit/node/cli.test.ts",
-          "test/unit/node/constants.test.ts",
-          "test/unit/node/http.test.ts",
-          "test/unit/node/plugin.test.ts",
-          "test/unit/node/proxy.test.ts",
-          "test/unit/node/routes/errors.test.ts",
-          "test/unit/node/routes/health.test.ts",
-          "test/unit/node/routes/login.test.ts",
-          "test/unit/node/routes/static.test.ts",
-          "test/unit/node/routes/vscode.test.ts",
-          "test/unit/node/settings.test.ts",
-          "test/unit/node/socket.test.ts",
-          "test/unit/node/test-plugin/Makefile",
-          "test/unit/node/test-plugin/package.json",
-          "test/unit/node/test-plugin/public/icon.svg",
-          "test/unit/node/test-plugin/public/index.html",
-          "test/unit/node/test-plugin/src/index.ts",
-          "test/unit/node/test-plugin/tsconfig.json",
-          "test/unit/node/test-plugin/yarn.lock",
-          "test/unit/node/update.test.ts",
-          "test/unit/node/util.test.ts",
-          "test/utils/constants.ts",
-          "test/utils/cssStub.ts",
-          "test/utils/globalE2eSetup.ts",
-          "test/utils/globalUnitSetup.ts",
-          "test/utils/helpers.ts",
-          "test/utils/httpserver.ts",
-          "test/utils/integration.ts",
-          "test/utils/wtfnode.ts",
-          "test/yarn.lock",
-          "tsconfig.json",
-          "typings/pluginapi.d.ts"
+          "test/unit/node/cli.test.ts"
         ],
         "predSpans": {
-          "CHANGELOG.md": [
-            {
-              "start": 51,
-              "end": 51
-            }
-          ],
-          "docs/README.md": [
-            {
-              "start": 25,
-              "end": 25
-            }
-          ],
-          "docs/CONTRIBUTING.md": [
-            {
-              "start": 258,
-              "end": 258
-            },
-            {
-              "start": 266,
-              "end": 266
-            },
-            {
-              "start": 286,
-              "end": 286
-            },
-            {
-              "start": 288,
-              "end": 288
-            }
-          ],
-          "docs/guide.md": [
-            {
-              "start": 61,
-              "end": 61
-            },
-            {
-              "start": 264,
-              "end": 264
-            },
-            {
-              "start": 351,
-              "end": 351
-            },
-            {
-              "start": 355,
-              "end": 355
-            }
-          ],
-          "test/utils/httpserver.ts": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 65,
-              "end": 65
-            },
-            {
-              "start": 77,
-              "end": 77
-            },
-            {
-              "start": 79,
-              "end": 79
-            },
-            {
-              "start": 82,
-              "end": 82
-            },
-            {
-              "start": 86,
-              "end": 86
-            },
-            {
-              "start": 94,
-              "end": 94
-            }
-          ],
-          "test/unit/node/socket.test.ts": [
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 35,
-              "end": 35
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 56,
-              "end": 56
-            },
-            {
-              "start": 81,
-              "end": 81
-            },
-            {
-              "start": 83,
-              "end": 83
-            },
-            {
-              "start": 104,
-              "end": 104
-            }
-          ],
-          "test/unit/node/plugin.test.ts": [
-            {
-              "start": 103,
-              "end": 103
-            }
-          ],
-          "test/unit/node/cli.test.ts": [
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 74,
-              "end": 74
-            },
-            {
-              "start": 112,
-              "end": 112
-            },
-            {
-              "start": 228,
-              "end": 252
-            },
-            {
-              "start": 229,
-              "end": 229
-            },
-            {
-              "start": 231,
-              "end": 231
-            },
-            {
-              "start": 232,
-              "end": 232
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 272,
-              "end": 272
-            },
-            {
-              "start": 284,
-              "end": 284
-            },
-            {
-              "start": 450,
-              "end": 450
-            },
-            {
-              "start": 458,
-              "end": 458
-            },
-            {
-              "start": 459,
-              "end": 459
-            },
-            {
-              "start": 468,
-              "end": 468
-            },
-            {
-              "start": 471,
-              "end": 471
-            },
-            {
-              "start": 672,
-              "end": 672
-            },
-            {
-              "start": 673,
-              "end": 673
-            },
-            {
-              "start": 677,
-              "end": 677
-            },
-            {
-              "start": 684,
-              "end": 684
-            },
-            {
-              "start": 692,
-              "end": 692
-            },
-            {
-              "start": 696,
-              "end": 696
-            },
-            {
-              "start": 697,
-              "end": 697
-            },
-            {
-              "start": 700,
-              "end": 700
-            },
-            {
-              "start": 704,
-              "end": 704
-            },
-            {
-              "start": 705,
-              "end": 705
-            }
-          ],
-          "test/unit/node/app.test.ts": [
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
-              "start": 98,
-              "end": 98
-            },
-            {
-              "start": 101,
-              "end": 101
-            },
-            {
-              "start": 102,
-              "end": 140
-            },
-            {
-              "start": 182,
-              "end": 182
-            },
-            {
-              "start": 194,
-              "end": 194
-            },
-            {
-              "start": 201,
-              "end": 201
-            },
-            {
-              "start": 204,
-              "end": 204
-            },
-            {
-              "start": 214,
-              "end": 214
-            },
-            {
-              "start": 225,
-              "end": 225
-            },
-            {
-              "start": 235,
-              "end": 235
-            }
-          ],
-          "docs/FAQ.md": [
-            {
-              "start": 347,
-              "end": 347
-            }
-          ],
-          "docs/ipad.md": [
-            {
-              "start": 160,
-              "end": 160
-            },
-            {
-              "start": 197,
-              "end": 197
-            }
-          ],
-          "docs/requirements.md": [
-            {
-              "start": 16,
-              "end": 16
-            }
-          ],
-          "test/unit/node/routes/health.test.ts": [
-            {
-              "start": 22,
-              "end": 22
-            }
-          ],
-          "typings/pluginapi.d.ts": [
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 100,
-              "end": 100
-            },
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 105,
-              "end": 105
-            },
-            {
-              "start": 110,
-              "end": 110
-            },
-            {
-              "start": 112,
-              "end": 112
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 121,
-              "end": 121
-            },
-            {
-              "start": 123,
-              "end": 123
-            },
-            {
-              "start": 230,
-              "end": 230
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 236,
-              "end": 236
-            }
-          ],
-          "src/node/routes/errors.ts": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 66,
-              "end": 66
-            }
-          ],
-          "src/node/routes/vscode.ts": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 18,
-              "end": 18
-            },
-            {
-              "start": 98,
-              "end": 98
-            },
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 100,
-              "end": 100
-            },
-            {
-              "start": 123,
-              "end": 123
-            },
-            {
-              "start": 148,
-              "end": 148
-            },
-            {
-              "start": 153,
-              "end": 153
-            }
-          ],
-          "src/node/routes/index.ts": [
-            {
-              "start": 78,
-              "end": 78
-            },
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 110,
-              "end": 110
-            }
-          ],
-          "src/node/routes/pathProxy.ts": [
-            {
-              "start": 48,
-              "end": 48
-            }
-          ],
-          "src/node/wsRouter.ts": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 18,
-              "end": 18
-            },
-            {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 32,
-              "end": 32
-            },
-            {
-              "start": 35,
-              "end": 35
-            },
-            {
-              "start": 40,
-              "end": 40
-            },
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
-              "start": 49,
-              "end": 49
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 54,
-              "end": 54
-            }
-          ],
-          "src/node/coder_cloud.ts": [
-            {
-              "start": 2,
-              "end": 2
-            },
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 38,
-              "end": 38
-            }
-          ],
-          "src/node/util.ts": [
-            {
-              "start": 2,
-              "end": 2
-            },
-            {
-              "start": 392,
-              "end": 392
-            },
-            {
-              "start": 394,
-              "end": 394
-            },
-            {
-              "start": 408,
-              "end": 408
-            },
-            {
-              "start": 443,
-              "end": 443
-            },
-            {
-              "start": 447,
-              "end": 447
-            },
-            {
-              "start": 448,
-              "end": 448
-            },
-            {
-              "start": 449,
-              "end": 449
-            },
-            {
-              "start": 450,
-              "end": 450
-            }
-          ],
-          "src/node/http.ts": [
-            {
-              "start": 230,
-              "end": 230
-            },
-            {
-              "start": 233,
-              "end": 233
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 236,
-              "end": 236
-            },
-            {
-              "start": 237,
-              "end": 237
-            },
-            {
-              "start": 239,
-              "end": 239
-            },
-            {
-              "start": 259,
-              "end": 259
-            },
-            {
-              "start": 261,
-              "end": 261
-            },
-            {
-              "start": 262,
-              "end": 262
-            },
-            {
-              "start": 266,
-              "end": 266
-            },
-            {
-              "start": 267,
-              "end": 267
-            },
-            {
-              "start": 268,
-              "end": 268
-            }
-          ],
-          "src/node/entry.ts": [
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 57,
-              "end": 57
-            }
-          ],
-          "src/node/app.ts": [
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 16,
-              "end": 87
-            },
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 25,
-              "end": 25
-            },
-            {
-              "start": 37,
-              "end": 37
-            },
-            {
-              "start": 39,
-              "end": 39
-            },
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 83,
-              "end": 83
-            },
-            {
-              "start": 96,
-              "end": 96
-            },
-            {
-              "start": 98,
-              "end": 168
-            },
-            {
-              "start": 114,
-              "end": 114
-            },
-            {
-              "start": 125,
-              "end": 125
-            },
-            {
-              "start": 130,
-              "end": 130
-            }
-          ],
           "src/node/cli.ts": [
             {
-              "start": 8,
-              "end": 8
-            },
-            {
               "start": 40,
               "end": 61
-            },
-            {
-              "start": 58,
-              "end": 58
             },
             {
               "start": 129,
               "end": 183
-            },
-            {
-              "start": 177,
-              "end": 177
-            },
-            {
-              "start": 229,
-              "end": 229
             },
             {
               "start": 284,
@@ -4968,306 +1585,28 @@
             {
               "start": 504,
               "end": 574
-            },
-            {
-              "start": 515,
-              "end": 515
-            },
-            {
-              "start": 703,
-              "end": 703
-            },
-            {
-              "start": 705,
-              "end": 705
-            },
-            {
-              "start": 709,
-              "end": 709
-            },
-            {
-              "start": 742,
-              "end": 742
-            },
-            {
-              "start": 749,
-              "end": 749
-            },
-            {
-              "start": 751,
-              "end": 751
-            },
-            {
-              "start": 752,
-              "end": 752
-            },
-            {
-              "start": 753,
-              "end": 753
-            },
-            {
-              "start": 754,
-              "end": 754
-            },
-            {
-              "start": 819,
-              "end": 819
             }
           ],
-          "src/node/plugin.ts": [
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 122,
-              "end": 122
-            },
-            {
-              "start": 130,
-              "end": 130
-            }
-          ],
-          "src/node/main.ts": [
-            {
-              "start": 35,
-              "end": 35
-            },
-            {
-              "start": 46,
-              "end": 46
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 75,
-              "end": 75
-            }
-          ],
-          "src/node/socket.ts": [
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 35,
-              "end": 35
-            },
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 49,
-              "end": 49
-            },
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 58,
-              "end": 58
-            },
-            {
-              "start": 59,
-              "end": 59
-            },
-            {
-              "start": 75,
-              "end": 75
-            },
-            {
-              "start": 94,
-              "end": 94
-            }
-          ],
-          "src/common/util.ts": [
+          "src/node/app.ts": [
             {
               "start": 16,
-              "end": 16
+              "end": 87
+            },
+            {
+              "start": 98,
+              "end": 168
             }
           ],
-          "test/yarn.lock": [
+          "test/unit/node/cli.test.ts": [
             {
-              "start": 1185,
-              "end": 1185
-            },
-            {
-              "start": 1187,
-              "end": 1187
-            },
-            {
-              "start": 3197,
-              "end": 3197
+              "start": 228,
+              "end": 252
             }
           ],
-          "test/unit/common/util.test.ts": [
+          "test/unit/node/app.test.ts": [
             {
-              "start": 46,
-              "end": 46
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 48,
-              "end": 48
-            },
-            {
-              "start": 49,
-              "end": 49
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 51,
-              "end": 51
-            },
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 56,
-              "end": 56
-            }
-          ],
-          "test/unit/node/util.test.ts": [
-            {
-              "start": 1,
-              "end": 1
-            },
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 371,
-              "end": 371
-            },
-            {
-              "start": 392,
-              "end": 392
-            },
-            {
-              "start": 406,
-              "end": 406
-            },
-            {
-              "start": 410,
-              "end": 410
-            }
-          ],
-          "test/e2e/baseFixture.ts": [
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "test/e2e/models/CodeServer.ts": [
-            {
-              "start": 2,
-              "end": 2
-            },
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 100,
-              "end": 100
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 461,
-              "end": 461
-            }
-          ],
-          "test/unit/node/test-plugin/tsconfig.json": [
-            {
-              "start": 35,
-              "end": 35
-            }
-          ],
-          "src/node/wrapper.ts": [
-            {
-              "start": 2,
-              "end": 2
-            },
-            {
-              "start": 286,
-              "end": 286
-            },
-            {
-              "start": 309,
-              "end": 309
-            },
-            {
-              "start": 311,
-              "end": 311
-            }
-          ],
-          "test/e2e/terminal.test.ts": [
-            {
-              "start": 1,
-              "end": 1
+              "start": 102,
+              "end": 140
             }
           ]
         },
@@ -5295,46 +1634,46 @@
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.3333333333333333,
+              "span": 0.6932797242963814,
+              "line": 0.6896551724137931
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.6666666666666666,
+              "span": 0.9230327398047099,
+              "line": 0.896551724137931
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.6666666666666666,
+              "span": 0.9230327398047099,
+              "line": 0.896551724137931
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9230327398047099,
+              "line": 0.896551724137931
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 0.9230327398047099,
+              "line": 0.896551724137931
             }
           },
           {
@@ -5342,8 +1681,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5351,8 +1690,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5360,8 +1699,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5369,8 +1708,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5378,8 +1717,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5387,8 +1726,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5396,8 +1735,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5405,8 +1744,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5414,8 +1753,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5423,8 +1762,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5432,8 +1771,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5441,8 +1780,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5450,8 +1789,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5459,8 +1798,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5468,8 +1807,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5477,8 +1816,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5486,8 +1825,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5495,8 +1834,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5504,8 +1843,8 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
@@ -5513,22 +1852,31 @@
             "coverage": {
               "file": 1.0,
               "symbol": 1.0,
-              "span": 0.2814474439977025,
-              "line": 0.1724137931034483
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 27,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.7884615384615384,
-          "symbol": 0.7692307692307693,
-          "span": 0.2164980338443866,
-          "line": 0.13262599469496028
+          "file": 0.9444444444444444,
+          "symbol": 0.9135802469135803,
+          "span": 0.940200395685749,
+          "line": 0.9361430395913154
         },
         "redundancy": {
-          "file": 0.3211678832116789,
-          "symbol": 0.15909090909090906,
-          "span": 0.040477667493796554,
-          "line": 0.04621848739495793
+          "file": 0.5185185185185186,
+          "symbol": 0.30434782608695654,
+          "span": 0.3203621262103791,
+          "line": 0.2544422507403751
         }
       },
       "fixOverlap": {
@@ -5547,35 +1895,35 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/a7dd5441f5e78ebeeb8c/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/a7dd5441f5e78ebeeb8c/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/a7dd5441f5e78ebeeb8c/home/.agents/skills/superpowers/writing-plans/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: writing-plans\ndescription: Use when you have a spec or requirements for a multi-step task, before touching code\n---\n\n# Writing Plans\n\n## Overview\n\nWrite comprehensive implementation plans assuming the engineer has zero context for our codebase and questionable taste. Document everything they need to know: which files to touch for each task, code, testing, docs they might need to check, how to test it. Give them the whole plan as bite-sized tasks. DRY. YAGNI. TDD. Frequent commits.\n\nAssume they are a skilled developer, but know almost nothing about our toolset or problem domain. Assume they don't know good test design very well.\n\n**Announce at start:** \"I'm using the writing-plans skill to create the implementation plan.\"\n\n**Context:** This should be run in a dedicated worktree (created by brainstorming skill).\n\n**Save plans to:** `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`\n- (User preferences for plan location override this default)\n\n## Scope Check\n\nIf the spec covers multiple independent subsystems, it should have been broken into sub-project specs during brainstorming. If it wasn't, suggest breaking this into separate plans \u2014 one per subsystem. Each plan should produce working, testable software on its own.\n\n## File Structure\n\nBefore defining tasks, map out which files will be created or modified and what each one is responsible for. This is where decomposition decisions get locked in.\n\n- Design units with clear boundaries and well-defined interfaces. Each file should have one clear responsibility.\n- You reason best about code you can hold in context at once, and your edits are more reliable when files are focused. Prefer smaller, focused files over large ones that do too much.\n- Files that change together should live together. Split by responsibility, not by technical layer.\n- In existing codebases, follow established patterns. If the codebase uses large files, don't unilaterally restructure - but if a file you're modifying has grown unwieldy, including a split in the plan is reasonable.\n\nThis structure informs the task decomposition. Each task should produce self-contained changes that make sense independently.\n\n## Bite-Sized Task Granularity\n\n**Each step is one action (2-5 minutes):**\n- \"Write the failing test\" - step\n- \"Run it to make sure it fails\" - step\n- \"Implement the minimal code to make the test pass\" - step\n- \"Run the tests and make sure they pass\" - step\n- \"Commit\" - step\n\n## Plan Document Header\n\n**Every plan MUST start with this header:**\n\n```markdown\n# [Feature Name] Implementation Plan\n\n> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.\n\n**Goal:** [One sentence describing what this builds]\n\n**Architecture:** [2-3 sentences about approach]\n\n**Tech Stack:** [Key technologies/libraries]\n\n---\n```\n\n## Task Structure\n\n````markdown\n### Task N: [Component Name]\n\n**Files:**\n- Create: `exact/path/to/file.py`\n- Modify: `exact/path/to/existing.py:123-145`\n- Test: `tests/exact/path/to/test.py`\n\n- [ ] **Step 1: Write the failing test**\n\n```python\ndef test_specific_behavior():\n    result = function(input)\n    assert result == expected\n```\n\n- [ ] **Step 2: Run test to verify it fails**\n\nRun: `pytest tests/path/test.py::test_name -v`\nExpected: FAIL with \"function not defined\"\n\n- [ ] **Step 3: Write minimal implementation**\n\n```python\ndef function(input):\n    return expected\n```\n\n- [ ] **Step 4: Run test to verify it passes**\n\nRun: `pytest tests/path/test.py::test_name -v`\nExpected: PASS\n\n- [ ] **Step 5: Commit**\n\n```bash\ngit add tests/path/test.py src/path/file.py\ngit commit -m \"feat: add specific feature\"\n```\n````\n\n## Remember\n- Exact file paths always\n- Complete code in plan (not \"add validation\")\n- Exact commands with expected output\n- Reference relevant skills with @ syntax\n- DRY, YAGNI, TDD, frequent commits\n\n## Plan Review Loop\n\nA\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/a7dd5441f5e78ebeeb8c/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/a7dd5441f5e78ebeeb8c/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
@@ -5798,12 +2146,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/test/unit/node/cli.test.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/test/unit/node/cli.test.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/test/unit/node/app.test.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/test/unit/node/app.test.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -5930,7 +2296,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/node/cli.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/node/cli.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -5942,17 +2317,44 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/node/app.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/node/app.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/node/app.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/node/app.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/test/unit/node/app.test.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/test/unit/node/app.test.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -5999,12 +2401,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/node/cli.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/node/cli.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/node/app.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/node/app.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",

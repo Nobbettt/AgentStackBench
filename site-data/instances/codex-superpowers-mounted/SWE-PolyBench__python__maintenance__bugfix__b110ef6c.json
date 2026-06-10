@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-12T22:27:44Z",
       "completedAt": "2026-05-12T22:31:01Z",
       "durationMs": 197033,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 717846,
@@ -25,6 +40,28 @@
         "total_tokens": 726968,
         "cache_read_input_tokens": 620672
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 30,
+        "readToolCalls": 0,
+        "editToolCalls": 1
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/keras/src/saving/saving_lib.py b/keras/src/saving/saving_lib.py\nindex 6aad62db..0d65a0b1 100644\n--- a/keras/src/saving/saving_lib.py\n+++ b/keras/src/saving/saving_lib.py\n@@ -309,14 +309,18 @@ def _load_model_from_fileobj(fileobj, custom_objects, compile, safe_mode):\n \n         all_filenames = zf.namelist()\n         weights_file_path = None\n+        extract_dir = None\n+        weights_store = None\n+        asset_store = None\n         try:\n             if _VARS_FNAME_H5 in all_filenames:\n                 if isinstance(fileobj, io.BufferedReader):\n                     # First, extract the model.weights.h5 file, then load it\n-                    # using h5py.\n-                    working_dir = pathlib.Path(fileobj.name).parent\n-                    zf.extract(_VARS_FNAME_H5, working_dir)\n-                    weights_file_path = working_dir / _VARS_FNAME_H5\n+                    # using h5py. Use a per-load temp directory so parallel\n+                    # loads of the same archive don't race on cleanup.\n+                    extract_dir = pathlib.Path(get_temp_dir())\n+                    zf.extract(_VARS_FNAME_H5, extract_dir)\n+                    weights_file_path = extract_dir / _VARS_FNAME_H5\n                     weights_store = H5IOStore(weights_file_path, mode=\"r\")\n                 else:\n                     # Fall back when `fileobj` is an `io.BytesIO`. Typically,\n@@ -346,11 +350,14 @@ def _load_model_from_fileobj(fileobj, custom_objects, compile, safe_mode):\n                 error_msgs=error_msgs,\n             )\n         finally:\n-            weights_store.close()\n+            if weights_store:\n+                weights_store.close()\n             if asset_store:\n                 asset_store.close()\n             if weights_file_path:\n                 weights_file_path.unlink()\n+            if extract_dir and file_utils.exists(extract_dir):\n+                file_utils.rmtree(extract_dir)\n \n         if failed_saveables:\n             _raise_loading_failure(error_msgs)\ndiff --git a/keras/src/saving/saving_lib_test.py b/keras/src/saving/saving_lib_test.py\nindex 91e40426..38ff1ddc 100644\n--- a/keras/src/saving/saving_lib_test.py\n+++ b/keras/src/saving/saving_lib_test.py\n@@ -2,6 +2,7 @@\n \n import json\n import os\n+import threading\n import warnings\n import zipfile\n from io import BytesIO\n@@ -659,6 +660,39 @@ class SavingTest(testing.TestCase):\n         self.assertTrue(Path(filepath).exists())\n         self.assertFalse(Path(filepath).with_name(\"model.weights.h5\").exists())\n \n+    def test_load_model_concurrently(self):\n+        model = _get_basic_functional_model()\n+        filepath = f\"{self.get_temp_dir()}/model.keras\"\n+        saving_lib.save_model(model, filepath)\n+\n+        barrier = threading.Barrier(2)\n+        original_load_state = saving_lib._load_state\n+        exceptions = []\n+\n+        def synchronized_load_state(*args, **kwargs):\n+            barrier.wait(timeout=5)\n+            return original_load_state(*args, **kwargs)\n+\n+        def load_model():\n+            try:\n+                saving_lib.load_model(filepath)\n+            except Exception as e:\n+                exceptions.append(e)\n+\n+        with mock.patch.object(\n+            saving_lib,\n+            \"_load_state\",\n+            side_effect=synchronized_load_state,\n+        ):\n+            threads = [threading.Thread(target=load_model) for _ in range(2)]\n+            for thread in threads:\n+                thread.start()\n+            for thread in threads:\n+                thread.join()\n+\n+        self.assertEmpty(exceptions)\n+        self.assertFalse(Path(filepath).with_name(\"model.weights.h5\").exists())\n+\n \n @pytest.mark.requires_trainable_backend\n class SavingAPITest(testing.TestCase):\n",
       "finalOutput": {
         "status": "completed",
@@ -77,7 +114,133 @@
             "files": [
               "keras/src/saving/saving_lib.py"
             ],
+            "spans": {
+              "keras/src/saving/saving_lib.py": [
+                {
+                  "start": 280,
+                  "end": 370
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib_test.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib_test.py": [
+                {
+                  "start": 620,
+                  "end": 690
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib.py": [
+                {
+                  "start": 208,
+                  "end": 280
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib.py": [
+                {
+                  "start": 690,
+                  "end": 760
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib.py"
+            ],
             "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib.py": [
+                {
+                  "start": 752,
+                  "end": 860
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib.py": [
+                {
+                  "start": 900,
+                  "end": 930
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib_test.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib_test.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib_test.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib_test.py": [
+                {
+                  "start": 120,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -89,1613 +252,41 @@
           },
           {
             "files": [
-              "keras/src/backend/common/keras_tensor_test.py",
-              "keras/src/backend/common/variables_test.py",
-              "keras/src/backend/tensorflow/distribute_test.py",
-              "keras/src/backend/tensorflow/saved_model_test.py",
-              "keras/src/backend/tests/compute_output_spec_test.py",
-              "keras/src/callbacks/backup_and_restore_test.py",
-              "keras/src/callbacks/model_checkpoint_test.py",
-              "keras/src/callbacks/tensorboard_test.py",
-              "keras/src/constraints/constraints_test.py",
-              "keras/src/distribution/distribution_lib_test.py",
-              "keras/src/dtype_policies/dtype_policy_map_test.py",
-              "keras/src/export/export_lib_test.py",
-              "keras/src/layers/attention/multi_head_attention_test.py",
-              "keras/src/layers/convolutional/conv_test.py",
-              "keras/src/layers/core/dense_test.py",
-              "keras/src/layers/core/einsum_dense_test.py",
-              "keras/src/layers/core/embedding_test.py",
-              "keras/src/layers/layer_test.py",
-              "keras/src/layers/preprocessing/feature_space_test.py",
-              "keras/src/layers/regularization/activity_regularization_test.py",
-              "keras/src/layers/rnn/stacked_rnn_cells_test.py",
-              "keras/src/legacy/saving/legacy_h5_format_test.py",
-              "keras/src/metrics/confusion_metrics_test.py",
-              "keras/src/metrics/metric_test.py",
-              "keras/src/models/cloning_test.py",
-              "keras/src/models/functional_test.py",
-              "keras/src/models/sequential_test.py",
-              "keras/src/ops/core_test.py",
-              "keras/src/ops/numpy_test.py",
-              "keras/src/optimizers/optimizer_test.py",
-              "keras/src/random/random_test.py",
-              "keras/src/random/seed_generator_test.py",
-              "keras/src/saving/saving_lib_test.py",
-              "keras/src/saving/serialization_lib_test.py",
-              "keras/src/testing/test_case.py",
-              "keras/src/testing/test_utils_test.py",
-              "keras/src/trainers/epoch_iterator_test.py",
-              "keras/src/trainers/trainer_test.py",
-              "keras/src/tree/tree_test.py",
-              "keras/src/utils/audio_dataset_utils_test.py",
-              "keras/src/utils/dtype_utils_test.py",
-              "keras/src/utils/file_utils_test.py",
-              "keras/src/utils/image_dataset_utils_test.py",
-              "keras/src/utils/io_utils_test.py",
-              "keras/src/utils/jax_layer_test.py",
-              "keras/src/utils/text_dataset_utils_test.py",
-              "keras/src/utils/timeseries_dataset_utils_test.py",
-              "keras/src/utils/torch_utils_test.py",
-              "keras/src/utils/tracking_test.py"
+              "keras/src/saving/saving_lib.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib.py": [
+                {
+                  "start": 300,
+                  "end": 360
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib_test.py"
             ],
             "spans": {
               "keras/src/saving/saving_lib_test.py": [
                 {
-                  "start": 252,
-                  "end": 252
-                },
-                {
-                  "start": 343,
-                  "end": 343
-                },
-                {
-                  "start": 344,
-                  "end": 344
-                },
-                {
-                  "start": 384,
-                  "end": 384
-                },
-                {
-                  "start": 661,
-                  "end": 661
-                },
-                {
-                  "start": 693,
-                  "end": 693
-                },
-                {
-                  "start": 694,
-                  "end": 694
-                },
-                {
-                  "start": 252,
-                  "end": 252
-                },
-                {
-                  "start": 343,
-                  "end": 343
-                },
-                {
-                  "start": 344,
-                  "end": 344
-                },
-                {
-                  "start": 384,
-                  "end": 384
-                },
-                {
-                  "start": 661,
-                  "end": 661
-                },
-                {
-                  "start": 693,
-                  "end": 693
-                },
-                {
-                  "start": 694,
-                  "end": 694
+                  "start": 640,
+                  "end": 675
                 }
-              ],
-              "keras/src/random/seed_generator_test.py": [
-                {
-                  "start": 28,
-                  "end": 28
-                }
-              ],
-              "keras/src/export/export_lib_test.py": [
-                {
-                  "start": 253,
-                  "end": 253
-                },
-                {
-                  "start": 254,
-                  "end": 254
-                },
-                {
-                  "start": 255,
-                  "end": 255
-                },
-                {
-                  "start": 436,
-                  "end": 436
-                },
-                {
-                  "start": 437,
-                  "end": 437
-                },
-                {
-                  "start": 438,
-                  "end": 438
-                },
-                {
-                  "start": 454,
-                  "end": 454
-                },
-                {
-                  "start": 456,
-                  "end": 456
-                },
-                {
-                  "start": 457,
-                  "end": 457
-                },
-                {
-                  "start": 458,
-                  "end": 458
-                },
-                {
-                  "start": 506,
-                  "end": 506
-                },
-                {
-                  "start": 508,
-                  "end": 508
-                },
-                {
-                  "start": 509,
-                  "end": 509
-                },
-                {
-                  "start": 510,
-                  "end": 510
-                },
-                {
-                  "start": 581,
-                  "end": 581
-                },
-                {
-                  "start": 583,
-                  "end": 583
-                },
-                {
-                  "start": 584,
-                  "end": 584
-                },
-                {
-                  "start": 585,
-                  "end": 585
-                },
-                {
-                  "start": 788,
-                  "end": 788
-                },
-                {
-                  "start": 791,
-                  "end": 791
-                },
-                {
-                  "start": 907,
-                  "end": 907
-                },
-                {
-                  "start": 908,
-                  "end": 908
-                },
-                {
-                  "start": 911,
-                  "end": 911
-                },
-                {
-                  "start": 936,
-                  "end": 936
-                },
-                {
-                  "start": 937,
-                  "end": 937
-                },
-                {
-                  "start": 940,
-                  "end": 940
-                }
-              ],
-              "keras/src/dtype_policies/dtype_policy_map_test.py": [
-                {
-                  "start": 97,
-                  "end": 97
-                },
-                {
-                  "start": 193,
-                  "end": 193
-                },
-                {
-                  "start": 197,
-                  "end": 197
-                },
-                {
-                  "start": 205,
-                  "end": 205
-                },
-                {
-                  "start": 245,
-                  "end": 245
-                }
-              ],
-              "keras/src/ops/core_test.py": [
-                {
-                  "start": 674,
-                  "end": 674
-                },
-                {
-                  "start": 676,
-                  "end": 676
-                },
-                {
-                  "start": 1027,
-                  "end": 1027
-                },
-                {
-                  "start": 1032,
-                  "end": 1032
-                },
-                {
-                  "start": 1044,
-                  "end": 1044
-                },
-                {
-                  "start": 1047,
-                  "end": 1047
-                },
-                {
-                  "start": 1058,
-                  "end": 1058
-                },
-                {
-                  "start": 1069,
-                  "end": 1069
-                }
-              ],
-              "keras/src/ops/numpy_test.py": [
-                {
-                  "start": 294,
-                  "end": 294
-                },
-                {
-                  "start": 300,
-                  "end": 300
-                },
-                {
-                  "start": 305,
-                  "end": 305
-                },
-                {
-                  "start": 313,
-                  "end": 313
-                },
-                {
-                  "start": 328,
-                  "end": 328
-                },
-                {
-                  "start": 340,
-                  "end": 340
-                },
-                {
-                  "start": 1091,
-                  "end": 1091
-                },
-                {
-                  "start": 1097,
-                  "end": 1097
-                },
-                {
-                  "start": 1322,
-                  "end": 1322
-                }
-              ],
-              "keras/src/saving/serialization_lib_test.py": [
-                {
-                  "start": 344,
-                  "end": 344
-                }
-              ],
-              "keras/src/random/random_test.py": [
-                {
-                  "start": 230,
-                  "end": 230
-                },
-                {
-                  "start": 237,
-                  "end": 237
-                }
-              ],
-              "keras/src/utils/timeseries_dataset_utils_test.py": [
-                {
-                  "start": 17,
-                  "end": 17
-                },
-                {
-                  "start": 42,
-                  "end": 42
-                },
-                {
-                  "start": 110,
-                  "end": 110
-                },
-                {
-                  "start": 134,
-                  "end": 134
-                }
-              ],
-              "keras/src/callbacks/tensorboard_test.py": [
-                {
-                  "start": 687,
-                  "end": 687
-                }
-              ],
-              "keras/src/callbacks/model_checkpoint_test.py": [
-                {
-                  "start": 176,
-                  "end": 176
-                },
-                {
-                  "start": 205,
-                  "end": 205
-                },
-                {
-                  "start": 215,
-                  "end": 215
-                },
-                {
-                  "start": 216,
-                  "end": 216
-                },
-                {
-                  "start": 218,
-                  "end": 218
-                },
-                {
-                  "start": 219,
-                  "end": 219
-                },
-                {
-                  "start": 221,
-                  "end": 221
-                },
-                {
-                  "start": 222,
-                  "end": 222
-                },
-                {
-                  "start": 238,
-                  "end": 238
-                },
-                {
-                  "start": 248,
-                  "end": 248
-                },
-                {
-                  "start": 249,
-                  "end": 249
-                },
-                {
-                  "start": 251,
-                  "end": 251
-                },
-                {
-                  "start": 252,
-                  "end": 252
-                },
-                {
-                  "start": 254,
-                  "end": 254
-                },
-                {
-                  "start": 255,
-                  "end": 255
-                },
-                {
-                  "start": 423,
-                  "end": 423
-                },
-                {
-                  "start": 449,
-                  "end": 449
-                }
-              ],
-              "keras/src/callbacks/backup_and_restore_test.py": [
-                {
-                  "start": 75,
-                  "end": 75
-                },
-                {
-                  "start": 115,
-                  "end": 115
-                },
-                {
-                  "start": 155,
-                  "end": 155
-                },
-                {
-                  "start": 170,
-                  "end": 170
-                }
-              ],
-              "keras/src/utils/tracking_test.py": [
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 32,
-                  "end": 32
-                },
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 36,
-                  "end": 36
-                },
-                {
-                  "start": 37,
-                  "end": 37
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 48,
-                  "end": 48
-                },
-                {
-                  "start": 51,
-                  "end": 51
-                },
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 75,
-                  "end": 75
-                },
-                {
-                  "start": 97,
-                  "end": 97
-                }
-              ],
-              "keras/src/utils/audio_dataset_utils_test.py": [
-                {
-                  "start": 100,
-                  "end": 100
-                },
-                {
-                  "start": 113,
-                  "end": 113
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 178,
-                  "end": 178
-                },
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 208,
-                  "end": 208
-                },
-                {
-                  "start": 219,
-                  "end": 219
-                },
-                {
-                  "start": 232,
-                  "end": 232
-                }
-              ],
-              "keras/src/utils/text_dataset_utils_test.py": [
-                {
-                  "start": 79,
-                  "end": 79
-                },
-                {
-                  "start": 90,
-                  "end": 90
-                },
-                {
-                  "start": 100,
-                  "end": 100
-                },
-                {
-                  "start": 138,
-                  "end": 138
-                },
-                {
-                  "start": 148,
-                  "end": 148
-                },
-                {
-                  "start": 164,
-                  "end": 164
-                },
-                {
-                  "start": 174,
-                  "end": 174
-                },
-                {
-                  "start": 188,
-                  "end": 188
-                },
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 200,
-                  "end": 200
-                }
-              ],
-              "keras/src/utils/torch_utils_test.py": [
-                {
-                  "start": 90,
-                  "end": 90
-                }
-              ],
-              "keras/src/utils/jax_layer_test.py": [
-                {
-                  "start": 591,
-                  "end": 591
-                }
-              ],
-              "keras/src/distribution/distribution_lib_test.py": [
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 357,
-                  "end": 357
-                },
-                {
-                  "start": 415,
-                  "end": 415
-                },
-                {
-                  "start": 419,
-                  "end": 419
-                },
-                {
-                  "start": 424,
-                  "end": 424
-                }
-              ],
-              "keras/src/legacy/saving/legacy_h5_format_test.py": [
-                {
-                  "start": 497,
-                  "end": 497
-                }
-              ],
-              "keras/src/utils/dtype_utils_test.py": [
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 59,
-                  "end": 59
-                }
-              ],
-              "keras/src/utils/io_utils_test.py": [
-                {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                }
-              ],
-              "keras/src/utils/image_dataset_utils_test.py": [
-                {
-                  "start": 110,
-                  "end": 110
-                },
-                {
-                  "start": 120,
-                  "end": 120
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                },
-                {
-                  "start": 193,
-                  "end": 193
-                },
-                {
-                  "start": 206,
-                  "end": 206
-                },
-                {
-                  "start": 222,
-                  "end": 222
-                },
-                {
-                  "start": 237,
-                  "end": 237
-                },
-                {
-                  "start": 252,
-                  "end": 252
-                },
-                {
-                  "start": 269,
-                  "end": 269
-                },
-                {
-                  "start": 284,
-                  "end": 284
-                },
-                {
-                  "start": 287,
-                  "end": 287
-                },
-                {
-                  "start": 317,
-                  "end": 317
-                },
-                {
-                  "start": 332,
-                  "end": 332
-                },
-                {
-                  "start": 370,
-                  "end": 370
-                },
-                {
-                  "start": 386,
-                  "end": 386
-                }
-              ],
-              "keras/src/utils/file_utils_test.py": [
-                {
-                  "start": 283,
-                  "end": 283
-                },
-                {
-                  "start": 294,
-                  "end": 294
-                },
-                {
-                  "start": 307,
-                  "end": 307
-                },
-                {
-                  "start": 522,
-                  "end": 522
-                },
-                {
-                  "start": 555,
-                  "end": 555
-                },
-                {
-                  "start": 572,
-                  "end": 572
-                },
-                {
-                  "start": 587,
-                  "end": 587
-                },
-                {
-                  "start": 588,
-                  "end": 588
-                },
-                {
-                  "start": 597,
-                  "end": 597
-                },
-                {
-                  "start": 598,
-                  "end": 598
-                },
-                {
-                  "start": 604,
-                  "end": 604
-                },
-                {
-                  "start": 678,
-                  "end": 678
-                },
-                {
-                  "start": 725,
-                  "end": 725
-                },
-                {
-                  "start": 726,
-                  "end": 726
-                },
-                {
-                  "start": 729,
-                  "end": 729
-                },
-                {
-                  "start": 730,
-                  "end": 730
-                },
-                {
-                  "start": 731,
-                  "end": 731
-                },
-                {
-                  "start": 732,
-                  "end": 732
-                },
-                {
-                  "start": 733,
-                  "end": 733
-                }
-              ],
-              "keras/src/models/sequential_test.py": [
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 227,
-                  "end": 227
-                },
-                {
-                  "start": 232,
-                  "end": 232
-                },
-                {
-                  "start": 241,
-                  "end": 241
-                },
-                {
-                  "start": 253,
-                  "end": 253
-                }
-              ],
-              "keras/src/models/functional_test.py": [
-                {
-                  "start": 366,
-                  "end": 366
-                },
-                {
-                  "start": 369,
-                  "end": 369
-                },
-                {
-                  "start": 374,
-                  "end": 374
-                },
-                {
-                  "start": 381,
-                  "end": 381
-                },
-                {
-                  "start": 391,
-                  "end": 391
-                }
-              ],
-              "keras/src/models/cloning_test.py": [
-                {
-                  "start": 131,
-                  "end": 131
-                },
-                {
-                  "start": 170,
-                  "end": 170
-                },
-                {
-                  "start": 171,
-                  "end": 171
-                },
-                {
-                  "start": 192,
-                  "end": 192
-                },
-                {
-                  "start": 193,
-                  "end": 193
-                },
-                {
-                  "start": 218,
-                  "end": 218
-                }
-              ],
-              "keras/src/testing/test_utils_test.py": [
-                {
-                  "start": 84,
-                  "end": 84
-                },
-                {
-                  "start": 85,
-                  "end": 85
-                },
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 87,
-                  "end": 87
-                },
-                {
-                  "start": 212,
-                  "end": 212
-                },
-                {
-                  "start": 213,
-                  "end": 213
-                }
-              ],
-              "keras/src/testing/test_case.py": [
-                {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 97,
-                  "end": 97
-                },
-                {
-                  "start": 289,
-                  "end": 289
-                },
-                {
-                  "start": 295,
-                  "end": 295
-                },
-                {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 307,
-                  "end": 307
-                },
-                {
-                  "start": 318,
-                  "end": 318
-                },
-                {
-                  "start": 446,
-                  "end": 446
-                }
-              ],
-              "keras/src/optimizers/optimizer_test.py": [
-                {
-                  "start": 318,
-                  "end": 318
-                },
-                {
-                  "start": 322,
-                  "end": 322
-                }
-              ],
-              "keras/src/trainers/epoch_iterator_test.py": [
-                {
-                  "start": 48,
-                  "end": 48
-                }
-              ],
-              "keras/src/backend/common/variables_test.py": [
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 106,
-                  "end": 106
-                },
-                {
-                  "start": 112,
-                  "end": 112
-                },
-                {
-                  "start": 247,
-                  "end": 247
-                },
-                {
-                  "start": 653,
-                  "end": 653
-                },
-                {
-                  "start": 654,
-                  "end": 654
-                },
-                {
-                  "start": 655,
-                  "end": 655
-                }
-              ],
-              "keras/src/backend/tests/compute_output_spec_test.py": [
-                {
-                  "start": 96,
-                  "end": 96
-                },
-                {
-                  "start": 114,
-                  "end": 114
-                }
-              ],
-              "keras/src/backend/common/keras_tensor_test.py": [
-                {
-                  "start": 75,
-                  "end": 75
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                }
-              ],
-              "keras/src/backend/tensorflow/distribute_test.py": [
-                {
-                  "start": 82,
-                  "end": 82
-                }
-              ],
-              "keras/src/backend/tensorflow/saved_model_test.py": [
-                {
-                  "start": 317,
-                  "end": 317
-                }
-              ],
-              "keras/src/trainers/trainer_test.py": [
-                {
-                  "start": 211,
-                  "end": 211
-                },
-                {
-                  "start": 238,
-                  "end": 238
-                },
-                {
-                  "start": 239,
-                  "end": 239
-                },
-                {
-                  "start": 461,
-                  "end": 461
-                },
-                {
-                  "start": 1172,
-                  "end": 1172
-                },
-                {
-                  "start": 1180,
-                  "end": 1180
-                },
-                {
-                  "start": 1481,
-                  "end": 1481
-                }
-              ],
-              "keras/src/tree/tree_test.py": [
-                {
-                  "start": 43,
-                  "end": 43
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 45,
-                  "end": 45
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 54,
-                  "end": 54
-                }
-              ],
-              "keras/src/metrics/metric_test.py": [
-                {
-                  "start": 119,
-                  "end": 119
-                }
-              ],
-              "keras/src/constraints/constraints_test.py": [
-                {
-                  "start": 48,
-                  "end": 48
-                },
-                {
-                  "start": 49,
-                  "end": 49
-                }
-              ],
-              "keras/src/metrics/confusion_metrics_test.py": [
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 26,
-                  "end": 26
-                },
-                {
-                  "start": 114,
-                  "end": 114
-                },
-                {
-                  "start": 120,
-                  "end": 120
-                },
-                {
-                  "start": 203,
-                  "end": 203
-                },
-                {
-                  "start": 209,
-                  "end": 209
-                },
-                {
-                  "start": 292,
-                  "end": 292
-                },
-                {
-                  "start": 298,
-                  "end": 298
-                },
-                {
-                  "start": 383,
-                  "end": 383
-                },
-                {
-                  "start": 395,
-                  "end": 395
-                },
-                {
-                  "start": 549,
-                  "end": 549
-                },
-                {
-                  "start": 561,
-                  "end": 561
-                },
-                {
-                  "start": 712,
-                  "end": 712
-                },
-                {
-                  "start": 722,
-                  "end": 722
-                },
-                {
-                  "start": 800,
-                  "end": 800
-                },
-                {
-                  "start": 810,
-                  "end": 810
-                },
-                {
-                  "start": 886,
-                  "end": 886
-                },
-                {
-                  "start": 894,
-                  "end": 894
-                },
-                {
-                  "start": 974,
-                  "end": 974
-                },
-                {
-                  "start": 982,
-                  "end": 982
-                },
-                {
-                  "start": 1175,
-                  "end": 1175
-                },
-                {
-                  "start": 1192,
-                  "end": 1192
-                },
-                {
-                  "start": 1216,
-                  "end": 1216
-                },
-                {
-                  "start": 1230,
-                  "end": 1230
-                }
-              ],
-              "keras/src/layers/layer_test.py": [
-                {
-                  "start": 214,
-                  "end": 214
-                },
-                {
-                  "start": 216,
-                  "end": 216
-                },
-                {
-                  "start": 217,
-                  "end": 217
-                },
-                {
-                  "start": 220,
-                  "end": 220
-                },
-                {
-                  "start": 222,
-                  "end": 222
-                },
-                {
-                  "start": 223,
-                  "end": 223
-                },
-                {
-                  "start": 226,
-                  "end": 226
-                },
-                {
-                  "start": 228,
-                  "end": 228
-                },
-                {
-                  "start": 229,
-                  "end": 229
-                },
-                {
-                  "start": 259,
-                  "end": 259
-                },
-                {
-                  "start": 260,
-                  "end": 260
-                },
-                {
-                  "start": 261,
-                  "end": 261
-                },
-                {
-                  "start": 262,
-                  "end": 262
-                },
-                {
-                  "start": 267,
-                  "end": 267
-                },
-                {
-                  "start": 268,
-                  "end": 268
-                },
-                {
-                  "start": 269,
-                  "end": 269
-                },
-                {
-                  "start": 270,
-                  "end": 270
-                },
-                {
-                  "start": 275,
-                  "end": 275
-                },
-                {
-                  "start": 276,
-                  "end": 276
-                },
-                {
-                  "start": 277,
-                  "end": 277
-                },
-                {
-                  "start": 278,
-                  "end": 278
-                },
-                {
-                  "start": 291,
-                  "end": 291
-                },
-                {
-                  "start": 304,
-                  "end": 304
-                },
-                {
-                  "start": 308,
-                  "end": 308
-                },
-                {
-                  "start": 317,
-                  "end": 317
-                },
-                {
-                  "start": 322,
-                  "end": 322
-                },
-                {
-                  "start": 328,
-                  "end": 328
-                },
-                {
-                  "start": 339,
-                  "end": 339
-                },
-                {
-                  "start": 345,
-                  "end": 345
-                },
-                {
-                  "start": 351,
-                  "end": 351
-                },
-                {
-                  "start": 357,
-                  "end": 357
-                },
-                {
-                  "start": 695,
-                  "end": 695
-                },
-                {
-                  "start": 747,
-                  "end": 747
-                },
-                {
-                  "start": 748,
-                  "end": 748
-                },
-                {
-                  "start": 952,
-                  "end": 952
-                },
-                {
-                  "start": 953,
-                  "end": 953
-                },
-                {
-                  "start": 954,
-                  "end": 954
-                },
-                {
-                  "start": 955,
-                  "end": 955
-                },
-                {
-                  "start": 956,
-                  "end": 956
-                },
-                {
-                  "start": 957,
-                  "end": 957
-                },
-                {
-                  "start": 961,
-                  "end": 961
-                },
-                {
-                  "start": 962,
-                  "end": 962
-                },
-                {
-                  "start": 963,
-                  "end": 963
-                },
-                {
-                  "start": 964,
-                  "end": 964
-                },
-                {
-                  "start": 965,
-                  "end": 965
-                }
-              ],
-              "keras/src/layers/core/einsum_dense_test.py": [
-                {
-                  "start": 299,
-                  "end": 299
-                },
-                {
-                  "start": 300,
-                  "end": 300
-                },
-                {
-                  "start": 302,
-                  "end": 302
-                },
-                {
-                  "start": 568,
-                  "end": 568
-                },
-                {
-                  "start": 636,
-                  "end": 636
-                },
-                {
-                  "start": 637,
-                  "end": 637
-                },
-                {
-                  "start": 639,
-                  "end": 639
-                },
-                {
-                  "start": 679,
-                  "end": 679
-                },
-                {
-                  "start": 699,
-                  "end": 699
-                },
-                {
-                  "start": 700,
-                  "end": 700
-                },
-                {
-                  "start": 703,
-                  "end": 703
-                },
-                {
-                  "start": 856,
-                  "end": 856
-                },
-                {
-                  "start": 857,
-                  "end": 857
-                },
-                {
-                  "start": 895,
-                  "end": 895
-                },
-                {
-                  "start": 896,
-                  "end": 896
-                },
-                {
-                  "start": 899,
-                  "end": 899
-                }
-              ],
-              "keras/src/layers/attention/multi_head_attention_test.py": [
-                {
-                  "start": 311,
-                  "end": 311
-                },
-                {
-                  "start": 312,
-                  "end": 312
-                },
-                {
-                  "start": 374,
-                  "end": 374
-                },
-                {
-                  "start": 379,
-                  "end": 379
-                }
-              ],
-              "keras/src/layers/core/dense_test.py": [
-                {
-                  "start": 213,
-                  "end": 213
-                },
-                {
-                  "start": 214,
-                  "end": 214
-                },
-                {
-                  "start": 216,
-                  "end": 216
-                },
-                {
-                  "start": 448,
-                  "end": 448
-                },
-                {
-                  "start": 508,
-                  "end": 508
-                },
-                {
-                  "start": 509,
-                  "end": 509
-                },
-                {
-                  "start": 511,
-                  "end": 511
-                },
-                {
-                  "start": 551,
-                  "end": 551
-                },
-                {
-                  "start": 571,
-                  "end": 571
-                },
-                {
-                  "start": 572,
-                  "end": 572
-                },
-                {
-                  "start": 575,
-                  "end": 575
-                },
-                {
-                  "start": 718,
-                  "end": 718
-                },
-                {
-                  "start": 719,
-                  "end": 719
-                },
-                {
-                  "start": 757,
-                  "end": 757
-                },
-                {
-                  "start": 758,
-                  "end": 758
-                },
-                {
-                  "start": 761,
-                  "end": 761
-                }
-              ],
-              "keras/src/layers/core/embedding_test.py": [
-                {
-                  "start": 123,
-                  "end": 123
-                },
-                {
-                  "start": 124,
-                  "end": 124
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 340,
-                  "end": 340
-                },
-                {
-                  "start": 380,
-                  "end": 380
-                },
-                {
-                  "start": 381,
-                  "end": 381
-                },
-                {
-                  "start": 383,
-                  "end": 383
-                },
-                {
-                  "start": 424,
-                  "end": 424
-                },
-                {
-                  "start": 444,
-                  "end": 444
-                },
-                {
-                  "start": 445,
-                  "end": 445
-                },
-                {
-                  "start": 448,
-                  "end": 448
-                }
-              ],
-              "keras/src/layers/preprocessing/feature_space_test.py": [
-                {
-                  "start": 145,
-                  "end": 145
-                },
-                {
-                  "start": 152,
-                  "end": 152
-                },
-                {
-                  "start": 160,
-                  "end": 160
-                },
-                {
-                  "start": 192,
-                  "end": 192
-                },
-                {
-                  "start": 271,
-                  "end": 271
-                },
-                {
-                  "start": 279,
-                  "end": 279
-                },
-                {
-                  "start": 288,
-                  "end": 288
-                },
-                {
-                  "start": 322,
-                  "end": 322
-                }
-              ],
-              "keras/src/layers/convolutional/conv_test.py": [
-                {
-                  "start": 653,
-                  "end": 653
-                },
-                {
-                  "start": 654,
-                  "end": 654
-                },
-                {
-                  "start": 656,
-                  "end": 656
-                }
-              ],
-              "keras/src/layers/regularization/activity_regularization_test.py": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "keras/src/layers/rnn/stacked_rnn_cells_test.py": [
-                {
-                  "start": 264,
-                  "end": 264
-                },
-                {
-                  "start": 272,
-                  "end": 272
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib_test.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib_test.py": [
+                {
+                  "start": 660,
+                  "end": 705
                 }
               ]
             },
@@ -1707,1600 +298,38 @@
             ],
             "spans": {},
             "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/utils/file_utils.py"
+            ],
+            "spans": {
+              "keras/src/utils/file_utils.py": [
+                {
+                  "start": 421,
+                  "end": 470
+                }
+              ]
+            },
+            "symbols": {}
           }
         ],
         "predFiles": [
-          "keras/src/backend/common/keras_tensor_test.py",
-          "keras/src/backend/common/variables_test.py",
-          "keras/src/backend/tensorflow/distribute_test.py",
-          "keras/src/backend/tensorflow/saved_model_test.py",
-          "keras/src/backend/tests/compute_output_spec_test.py",
-          "keras/src/callbacks/backup_and_restore_test.py",
-          "keras/src/callbacks/model_checkpoint_test.py",
-          "keras/src/callbacks/tensorboard_test.py",
-          "keras/src/constraints/constraints_test.py",
-          "keras/src/distribution/distribution_lib_test.py",
-          "keras/src/dtype_policies/dtype_policy_map_test.py",
-          "keras/src/export/export_lib_test.py",
-          "keras/src/layers/attention/multi_head_attention_test.py",
-          "keras/src/layers/convolutional/conv_test.py",
-          "keras/src/layers/core/dense_test.py",
-          "keras/src/layers/core/einsum_dense_test.py",
-          "keras/src/layers/core/embedding_test.py",
-          "keras/src/layers/layer_test.py",
-          "keras/src/layers/preprocessing/feature_space_test.py",
-          "keras/src/layers/regularization/activity_regularization_test.py",
-          "keras/src/layers/rnn/stacked_rnn_cells_test.py",
-          "keras/src/legacy/saving/legacy_h5_format_test.py",
-          "keras/src/metrics/confusion_metrics_test.py",
-          "keras/src/metrics/metric_test.py",
-          "keras/src/models/cloning_test.py",
-          "keras/src/models/functional_test.py",
-          "keras/src/models/sequential_test.py",
-          "keras/src/ops/core_test.py",
-          "keras/src/ops/numpy_test.py",
-          "keras/src/optimizers/optimizer_test.py",
-          "keras/src/random/random_test.py",
-          "keras/src/random/seed_generator_test.py",
           "keras/src/saving/saving_lib.py",
           "keras/src/saving/saving_lib_test.py",
-          "keras/src/saving/serialization_lib_test.py",
-          "keras/src/testing/test_case.py",
-          "keras/src/testing/test_utils_test.py",
-          "keras/src/trainers/epoch_iterator_test.py",
-          "keras/src/trainers/trainer_test.py",
-          "keras/src/tree/tree_test.py",
-          "keras/src/utils/audio_dataset_utils_test.py",
-          "keras/src/utils/dtype_utils_test.py",
-          "keras/src/utils/file_utils.py",
-          "keras/src/utils/file_utils_test.py",
-          "keras/src/utils/image_dataset_utils_test.py",
-          "keras/src/utils/io_utils_test.py",
-          "keras/src/utils/jax_layer_test.py",
-          "keras/src/utils/text_dataset_utils_test.py",
-          "keras/src/utils/timeseries_dataset_utils_test.py",
-          "keras/src/utils/torch_utils_test.py",
-          "keras/src/utils/tracking_test.py"
+          "keras/src/utils/file_utils.py"
         ],
         "predSpans": {
-          "keras/src/saving/saving_lib_test.py": [
-            {
-              "start": 252,
-              "end": 252
-            },
-            {
-              "start": 343,
-              "end": 343
-            },
-            {
-              "start": 344,
-              "end": 344
-            },
-            {
-              "start": 384,
-              "end": 384
-            },
-            {
-              "start": 652,
-              "end": 694
-            },
-            {
-              "start": 661,
-              "end": 661
-            },
-            {
-              "start": 693,
-              "end": 693
-            },
-            {
-              "start": 694,
-              "end": 694
-            }
-          ],
-          "keras/src/random/seed_generator_test.py": [
-            {
-              "start": 28,
-              "end": 28
-            }
-          ],
-          "keras/src/export/export_lib_test.py": [
-            {
-              "start": 253,
-              "end": 253
-            },
-            {
-              "start": 254,
-              "end": 254
-            },
-            {
-              "start": 255,
-              "end": 255
-            },
-            {
-              "start": 436,
-              "end": 436
-            },
-            {
-              "start": 437,
-              "end": 437
-            },
-            {
-              "start": 438,
-              "end": 438
-            },
-            {
-              "start": 454,
-              "end": 454
-            },
-            {
-              "start": 456,
-              "end": 456
-            },
-            {
-              "start": 457,
-              "end": 457
-            },
-            {
-              "start": 458,
-              "end": 458
-            },
-            {
-              "start": 506,
-              "end": 506
-            },
-            {
-              "start": 508,
-              "end": 508
-            },
-            {
-              "start": 509,
-              "end": 509
-            },
-            {
-              "start": 510,
-              "end": 510
-            },
-            {
-              "start": 581,
-              "end": 581
-            },
-            {
-              "start": 583,
-              "end": 583
-            },
-            {
-              "start": 584,
-              "end": 584
-            },
-            {
-              "start": 585,
-              "end": 585
-            },
-            {
-              "start": 788,
-              "end": 788
-            },
-            {
-              "start": 791,
-              "end": 791
-            },
-            {
-              "start": 907,
-              "end": 907
-            },
-            {
-              "start": 908,
-              "end": 908
-            },
-            {
-              "start": 911,
-              "end": 911
-            },
-            {
-              "start": 936,
-              "end": 936
-            },
-            {
-              "start": 937,
-              "end": 937
-            },
-            {
-              "start": 940,
-              "end": 940
-            }
-          ],
-          "keras/src/dtype_policies/dtype_policy_map_test.py": [
-            {
-              "start": 97,
-              "end": 97
-            },
-            {
-              "start": 193,
-              "end": 193
-            },
-            {
-              "start": 197,
-              "end": 197
-            },
-            {
-              "start": 205,
-              "end": 205
-            },
-            {
-              "start": 245,
-              "end": 245
-            }
-          ],
-          "keras/src/ops/core_test.py": [
-            {
-              "start": 674,
-              "end": 674
-            },
-            {
-              "start": 676,
-              "end": 676
-            },
-            {
-              "start": 1027,
-              "end": 1027
-            },
-            {
-              "start": 1032,
-              "end": 1032
-            },
-            {
-              "start": 1044,
-              "end": 1044
-            },
-            {
-              "start": 1047,
-              "end": 1047
-            },
-            {
-              "start": 1058,
-              "end": 1058
-            },
-            {
-              "start": 1069,
-              "end": 1069
-            }
-          ],
-          "keras/src/ops/numpy_test.py": [
-            {
-              "start": 294,
-              "end": 294
-            },
-            {
-              "start": 300,
-              "end": 300
-            },
-            {
-              "start": 305,
-              "end": 305
-            },
-            {
-              "start": 313,
-              "end": 313
-            },
-            {
-              "start": 328,
-              "end": 328
-            },
-            {
-              "start": 340,
-              "end": 340
-            },
-            {
-              "start": 1091,
-              "end": 1091
-            },
-            {
-              "start": 1097,
-              "end": 1097
-            },
-            {
-              "start": 1322,
-              "end": 1322
-            }
-          ],
-          "keras/src/saving/serialization_lib_test.py": [
-            {
-              "start": 344,
-              "end": 344
-            }
-          ],
-          "keras/src/random/random_test.py": [
-            {
-              "start": 230,
-              "end": 230
-            },
-            {
-              "start": 237,
-              "end": 237
-            }
-          ],
-          "keras/src/utils/timeseries_dataset_utils_test.py": [
-            {
-              "start": 17,
-              "end": 17
-            },
-            {
-              "start": 42,
-              "end": 42
-            },
-            {
-              "start": 110,
-              "end": 110
-            },
-            {
-              "start": 134,
-              "end": 134
-            }
-          ],
-          "keras/src/callbacks/tensorboard_test.py": [
-            {
-              "start": 687,
-              "end": 687
-            }
-          ],
-          "keras/src/callbacks/model_checkpoint_test.py": [
-            {
-              "start": 176,
-              "end": 176
-            },
-            {
-              "start": 205,
-              "end": 205
-            },
-            {
-              "start": 215,
-              "end": 215
-            },
-            {
-              "start": 216,
-              "end": 216
-            },
-            {
-              "start": 218,
-              "end": 218
-            },
-            {
-              "start": 219,
-              "end": 219
-            },
-            {
-              "start": 221,
-              "end": 221
-            },
-            {
-              "start": 222,
-              "end": 222
-            },
-            {
-              "start": 238,
-              "end": 238
-            },
-            {
-              "start": 248,
-              "end": 248
-            },
-            {
-              "start": 249,
-              "end": 249
-            },
-            {
-              "start": 251,
-              "end": 251
-            },
-            {
-              "start": 252,
-              "end": 252
-            },
-            {
-              "start": 254,
-              "end": 254
-            },
-            {
-              "start": 255,
-              "end": 255
-            },
-            {
-              "start": 423,
-              "end": 423
-            },
-            {
-              "start": 449,
-              "end": 449
-            }
-          ],
-          "keras/src/callbacks/backup_and_restore_test.py": [
-            {
-              "start": 75,
-              "end": 75
-            },
-            {
-              "start": 115,
-              "end": 115
-            },
-            {
-              "start": 155,
-              "end": 155
-            },
-            {
-              "start": 170,
-              "end": 170
-            }
-          ],
-          "keras/src/utils/tracking_test.py": [
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 32,
-              "end": 32
-            },
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 37,
-              "end": 37
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 48,
-              "end": 48
-            },
-            {
-              "start": 51,
-              "end": 51
-            },
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 58,
-              "end": 58
-            },
-            {
-              "start": 75,
-              "end": 75
-            },
-            {
-              "start": 97,
-              "end": 97
-            }
-          ],
-          "keras/src/utils/audio_dataset_utils_test.py": [
-            {
-              "start": 100,
-              "end": 100
-            },
-            {
-              "start": 113,
-              "end": 113
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 178,
-              "end": 178
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 208,
-              "end": 208
-            },
-            {
-              "start": 219,
-              "end": 219
-            },
-            {
-              "start": 232,
-              "end": 232
-            }
-          ],
-          "keras/src/utils/text_dataset_utils_test.py": [
-            {
-              "start": 79,
-              "end": 79
-            },
-            {
-              "start": 90,
-              "end": 90
-            },
-            {
-              "start": 100,
-              "end": 100
-            },
-            {
-              "start": 138,
-              "end": 138
-            },
-            {
-              "start": 148,
-              "end": 148
-            },
-            {
-              "start": 164,
-              "end": 164
-            },
-            {
-              "start": 174,
-              "end": 174
-            },
-            {
-              "start": 188,
-              "end": 188
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 200,
-              "end": 200
-            }
-          ],
-          "keras/src/utils/torch_utils_test.py": [
-            {
-              "start": 90,
-              "end": 90
-            }
-          ],
-          "keras/src/utils/jax_layer_test.py": [
-            {
-              "start": 591,
-              "end": 591
-            }
-          ],
-          "keras/src/distribution/distribution_lib_test.py": [
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 357,
-              "end": 357
-            },
-            {
-              "start": 415,
-              "end": 415
-            },
-            {
-              "start": 419,
-              "end": 419
-            },
-            {
-              "start": 424,
-              "end": 424
-            }
-          ],
-          "keras/src/legacy/saving/legacy_h5_format_test.py": [
-            {
-              "start": 497,
-              "end": 497
-            }
-          ],
-          "keras/src/utils/dtype_utils_test.py": [
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 59,
-              "end": 59
-            }
-          ],
-          "keras/src/utils/io_utils_test.py": [
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 57,
-              "end": 57
-            }
-          ],
-          "keras/src/utils/image_dataset_utils_test.py": [
-            {
-              "start": 110,
-              "end": 110
-            },
-            {
-              "start": 120,
-              "end": 120
-            },
-            {
-              "start": 133,
-              "end": 133
-            },
-            {
-              "start": 193,
-              "end": 193
-            },
-            {
-              "start": 206,
-              "end": 206
-            },
-            {
-              "start": 222,
-              "end": 222
-            },
-            {
-              "start": 237,
-              "end": 237
-            },
-            {
-              "start": 252,
-              "end": 252
-            },
-            {
-              "start": 269,
-              "end": 269
-            },
-            {
-              "start": 284,
-              "end": 284
-            },
-            {
-              "start": 287,
-              "end": 287
-            },
-            {
-              "start": 317,
-              "end": 317
-            },
-            {
-              "start": 332,
-              "end": 332
-            },
-            {
-              "start": 370,
-              "end": 370
-            },
-            {
-              "start": 386,
-              "end": 386
-            }
-          ],
-          "keras/src/utils/file_utils_test.py": [
-            {
-              "start": 283,
-              "end": 283
-            },
-            {
-              "start": 294,
-              "end": 294
-            },
-            {
-              "start": 307,
-              "end": 307
-            },
-            {
-              "start": 522,
-              "end": 522
-            },
-            {
-              "start": 555,
-              "end": 555
-            },
-            {
-              "start": 572,
-              "end": 572
-            },
-            {
-              "start": 587,
-              "end": 587
-            },
-            {
-              "start": 588,
-              "end": 588
-            },
-            {
-              "start": 597,
-              "end": 597
-            },
-            {
-              "start": 598,
-              "end": 598
-            },
-            {
-              "start": 604,
-              "end": 604
-            },
-            {
-              "start": 678,
-              "end": 678
-            },
-            {
-              "start": 725,
-              "end": 725
-            },
-            {
-              "start": 726,
-              "end": 726
-            },
-            {
-              "start": 729,
-              "end": 729
-            },
-            {
-              "start": 730,
-              "end": 730
-            },
-            {
-              "start": 731,
-              "end": 731
-            },
-            {
-              "start": 732,
-              "end": 732
-            },
-            {
-              "start": 733,
-              "end": 733
-            }
-          ],
-          "keras/src/models/sequential_test.py": [
-            {
-              "start": 143,
-              "end": 143
-            },
-            {
-              "start": 227,
-              "end": 227
-            },
-            {
-              "start": 232,
-              "end": 232
-            },
-            {
-              "start": 241,
-              "end": 241
-            },
-            {
-              "start": 253,
-              "end": 253
-            }
-          ],
-          "keras/src/models/functional_test.py": [
-            {
-              "start": 366,
-              "end": 366
-            },
-            {
-              "start": 369,
-              "end": 369
-            },
-            {
-              "start": 374,
-              "end": 374
-            },
-            {
-              "start": 381,
-              "end": 381
-            },
-            {
-              "start": 391,
-              "end": 391
-            }
-          ],
-          "keras/src/models/cloning_test.py": [
-            {
-              "start": 131,
-              "end": 131
-            },
-            {
-              "start": 170,
-              "end": 170
-            },
-            {
-              "start": 171,
-              "end": 171
-            },
-            {
-              "start": 192,
-              "end": 192
-            },
-            {
-              "start": 193,
-              "end": 193
-            },
-            {
-              "start": 218,
-              "end": 218
-            }
-          ],
-          "keras/src/testing/test_utils_test.py": [
-            {
-              "start": 84,
-              "end": 84
-            },
-            {
-              "start": 85,
-              "end": 85
-            },
-            {
-              "start": 86,
-              "end": 86
-            },
-            {
-              "start": 87,
-              "end": 87
-            },
-            {
-              "start": 212,
-              "end": 212
-            },
-            {
-              "start": 213,
-              "end": 213
-            }
-          ],
-          "keras/src/testing/test_case.py": [
-            {
-              "start": 76,
-              "end": 76
-            },
-            {
-              "start": 97,
-              "end": 97
-            },
-            {
-              "start": 289,
-              "end": 289
-            },
-            {
-              "start": 295,
-              "end": 295
-            },
-            {
-              "start": 301,
-              "end": 301
-            },
-            {
-              "start": 307,
-              "end": 307
-            },
-            {
-              "start": 318,
-              "end": 318
-            },
-            {
-              "start": 446,
-              "end": 446
-            }
-          ],
-          "keras/src/optimizers/optimizer_test.py": [
-            {
-              "start": 318,
-              "end": 318
-            },
-            {
-              "start": 322,
-              "end": 322
-            }
-          ],
-          "keras/src/trainers/epoch_iterator_test.py": [
-            {
-              "start": 48,
-              "end": 48
-            }
-          ],
-          "keras/src/backend/common/variables_test.py": [
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 106,
-              "end": 106
-            },
-            {
-              "start": 112,
-              "end": 112
-            },
-            {
-              "start": 247,
-              "end": 247
-            },
-            {
-              "start": 653,
-              "end": 653
-            },
-            {
-              "start": 654,
-              "end": 654
-            },
-            {
-              "start": 655,
-              "end": 655
-            }
-          ],
-          "keras/src/backend/tests/compute_output_spec_test.py": [
-            {
-              "start": 96,
-              "end": 96
-            },
-            {
-              "start": 114,
-              "end": 114
-            }
-          ],
-          "keras/src/backend/common/keras_tensor_test.py": [
-            {
-              "start": 75,
-              "end": 75
-            },
-            {
-              "start": 81,
-              "end": 81
-            }
-          ],
-          "keras/src/backend/tensorflow/distribute_test.py": [
-            {
-              "start": 82,
-              "end": 82
-            }
-          ],
-          "keras/src/backend/tensorflow/saved_model_test.py": [
-            {
-              "start": 317,
-              "end": 317
-            }
-          ],
-          "keras/src/trainers/trainer_test.py": [
-            {
-              "start": 211,
-              "end": 211
-            },
-            {
-              "start": 238,
-              "end": 238
-            },
-            {
-              "start": 239,
-              "end": 239
-            },
-            {
-              "start": 461,
-              "end": 461
-            },
-            {
-              "start": 1172,
-              "end": 1172
-            },
-            {
-              "start": 1180,
-              "end": 1180
-            },
-            {
-              "start": 1481,
-              "end": 1481
-            }
-          ],
-          "keras/src/tree/tree_test.py": [
-            {
-              "start": 43,
-              "end": 43
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 45,
-              "end": 45
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 54,
-              "end": 54
-            }
-          ],
-          "keras/src/metrics/metric_test.py": [
-            {
-              "start": 119,
-              "end": 119
-            }
-          ],
-          "keras/src/constraints/constraints_test.py": [
-            {
-              "start": 48,
-              "end": 48
-            },
-            {
-              "start": 49,
-              "end": 49
-            }
-          ],
-          "keras/src/metrics/confusion_metrics_test.py": [
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 26,
-              "end": 26
-            },
-            {
-              "start": 114,
-              "end": 114
-            },
-            {
-              "start": 120,
-              "end": 120
-            },
-            {
-              "start": 203,
-              "end": 203
-            },
-            {
-              "start": 209,
-              "end": 209
-            },
-            {
-              "start": 292,
-              "end": 292
-            },
-            {
-              "start": 298,
-              "end": 298
-            },
-            {
-              "start": 383,
-              "end": 383
-            },
-            {
-              "start": 395,
-              "end": 395
-            },
-            {
-              "start": 549,
-              "end": 549
-            },
-            {
-              "start": 561,
-              "end": 561
-            },
-            {
-              "start": 712,
-              "end": 712
-            },
-            {
-              "start": 722,
-              "end": 722
-            },
-            {
-              "start": 800,
-              "end": 800
-            },
-            {
-              "start": 810,
-              "end": 810
-            },
-            {
-              "start": 886,
-              "end": 886
-            },
-            {
-              "start": 894,
-              "end": 894
-            },
-            {
-              "start": 974,
-              "end": 974
-            },
-            {
-              "start": 982,
-              "end": 982
-            },
-            {
-              "start": 1175,
-              "end": 1175
-            },
-            {
-              "start": 1192,
-              "end": 1192
-            },
-            {
-              "start": 1216,
-              "end": 1216
-            },
-            {
-              "start": 1230,
-              "end": 1230
-            }
-          ],
-          "keras/src/layers/layer_test.py": [
-            {
-              "start": 214,
-              "end": 214
-            },
-            {
-              "start": 216,
-              "end": 216
-            },
-            {
-              "start": 217,
-              "end": 217
-            },
-            {
-              "start": 220,
-              "end": 220
-            },
-            {
-              "start": 222,
-              "end": 222
-            },
-            {
-              "start": 223,
-              "end": 223
-            },
-            {
-              "start": 226,
-              "end": 226
-            },
-            {
-              "start": 228,
-              "end": 228
-            },
-            {
-              "start": 229,
-              "end": 229
-            },
-            {
-              "start": 259,
-              "end": 259
-            },
-            {
-              "start": 260,
-              "end": 260
-            },
-            {
-              "start": 261,
-              "end": 261
-            },
-            {
-              "start": 262,
-              "end": 262
-            },
-            {
-              "start": 267,
-              "end": 267
-            },
-            {
-              "start": 268,
-              "end": 268
-            },
-            {
-              "start": 269,
-              "end": 269
-            },
-            {
-              "start": 270,
-              "end": 270
-            },
-            {
-              "start": 275,
-              "end": 275
-            },
-            {
-              "start": 276,
-              "end": 276
-            },
-            {
-              "start": 277,
-              "end": 277
-            },
-            {
-              "start": 278,
-              "end": 278
-            },
-            {
-              "start": 291,
-              "end": 291
-            },
-            {
-              "start": 304,
-              "end": 304
-            },
-            {
-              "start": 308,
-              "end": 308
-            },
-            {
-              "start": 317,
-              "end": 317
-            },
-            {
-              "start": 322,
-              "end": 322
-            },
-            {
-              "start": 328,
-              "end": 328
-            },
-            {
-              "start": 339,
-              "end": 339
-            },
-            {
-              "start": 345,
-              "end": 345
-            },
-            {
-              "start": 351,
-              "end": 351
-            },
-            {
-              "start": 357,
-              "end": 357
-            },
-            {
-              "start": 695,
-              "end": 695
-            },
-            {
-              "start": 747,
-              "end": 747
-            },
-            {
-              "start": 748,
-              "end": 748
-            },
-            {
-              "start": 952,
-              "end": 952
-            },
-            {
-              "start": 953,
-              "end": 953
-            },
-            {
-              "start": 954,
-              "end": 954
-            },
-            {
-              "start": 955,
-              "end": 955
-            },
-            {
-              "start": 956,
-              "end": 956
-            },
-            {
-              "start": 957,
-              "end": 957
-            },
-            {
-              "start": 961,
-              "end": 961
-            },
-            {
-              "start": 962,
-              "end": 962
-            },
-            {
-              "start": 963,
-              "end": 963
-            },
-            {
-              "start": 964,
-              "end": 964
-            },
-            {
-              "start": 965,
-              "end": 965
-            }
-          ],
-          "keras/src/layers/core/einsum_dense_test.py": [
-            {
-              "start": 299,
-              "end": 299
-            },
-            {
-              "start": 300,
-              "end": 300
-            },
-            {
-              "start": 302,
-              "end": 302
-            },
-            {
-              "start": 568,
-              "end": 568
-            },
-            {
-              "start": 636,
-              "end": 636
-            },
-            {
-              "start": 637,
-              "end": 637
-            },
-            {
-              "start": 639,
-              "end": 639
-            },
-            {
-              "start": 679,
-              "end": 679
-            },
-            {
-              "start": 699,
-              "end": 699
-            },
-            {
-              "start": 700,
-              "end": 700
-            },
-            {
-              "start": 703,
-              "end": 703
-            },
-            {
-              "start": 856,
-              "end": 856
-            },
-            {
-              "start": 857,
-              "end": 857
-            },
-            {
-              "start": 895,
-              "end": 895
-            },
-            {
-              "start": 896,
-              "end": 896
-            },
-            {
-              "start": 899,
-              "end": 899
-            }
-          ],
-          "keras/src/layers/attention/multi_head_attention_test.py": [
-            {
-              "start": 311,
-              "end": 311
-            },
-            {
-              "start": 312,
-              "end": 312
-            },
-            {
-              "start": 374,
-              "end": 374
-            },
-            {
-              "start": 379,
-              "end": 379
-            }
-          ],
-          "keras/src/layers/core/dense_test.py": [
-            {
-              "start": 213,
-              "end": 213
-            },
-            {
-              "start": 214,
-              "end": 214
-            },
-            {
-              "start": 216,
-              "end": 216
-            },
-            {
-              "start": 448,
-              "end": 448
-            },
-            {
-              "start": 508,
-              "end": 508
-            },
-            {
-              "start": 509,
-              "end": 509
-            },
-            {
-              "start": 511,
-              "end": 511
-            },
-            {
-              "start": 551,
-              "end": 551
-            },
-            {
-              "start": 571,
-              "end": 571
-            },
-            {
-              "start": 572,
-              "end": 572
-            },
-            {
-              "start": 575,
-              "end": 575
-            },
-            {
-              "start": 718,
-              "end": 718
-            },
-            {
-              "start": 719,
-              "end": 719
-            },
-            {
-              "start": 757,
-              "end": 757
-            },
-            {
-              "start": 758,
-              "end": 758
-            },
-            {
-              "start": 761,
-              "end": 761
-            }
-          ],
-          "keras/src/layers/core/embedding_test.py": [
-            {
-              "start": 123,
-              "end": 123
-            },
-            {
-              "start": 124,
-              "end": 124
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 340,
-              "end": 340
-            },
-            {
-              "start": 380,
-              "end": 380
-            },
-            {
-              "start": 381,
-              "end": 381
-            },
-            {
-              "start": 383,
-              "end": 383
-            },
-            {
-              "start": 424,
-              "end": 424
-            },
-            {
-              "start": 444,
-              "end": 444
-            },
-            {
-              "start": 445,
-              "end": 445
-            },
-            {
-              "start": 448,
-              "end": 448
-            }
-          ],
-          "keras/src/layers/preprocessing/feature_space_test.py": [
-            {
-              "start": 145,
-              "end": 145
-            },
-            {
-              "start": 152,
-              "end": 152
-            },
-            {
-              "start": 160,
-              "end": 160
-            },
-            {
-              "start": 192,
-              "end": 192
-            },
-            {
-              "start": 271,
-              "end": 271
-            },
-            {
-              "start": 279,
-              "end": 279
-            },
-            {
-              "start": 288,
-              "end": 288
-            },
-            {
-              "start": 322,
-              "end": 322
-            }
-          ],
-          "keras/src/layers/convolutional/conv_test.py": [
-            {
-              "start": 653,
-              "end": 653
-            },
-            {
-              "start": 654,
-              "end": 654
-            },
-            {
-              "start": 656,
-              "end": 656
-            }
-          ],
-          "keras/src/layers/regularization/activity_regularization_test.py": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "keras/src/layers/rnn/stacked_rnn_cells_test.py": [
-            {
-              "start": 264,
-              "end": 264
-            },
-            {
-              "start": 272,
-              "end": 272
-            }
-          ],
           "keras/src/saving/saving_lib.py": [
             {
               "start": 301,
               "end": 360
+            }
+          ],
+          "keras/src/saving/saving_lib_test.py": [
+            {
+              "start": 652,
+              "end": 694
             }
           ],
           "keras/src/utils/file_utils.py": [
@@ -3329,50 +358,158 @@
             "step": 1,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.06666666666666667,
+              "span": 0.22177901874750697,
+              "line": 0.2126865671641791
             }
           },
           {
             "step": 2,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.06666666666666667,
+              "span": 0.22177901874750697,
+              "line": 0.2126865671641791
             }
           },
           {
             "step": 3,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.13333333333333333,
+              "span": 0.35879537295572395,
+              "line": 0.3358208955223881
             }
           },
           {
             "step": 4,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.2,
+              "span": 0.4573195053849222,
+              "line": 0.4253731343283582
+            }
+          },
+          {
+            "step": 5,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.6666666666666666,
+              "span": 0.6856800957319505,
+              "line": 0.6753731343283582
+            }
+          },
+          {
+            "step": 6,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.6666666666666666,
+              "span": 0.6856800957319505,
+              "line": 0.6753731343283582
+            }
+          },
+          {
+            "step": 7,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.8666666666666667,
+              "span": 0.7710410849621061,
+              "line": 0.7761194029850746
+            }
+          },
+          {
+            "step": 8,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.9333333333333333,
+              "span": 0.7857000398883127,
+              "line": 0.7947761194029851
+            }
+          },
+          {
+            "step": 9,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.9333333333333333,
+              "span": 0.7857000398883127,
+              "line": 0.7947761194029851
+            }
+          },
+          {
+            "step": 10,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.9333333333333333,
+              "span": 0.7857000398883127,
+              "line": 0.7947761194029851
+            }
+          },
+          {
+            "step": 11,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.9333333333333333,
+              "span": 0.7857000398883127,
+              "line": 0.7947761194029851
+            }
+          },
+          {
+            "step": 12,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.9333333333333333,
+              "span": 0.7857000398883127,
+              "line": 0.7947761194029851
+            }
+          },
+          {
+            "step": 13,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.9333333333333333,
+              "span": 0.7857000398883127,
+              "line": 0.7947761194029851
+            }
+          },
+          {
+            "step": 14,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.9333333333333333,
+              "span": 0.7857000398883127,
+              "line": 0.7947761194029851
+            }
+          },
+          {
+            "step": 15,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.9333333333333333,
+              "span": 0.7857000398883127,
+              "line": 0.7947761194029851
+            }
+          },
+          {
+            "step": 16,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 0.9333333333333333,
+              "span": 0.7857000398883127,
+              "line": 0.7947761194029851
             }
           }
         ],
         "aucCoverage": {
           "file": 1.0,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "symbol": 0.6916666666666667,
+          "span": 0.6545859094535301,
+          "line": 0.6541511194029851
         },
         "redundancy": {
-          "file": 0.019230769230769273,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.8125,
+          "symbol": 0.1869158878504673,
+          "span": 0.160428605539637,
+          "line": 0.1418367346938776
         }
       },
       "fixOverlap": {
@@ -3517,7 +654,18 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/keras/src/saving/saving_lib.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/keras/src/saving/saving_lib_test.py",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "command_execution",
@@ -3689,9 +837,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-12T22:27:46Z",
       "completedAt": "2026-05-12T22:32:34Z",
       "durationMs": 288431,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 990019,
@@ -3700,6 +863,28 @@
         "total_tokens": 1004326,
         "cache_read_input_tokens": 923648
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 34,
+        "readToolCalls": 0,
+        "editToolCalls": 3
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/keras/src/saving/saving_lib.py b/keras/src/saving/saving_lib.py\nindex 6aad62db..bb533dcd 100644\n--- a/keras/src/saving/saving_lib.py\n+++ b/keras/src/saving/saving_lib.py\n@@ -160,13 +160,14 @@ def _save_model_to_fileobj(model, fileobj, weights_format):\n             f.write(config_json.encode())\n \n         weights_file_path = None\n+        weights_dir = None\n         try:\n             if weights_format == \"h5\":\n                 if isinstance(fileobj, io.BufferedWriter):\n                     # First, open the .h5 file, then write it to `zf` at the end\n                     # of the function call.\n-                    working_dir = pathlib.Path(fileobj.name).parent\n-                    weights_file_path = working_dir / _VARS_FNAME_H5\n+                    weights_dir = pathlib.Path(get_temp_dir())\n+                    weights_file_path = weights_dir / _VARS_FNAME_H5\n                     weights_store = H5IOStore(weights_file_path, mode=\"w\")\n                 else:\n                     # Fall back when `fileobj` is an `io.BytesIO`. Typically,\n@@ -199,10 +200,14 @@ def _save_model_to_fileobj(model, fileobj, weights_format):\n             weights_file_path = None\n             raise\n         finally:\n-            weights_store.close()\n-            asset_store.close()\n-            if weights_file_path:\n-                zf.write(weights_file_path, weights_file_path.name)\n+            try:\n+                weights_store.close()\n+                asset_store.close()\n+                if weights_file_path:\n+                    zf.write(weights_file_path, _VARS_FNAME_H5)\n+            finally:\n+                if weights_dir:\n+                    file_utils.rmtree(weights_dir)\n \n \n def load_model(filepath, custom_objects=None, compile=True, safe_mode=True):\n@@ -309,14 +314,15 @@ def _load_model_from_fileobj(fileobj, custom_objects, compile, safe_mode):\n \n         all_filenames = zf.namelist()\n         weights_file_path = None\n+        weights_dir = None\n         try:\n             if _VARS_FNAME_H5 in all_filenames:\n                 if isinstance(fileobj, io.BufferedReader):\n                     # First, extract the model.weights.h5 file, then load it\n                     # using h5py.\n-                    working_dir = pathlib.Path(fileobj.name).parent\n-                    zf.extract(_VARS_FNAME_H5, working_dir)\n-                    weights_file_path = working_dir / _VARS_FNAME_H5\n+                    weights_dir = pathlib.Path(get_temp_dir())\n+                    zf.extract(_VARS_FNAME_H5, weights_dir)\n+                    weights_file_path = weights_dir / _VARS_FNAME_H5\n                     weights_store = H5IOStore(weights_file_path, mode=\"r\")\n                 else:\n                     # Fall back when `fileobj` is an `io.BytesIO`. Typically,\n@@ -346,11 +352,13 @@ def _load_model_from_fileobj(fileobj, custom_objects, compile, safe_mode):\n                 error_msgs=error_msgs,\n             )\n         finally:\n-            weights_store.close()\n-            if asset_store:\n-                asset_store.close()\n-            if weights_file_path:\n-                weights_file_path.unlink()\n+            try:\n+                weights_store.close()\n+                if asset_store:\n+                    asset_store.close()\n+            finally:\n+                if weights_dir:\n+                    file_utils.rmtree(weights_dir)\n \n         if failed_saveables:\n             _raise_loading_failure(error_msgs)\ndiff --git a/keras/src/saving/saving_lib_test.py b/keras/src/saving/saving_lib_test.py\nindex 91e40426..5eff1d18 100644\n--- a/keras/src/saving/saving_lib_test.py\n+++ b/keras/src/saving/saving_lib_test.py\n@@ -1,7 +1,9 @@\n \"\"\"Tests for Keras python-based idempotent saving functions.\"\"\"\n \n+import concurrent.futures\n import json\n import os\n+import threading\n import warnings\n import zipfile\n from io import BytesIO\n@@ -635,6 +637,13 @@ class SavingTest(testing.TestCase):\n             all_filenames = zf.namelist()\n             self.assertNotIn(\"model.weights.h5\", all_filenames)\n \n+    def test_save_model_does_not_leave_sidecar_weights_file(self):\n+        filepath = f\"{self.get_temp_dir()}/model.keras\"\n+        saving_lib.save_model(_get_basic_functional_model(), filepath)\n+\n+        self.assertTrue(Path(filepath).exists())\n+        self.assertFalse(Path(filepath).with_name(\"model.weights.h5\").exists())\n+\n     def test_load_model_exception_raised(self):\n         # Assume we have an error in `load_own_variables`.\n         class RaiseErrorLayer(keras.layers.Layer):\n@@ -659,6 +668,41 @@ class SavingTest(testing.TestCase):\n         self.assertTrue(Path(filepath).exists())\n         self.assertFalse(Path(filepath).with_name(\"model.weights.h5\").exists())\n \n+    def test_concurrent_load_model_uses_isolated_sidecar_weights_files(self):\n+        filepath = f\"{self.get_temp_dir()}/model.keras\"\n+        saving_lib.save_model(_get_basic_functional_model(), filepath)\n+        stray_weights_path = Path(filepath).with_name(\"model.weights.h5\")\n+        if stray_weights_path.exists():\n+            stray_weights_path.unlink()\n+\n+        barrier = threading.Barrier(2)\n+        weights_file_paths = []\n+        weights_file_paths_lock = threading.Lock()\n+\n+        class BarrierH5IOStore:\n+            def __init__(self, root_path, archive=None, mode=\"r\"):\n+                del archive, mode\n+                self.root_path = Path(root_path)\n+                with weights_file_paths_lock:\n+                    weights_file_paths.append(self.root_path)\n+\n+            def close(self):\n+                barrier.wait()\n+\n+        def load_once():\n+            with mock.patch.object(saving_lib, \"H5IOStore\", BarrierH5IOStore):\n+                with mock.patch.object(saving_lib, \"_load_state\"):\n+                    saving_lib.load_model(filepath)\n+\n+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:\n+            futures = [executor.submit(load_once) for _ in range(2)]\n+            for future in futures:\n+                future.result()\n+\n+        self.assertLen(weights_file_paths, 2)\n+        self.assertLen(set(weights_file_paths), 2)\n+        self.assertFalse(stray_weights_path.exists())\n+\n \n @pytest.mark.requires_trainable_backend\n class SavingAPITest(testing.TestCase):\n",
       "finalOutput": {
         "status": "completed",
@@ -3749,55 +934,72 @@
         "predSteps": [
           {
             "files": [
-              "keras/src/api_export.py",
-              "keras/src/layers/reshaping/__init__.py",
-              "keras/src/layers/reshaping/cropping1d.py",
-              "keras/src/layers/reshaping/cropping1d_test.py",
-              "keras/src/layers/reshaping/cropping2d.py",
-              "keras/src/layers/reshaping/cropping2d_test.py",
-              "keras/src/layers/reshaping/cropping3d.py",
-              "keras/src/layers/reshaping/cropping3d_test.py",
-              "keras/src/layers/reshaping/flatten.py",
-              "keras/src/layers/reshaping/flatten_test.py",
-              "keras/src/layers/reshaping/permute.py",
-              "keras/src/layers/reshaping/permute_test.py",
-              "keras/src/layers/reshaping/repeat_vector.py",
-              "keras/src/layers/reshaping/repeat_vector_test.py",
-              "keras/src/layers/reshaping/reshape.py",
-              "keras/src/layers/reshaping/reshape_test.py",
-              "keras/src/layers/reshaping/up_sampling1d.py",
-              "keras/src/layers/reshaping/up_sampling1d_test.py",
-              "keras/src/layers/reshaping/up_sampling2d.py",
-              "keras/src/layers/reshaping/up_sampling2d_test.py",
-              "keras/src/layers/reshaping/up_sampling3d.py",
-              "keras/src/layers/reshaping/up_sampling3d_test.py",
-              "keras/src/layers/reshaping/zero_padding1d.py",
-              "keras/src/layers/reshaping/zero_padding1d_test.py",
-              "keras/src/layers/reshaping/zero_padding2d.py",
-              "keras/src/layers/reshaping/zero_padding2d_test.py",
-              "keras/src/layers/reshaping/zero_padding3d.py",
-              "keras/src/layers/reshaping/zero_padding3d_test.py",
-              "keras/src/legacy/saving/__init__.py",
-              "keras/src/legacy/saving/json_utils.py",
-              "keras/src/legacy/saving/json_utils_test.py",
-              "keras/src/legacy/saving/legacy_h5_format.py",
-              "keras/src/legacy/saving/legacy_h5_format_test.py",
-              "keras/src/legacy/saving/saving_options.py",
-              "keras/src/legacy/saving/saving_utils.py",
-              "keras/src/legacy/saving/serialization.py",
-              "keras/src/saving/__init__.py",
-              "keras/src/saving/keras_saveable.py",
-              "keras/src/saving/object_registration.py",
-              "keras/src/saving/object_registration_test.py",
-              "keras/src/saving/saving_api.py",
-              "keras/src/saving/saving_api_test.py",
-              "keras/src/saving/saving_lib.py",
-              "keras/src/saving/saving_lib_test.py",
-              "keras/src/saving/serialization_lib.py",
-              "keras/src/saving/serialization_lib_test.py",
-              "keras/src/tree/tree_api.py"
+              "keras/src/saving/saving_lib.py"
             ],
-            "spans": {},
+            "spans": {
+              "keras/src/saving/saving_lib.py": [
+                {
+                  "start": 280,
+                  "end": 380
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib.py": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib_test.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib_test.py": [
+                {
+                  "start": 620,
+                  "end": 700
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib.py": [
+                {
+                  "start": 120,
+                  "end": 240
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib.py": [
+                {
+                  "start": 780,
+                  "end": 980
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -3809,6 +1011,34 @@
           },
           {
             "files": [
+              "keras/src/saving/saving_lib.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib.py": [
+                {
+                  "start": 740,
+                  "end": 820
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib_test.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib_test.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
               "keras/src/saving/saving_lib_test.py"
             ],
             "spans": {},
@@ -3816,318 +1046,13 @@
           },
           {
             "files": [
-              "keras/src/backend/common/global_state.py",
-              "keras/src/legacy/preprocessing/image.py",
-              "keras/src/legacy/saving/saving_utils.py",
-              "keras/src/legacy/saving/serialization.py",
-              "keras/src/trainers/data_adapters/py_dataset_adapter.py",
-              "keras/src/trainers/data_adapters/py_dataset_adapter_test.py",
-              "keras/src/trainers/epoch_iterator.py",
-              "keras/src/utils/dataset_utils.py"
+              "keras/src/saving/saving_lib.py"
             ],
             "spans": {
-              "keras/src/backend/common/global_state.py": [
+              "keras/src/saving/saving_lib.py": [
                 {
-                  "start": 2,
-                  "end": 2
-                },
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 77,
-                  "end": 77
-                }
-              ],
-              "keras/src/legacy/preprocessing/image.py": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 459,
-                  "end": 459
-                }
-              ],
-              "keras/src/legacy/saving/saving_utils.py": [
-                {
-                  "start": 2,
-                  "end": 2
-                },
-                {
-                  "start": 16,
-                  "end": 16
-                }
-              ],
-              "keras/src/legacy/saving/serialization.py": [
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 29,
-                  "end": 29
-                },
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                }
-              ],
-              "keras/src/utils/dataset_utils.py": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "keras/src/trainers/epoch_iterator.py": [
-                {
-                  "start": 29,
-                  "end": 29
-                }
-              ],
-              "keras/src/trainers/data_adapters/py_dataset_adapter_test.py": [
-                {
-                  "start": 43,
-                  "end": 43
-                },
-                {
-                  "start": 102,
-                  "end": 102
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 109,
-                  "end": 109
-                },
-                {
-                  "start": 111,
-                  "end": 111
-                },
-                {
-                  "start": 142,
-                  "end": 142
-                },
-                {
-                  "start": 145,
-                  "end": 145
-                },
-                {
-                  "start": 162,
-                  "end": 162
-                },
-                {
-                  "start": 235,
-                  "end": 235
-                },
-                {
-                  "start": 236,
-                  "end": 236
-                },
-                {
-                  "start": 330,
-                  "end": 330
-                },
-                {
-                  "start": 332,
-                  "end": 332
-                },
-                {
-                  "start": 336,
-                  "end": 336
-                },
-                {
-                  "start": 348,
-                  "end": 348
-                },
-                {
-                  "start": 353,
-                  "end": 353
-                }
-              ],
-              "keras/src/trainers/data_adapters/py_dataset_adapter.py": [
-                {
-                  "start": 2,
-                  "end": 2
-                },
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                },
-                {
-                  "start": 32,
-                  "end": 32
-                },
-                {
-                  "start": 46,
-                  "end": 46
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 95,
-                  "end": 95
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 114,
-                  "end": 114
-                },
-                {
-                  "start": 129,
-                  "end": 129
-                },
-                {
-                  "start": 131,
-                  "end": 131
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                },
-                {
-                  "start": 134,
-                  "end": 134
-                },
-                {
-                  "start": 135,
-                  "end": 135
-                },
-                {
-                  "start": 223,
-                  "end": 223
-                },
-                {
-                  "start": 224,
-                  "end": 224
-                },
-                {
-                  "start": 229,
-                  "end": 229
-                },
-                {
-                  "start": 322,
-                  "end": 322
-                },
-                {
-                  "start": 330,
-                  "end": 330
-                },
-                {
-                  "start": 332,
-                  "end": 332
-                },
-                {
-                  "start": 333,
-                  "end": 333
-                },
-                {
-                  "start": 334,
-                  "end": 334
-                },
-                {
-                  "start": 341,
-                  "end": 341
-                },
-                {
-                  "start": 383,
-                  "end": 383
-                },
-                {
-                  "start": 385,
-                  "end": 385
-                },
-                {
-                  "start": 390,
-                  "end": 390
-                },
-                {
-                  "start": 393,
-                  "end": 393
-                },
-                {
-                  "start": 423,
-                  "end": 423
-                },
-                {
-                  "start": 430,
-                  "end": 430
-                },
-                {
-                  "start": 431,
-                  "end": 431
-                },
-                {
-                  "start": 467,
-                  "end": 467
-                },
-                {
-                  "start": 494,
-                  "end": 494
-                },
-                {
-                  "start": 498,
-                  "end": 498
-                },
-                {
-                  "start": 499,
-                  "end": 499
-                },
-                {
-                  "start": 503,
-                  "end": 503
-                },
-                {
-                  "start": 600,
-                  "end": 600
-                },
-                {
-                  "start": 607,
-                  "end": 607
+                  "start": 680,
+                  "end": 740
                 }
               ]
             },
@@ -4135,178 +1060,69 @@
           },
           {
             "files": [
-              "keras/src/models/functional_test.py",
-              "keras/src/saving/saving_api_test.py",
-              "keras/src/saving/saving_lib.py",
               "keras/src/saving/saving_lib_test.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib_test.py": [
+                {
+                  "start": 1,
+                  "end": 20
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib_test.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib_test.py": [
+                {
+                  "start": 600,
+                  "end": 690
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib.py"
             ],
             "spans": {
               "keras/src/saving/saving_lib.py": [
                 {
-                  "start": 709,
-                  "end": 709
-                },
-                {
-                  "start": 721,
-                  "end": 721
-                },
-                {
-                  "start": 906,
-                  "end": 906
-                },
-                {
-                  "start": 709,
-                  "end": 709
-                },
-                {
-                  "start": 721,
-                  "end": 721
-                },
-                {
-                  "start": 906,
-                  "end": 906
+                  "start": 150,
+                  "end": 360
                 }
-              ],
-              "keras/src/models/functional_test.py": [
-                {
-                  "start": 432,
-                  "end": 432
-                }
-              ],
-              "keras/src/saving/saving_api_test.py": [
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 45,
-                  "end": 45
-                },
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 147,
-                  "end": 147
-                },
-                {
-                  "start": 162,
-                  "end": 162
-                },
-                {
-                  "start": 175,
-                  "end": 175
-                },
-                {
-                  "start": 179,
-                  "end": 179
-                },
-                {
-                  "start": 212,
-                  "end": 212
-                },
-                {
-                  "start": 229,
-                  "end": 229
-                },
-                {
-                  "start": 253,
-                  "end": 253
-                }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib_test.py"
+            ],
+            "spans": {
               "keras/src/saving/saving_lib_test.py": [
                 {
-                  "start": 247,
-                  "end": 247
-                },
+                  "start": 620,
+                  "end": 710
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "keras/src/saving/saving_lib.py"
+            ],
+            "spans": {
+              "keras/src/saving/saving_lib.py": [
                 {
-                  "start": 287,
-                  "end": 287
-                },
-                {
-                  "start": 337,
-                  "end": 337
-                },
-                {
-                  "start": 346,
-                  "end": 346
-                },
-                {
-                  "start": 372,
-                  "end": 372
-                },
-                {
-                  "start": 395,
-                  "end": 395
-                },
-                {
-                  "start": 424,
-                  "end": 424
-                },
-                {
-                  "start": 437,
-                  "end": 437
-                },
-                {
-                  "start": 455,
-                  "end": 455
-                },
-                {
-                  "start": 471,
-                  "end": 471
-                },
-                {
-                  "start": 488,
-                  "end": 488
-                },
-                {
-                  "start": 505,
-                  "end": 505
-                },
-                {
-                  "start": 517,
-                  "end": 517
-                },
-                {
-                  "start": 525,
-                  "end": 525
-                },
-                {
-                  "start": 534,
-                  "end": 534
-                },
-                {
-                  "start": 628,
-                  "end": 628
-                },
-                {
-                  "start": 651,
-                  "end": 651
-                },
-                {
-                  "start": 671,
-                  "end": 671
-                },
-                {
-                  "start": 675,
-                  "end": 675
-                },
-                {
-                  "start": 679,
-                  "end": 679
-                },
-                {
-                  "start": 684,
-                  "end": 684
+                  "start": 160,
+                  "end": 360
                 }
               ]
             },
@@ -4314,366 +1130,10 @@
           }
         ],
         "predFiles": [
-          "keras/src/api_export.py",
-          "keras/src/backend/common/global_state.py",
-          "keras/src/layers/reshaping/__init__.py",
-          "keras/src/layers/reshaping/cropping1d.py",
-          "keras/src/layers/reshaping/cropping1d_test.py",
-          "keras/src/layers/reshaping/cropping2d.py",
-          "keras/src/layers/reshaping/cropping2d_test.py",
-          "keras/src/layers/reshaping/cropping3d.py",
-          "keras/src/layers/reshaping/cropping3d_test.py",
-          "keras/src/layers/reshaping/flatten.py",
-          "keras/src/layers/reshaping/flatten_test.py",
-          "keras/src/layers/reshaping/permute.py",
-          "keras/src/layers/reshaping/permute_test.py",
-          "keras/src/layers/reshaping/repeat_vector.py",
-          "keras/src/layers/reshaping/repeat_vector_test.py",
-          "keras/src/layers/reshaping/reshape.py",
-          "keras/src/layers/reshaping/reshape_test.py",
-          "keras/src/layers/reshaping/up_sampling1d.py",
-          "keras/src/layers/reshaping/up_sampling1d_test.py",
-          "keras/src/layers/reshaping/up_sampling2d.py",
-          "keras/src/layers/reshaping/up_sampling2d_test.py",
-          "keras/src/layers/reshaping/up_sampling3d.py",
-          "keras/src/layers/reshaping/up_sampling3d_test.py",
-          "keras/src/layers/reshaping/zero_padding1d.py",
-          "keras/src/layers/reshaping/zero_padding1d_test.py",
-          "keras/src/layers/reshaping/zero_padding2d.py",
-          "keras/src/layers/reshaping/zero_padding2d_test.py",
-          "keras/src/layers/reshaping/zero_padding3d.py",
-          "keras/src/layers/reshaping/zero_padding3d_test.py",
-          "keras/src/legacy/preprocessing/image.py",
-          "keras/src/legacy/saving/__init__.py",
-          "keras/src/legacy/saving/json_utils.py",
-          "keras/src/legacy/saving/json_utils_test.py",
-          "keras/src/legacy/saving/legacy_h5_format.py",
-          "keras/src/legacy/saving/legacy_h5_format_test.py",
-          "keras/src/legacy/saving/saving_options.py",
-          "keras/src/legacy/saving/saving_utils.py",
-          "keras/src/legacy/saving/serialization.py",
-          "keras/src/models/functional_test.py",
-          "keras/src/saving/__init__.py",
-          "keras/src/saving/keras_saveable.py",
-          "keras/src/saving/object_registration.py",
-          "keras/src/saving/object_registration_test.py",
-          "keras/src/saving/saving_api.py",
-          "keras/src/saving/saving_api_test.py",
           "keras/src/saving/saving_lib.py",
-          "keras/src/saving/saving_lib_test.py",
-          "keras/src/saving/serialization_lib.py",
-          "keras/src/saving/serialization_lib_test.py",
-          "keras/src/trainers/data_adapters/py_dataset_adapter.py",
-          "keras/src/trainers/data_adapters/py_dataset_adapter_test.py",
-          "keras/src/trainers/epoch_iterator.py",
-          "keras/src/tree/tree_api.py",
-          "keras/src/utils/dataset_utils.py"
+          "keras/src/saving/saving_lib_test.py"
         ],
         "predSpans": {
-          "keras/src/backend/common/global_state.py": [
-            {
-              "start": 2,
-              "end": 2
-            },
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 76,
-              "end": 76
-            },
-            {
-              "start": 77,
-              "end": 77
-            }
-          ],
-          "keras/src/legacy/preprocessing/image.py": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 459,
-              "end": 459
-            }
-          ],
-          "keras/src/legacy/saving/saving_utils.py": [
-            {
-              "start": 2,
-              "end": 2
-            },
-            {
-              "start": 16,
-              "end": 16
-            }
-          ],
-          "keras/src/legacy/saving/serialization.py": [
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 29,
-              "end": 29
-            },
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 31,
-              "end": 31
-            }
-          ],
-          "keras/src/utils/dataset_utils.py": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "keras/src/trainers/epoch_iterator.py": [
-            {
-              "start": 29,
-              "end": 29
-            }
-          ],
-          "keras/src/trainers/data_adapters/py_dataset_adapter_test.py": [
-            {
-              "start": 43,
-              "end": 43
-            },
-            {
-              "start": 102,
-              "end": 102
-            },
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 109,
-              "end": 109
-            },
-            {
-              "start": 111,
-              "end": 111
-            },
-            {
-              "start": 142,
-              "end": 142
-            },
-            {
-              "start": 145,
-              "end": 145
-            },
-            {
-              "start": 162,
-              "end": 162
-            },
-            {
-              "start": 235,
-              "end": 235
-            },
-            {
-              "start": 236,
-              "end": 236
-            },
-            {
-              "start": 330,
-              "end": 330
-            },
-            {
-              "start": 332,
-              "end": 332
-            },
-            {
-              "start": 336,
-              "end": 336
-            },
-            {
-              "start": 348,
-              "end": 348
-            },
-            {
-              "start": 353,
-              "end": 353
-            }
-          ],
-          "keras/src/trainers/data_adapters/py_dataset_adapter.py": [
-            {
-              "start": 2,
-              "end": 2
-            },
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 32,
-              "end": 32
-            },
-            {
-              "start": 46,
-              "end": 46
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 95,
-              "end": 95
-            },
-            {
-              "start": 103,
-              "end": 103
-            },
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 114,
-              "end": 114
-            },
-            {
-              "start": 129,
-              "end": 129
-            },
-            {
-              "start": 131,
-              "end": 131
-            },
-            {
-              "start": 133,
-              "end": 133
-            },
-            {
-              "start": 134,
-              "end": 134
-            },
-            {
-              "start": 135,
-              "end": 135
-            },
-            {
-              "start": 223,
-              "end": 223
-            },
-            {
-              "start": 224,
-              "end": 224
-            },
-            {
-              "start": 229,
-              "end": 229
-            },
-            {
-              "start": 322,
-              "end": 322
-            },
-            {
-              "start": 330,
-              "end": 330
-            },
-            {
-              "start": 332,
-              "end": 332
-            },
-            {
-              "start": 333,
-              "end": 333
-            },
-            {
-              "start": 334,
-              "end": 334
-            },
-            {
-              "start": 341,
-              "end": 341
-            },
-            {
-              "start": 383,
-              "end": 383
-            },
-            {
-              "start": 385,
-              "end": 385
-            },
-            {
-              "start": 390,
-              "end": 390
-            },
-            {
-              "start": 393,
-              "end": 393
-            },
-            {
-              "start": 423,
-              "end": 423
-            },
-            {
-              "start": 430,
-              "end": 430
-            },
-            {
-              "start": 431,
-              "end": 431
-            },
-            {
-              "start": 467,
-              "end": 467
-            },
-            {
-              "start": 494,
-              "end": 494
-            },
-            {
-              "start": 498,
-              "end": 498
-            },
-            {
-              "start": 499,
-              "end": 499
-            },
-            {
-              "start": 503,
-              "end": 503
-            },
-            {
-              "start": 600,
-              "end": 600
-            },
-            {
-              "start": 607,
-              "end": 607
-            }
-          ],
           "keras/src/saving/saving_lib.py": [
             {
               "start": 153,
@@ -4682,164 +1142,12 @@
             {
               "start": 304,
               "end": 360
-            },
-            {
-              "start": 709,
-              "end": 709
-            },
-            {
-              "start": 721,
-              "end": 721
-            },
-            {
-              "start": 906,
-              "end": 906
-            }
-          ],
-          "keras/src/models/functional_test.py": [
-            {
-              "start": 432,
-              "end": 432
-            }
-          ],
-          "keras/src/saving/saving_api_test.py": [
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 45,
-              "end": 45
-            },
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 76,
-              "end": 76
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 147,
-              "end": 147
-            },
-            {
-              "start": 162,
-              "end": 162
-            },
-            {
-              "start": 175,
-              "end": 175
-            },
-            {
-              "start": 179,
-              "end": 179
-            },
-            {
-              "start": 212,
-              "end": 212
-            },
-            {
-              "start": 229,
-              "end": 229
-            },
-            {
-              "start": 253,
-              "end": 253
             }
           ],
           "keras/src/saving/saving_lib_test.py": [
             {
-              "start": 247,
-              "end": 247
-            },
-            {
-              "start": 287,
-              "end": 287
-            },
-            {
-              "start": 337,
-              "end": 337
-            },
-            {
-              "start": 346,
-              "end": 346
-            },
-            {
-              "start": 372,
-              "end": 372
-            },
-            {
-              "start": 395,
-              "end": 395
-            },
-            {
-              "start": 424,
-              "end": 424
-            },
-            {
-              "start": 437,
-              "end": 437
-            },
-            {
-              "start": 455,
-              "end": 455
-            },
-            {
-              "start": 471,
-              "end": 471
-            },
-            {
-              "start": 488,
-              "end": 488
-            },
-            {
-              "start": 505,
-              "end": 505
-            },
-            {
-              "start": 517,
-              "end": 517
-            },
-            {
-              "start": 525,
-              "end": 525
-            },
-            {
-              "start": 534,
-              "end": 534
-            },
-            {
-              "start": 628,
-              "end": 628
-            },
-            {
               "start": 640,
               "end": 704
-            },
-            {
-              "start": 651,
-              "end": 651
-            },
-            {
-              "start": 671,
-              "end": 671
-            },
-            {
-              "start": 675,
-              "end": 675
-            },
-            {
-              "start": 679,
-              "end": 679
-            },
-            {
-              "start": 684,
-              "end": 684
             }
           ]
         },
@@ -4859,105 +1167,150 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.06666666666666667,
+              "span": 0.22177901874750697,
+              "line": 0.2126865671641791
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.13333333333333333,
+              "span": 0.35879537295572395,
+              "line": 0.3358208955223881
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.13333333333333333,
+              "span": 0.35879537295572395,
+              "line": 0.3358208955223881
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.26666666666666666,
+              "span": 0.6716194654966094,
+              "line": 0.6305970149253731
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.5333333333333333,
+              "span": 0.7144994016753091,
+              "line": 0.6791044776119403
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.5333333333333333,
+              "span": 0.7144994016753091,
+              "line": 0.6791044776119403
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.8666666666666667,
+              "span": 0.8388512165935381,
+              "line": 0.8246268656716418
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.8666666666666667,
+              "span": 0.8388512165935381,
+              "line": 0.8246268656716418
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.8666666666666667,
+              "span": 0.8388512165935381,
+              "line": 0.8246268656716418
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.2,
-              "span": 0.010769844435580374,
-              "line": 0.011194029850746268
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 11,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 12,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 13,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 14,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 15,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.5,
-          "symbol": 0.02,
-          "span": 0.0010769844435580375,
-          "line": 0.0011194029850746267
+          "file": 1.0,
+          "symbol": 0.6844444444444445,
+          "span": 0.7704361122191198,
+          "line": 0.7564676616915423
         },
         "redundancy": {
-          "file": 0.11475409836065575,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.8666666666666667,
+          "symbol": 0.3533834586466166,
+          "span": 0.39215791545867784,
+          "line": 0.36750000000000005
         }
       },
       "fixOverlap": {
@@ -4976,35 +1329,35 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/d148d3ee02c282031560/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/d148d3ee02c282031560/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,200p' <contextbench-root>/.cache/agent-runtimes/codex/d148d3ee02c282031560/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,200p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/d148d3ee02c282031560/home/.agents/skills/superpowers/systematic-debugging/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: systematic-debugging\ndescription: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes\n---\n\n# Systematic Debugging\n\n## Overview\n\nRandom fixes waste time and create new bugs. Quick patches mask underlying issues.\n\n**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.\n\n**Violating the letter of this process is violating the spirit of debugging.**\n\n## The Iron Law\n\n```\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST\n```\n\nIf you haven't completed Phase 1, you cannot propose fixes.\n\n## When to Use\n\nUse for ANY technical issue:\n- Test failures\n- Bugs in production\n- Unexpected behavior\n- Performance problems\n- Build failures\n- Integration issues\n\n**Use this ESPECIALLY when:**\n- Under time pressure (emergencies make guessing tempting)\n- \"Just one quick fix\" seems obvious\n- You've already tried multiple fixes\n- Previous fix didn't work\n- You don't fully understand the issue\n\n**Don't skip when:**\n- Issue seems simple (simple bugs have root causes too)\n- You're in a hurry (rushing guarantees rework)\n- Manager wants it fixed NOW (systematic is faster than thrashing)\n\n## The Four Phases\n\nYou MUST complete each phase before proceeding to the next.\n\n### Phase 1: Root Cause Investigation\n\n**BEFORE attempting ANY fix:**\n\n1. **Read Error Messages Carefully**\n   - Don't skip past errors or warnings\n   - They often contain the exact solution\n   - Read stack traces completely\n   - Note line numbers, file paths, error codes\n\n2. **Reproduce Consistently**\n   - Can you trigger it reliably?\n   - What are the exact steps?\n   - Does it happen every time?\n   - If not reproducible \u2192 gather more data, don't guess\n\n3. **Check Recent Changes**\n   - What changed that could cause this?\n   - Git diff, recent commits\n   - New dependencies, config changes\n   - Environmental differences\n\n4. **Gather Evidence in Multi-Component Systems**\n\n   **WHEN system has multiple components (CI \u2192 build \u2192 signing, API \u2192 service \u2192 database):**\n\n   **BEFORE proposing fixes, add diagnostic instrumentation:**\n   ```\n   For EACH component boundary:\n     - Log what data enters component\n     - Log what data exits component\n     - Verify environment/config propagation\n     - Check state at each layer\n\n   Run once to gather evidence showing WHERE it breaks\n   THEN analyze evidence to identify failing component\n   THEN investigate that specific component\n   ```\n\n   **Example (multi-layer system):**\n   ```bash\n   # Layer 1: Workflow\n   echo \"=== Secrets available in workflow: ===\"\n   echo \"IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}\"\n\n   # Layer 2: Build script\n   echo \"=== Env vars in build script: ===\"\n   env | grep IDENTITY || echo \"IDENTITY not in environment\"\n\n   # Layer 3: Signing script\n   echo \"=== Keychain state: ===\"\n   security list-keychains\n   security find-identity -v\n\n   # Layer 4: Actual signing\n   codesign --sign \"$IDENTITY\" --verbose=4 \"$APP\"\n   ```\n\n   **This reveals:** Which layer fails (secrets \u2192 workflow \u2713, workflow \u2192 build \u2717)\n\n5. **Trace Data Flow**\n\n   **WHEN error is deep in call stack:**\n\n   See `root-cause-tracing.md` in this directory for the complete backward tracing technique.\n\n   **Quick version:**\n   - Where does bad value originate?\n   - What called this with bad value?\n   - Keep tracing up until you find the source\n   - Fix at source, not at symptom\n\n### Phase 2: Pattern Analysis\n\n**Find the pattern before fixing:**\n\n1. **Find Working Examples**\n   - Locate similar working code in same codebase\n   - What works that's similar to what's broken?\n\n2. **Compare Against References**\n   - If implementing pattern, read reference implementation COMPLETELY\n   - Don't skim - read every line\n   - Understand the pattern fully before applying\n\n3. **Identify Differences**\n   - What's different between working and broken?\n   - List every difference, however small\n   - Don't assume \"that can't matter\"\n\n4. **Understand Dependencies**\n   - What other components does this need?\n   - \u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/d148d3ee02c282031560/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
@@ -5168,7 +1521,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/keras/src/saving/saving_lib_test.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/keras/src/saving/saving_lib_test.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -5180,7 +1542,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/keras/src/saving/saving_lib.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/keras/src/saving/saving_lib.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",
@@ -5251,7 +1622,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/keras/src/saving/saving_lib.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/keras/src/saving/saving_lib.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

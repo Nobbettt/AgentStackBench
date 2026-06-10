@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-12T22:32:41Z",
       "completedAt": "2026-05-12T22:41:37Z",
       "durationMs": 535256,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1802456,
@@ -25,62 +40,84 @@
         "total_tokens": 1828683,
         "cache_read_input_tokens": 1687424
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 37,
+        "readToolCalls": 0,
+        "editToolCalls": 6
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/transformers/models/owlvit/modeling_owlvit.py b/src/transformers/models/owlvit/modeling_owlvit.py\nindex 684f155efd..e80725c569 100644\n--- a/src/transformers/models/owlvit/modeling_owlvit.py\n+++ b/src/transformers/models/owlvit/modeling_owlvit.py\n@@ -133,8 +133,9 @@ class OwlViTObjectDetectionOutput(ModelOutput):\n             values are normalized in [0, 1], relative to the size of each individual image in the batch (disregarding\n             possible padding). You can use [`~OwlViTFeatureExtractor.post_process`] to retrieve the unnormalized\n             bounding boxes.\n-        text_embeds (`torch.FloatTensor` of shape `(batch_size, num_max_text_queries, output_dim`):\n-            The text embeddings obtained by applying the projection layer to the pooled output of [`OwlViTTextModel`].\n+        text_embeds (`torch.FloatTensor` of shape `(batch_size, num_queries, output_dim`):\n+            The query embeddings obtained by applying the projection layer to the pooled output of\n+            [`OwlViTTextModel`] or [`OwlViTVisionModel`], depending on whether text or image queries are provided.\n         image_embeds (`torch.FloatTensor` of shape `(batch_size, patch_size, patch_size, output_dim`):\n             Pooled output of [`OwlViTVisionModel`]. OWL-ViT represents images as a set of image patches and computes\n             image embeddings for each patch.\n@@ -525,15 +526,20 @@ OWLVIT_OBJECT_DETECTION_INPUTS_DOCSTRING = r\"\"\"\n     Args:\n         pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)`):\n             Pixel values.\n-        input_ids (`torch.LongTensor` of shape `(batch_size * num_max_text_queries, sequence_length)`):\n+        input_ids (`torch.LongTensor` of shape `(batch_size * num_max_text_queries, sequence_length)`, *optional*):\n             Indices of input sequence tokens in the vocabulary. Indices can be obtained using [`CLIPTokenizer`]. See\n             [`PreTrainedTokenizer.encode`] and [`PreTrainedTokenizer.__call__`] for details. [What are input\n-            IDs?](../glossary#input-ids)\n-        attention_mask (`torch.Tensor` of shape `(batch_size, num_max_text_queries, sequence_length)`, *optional*):\n+            IDs?](../glossary#input-ids). One of `input_ids` or `query_pixel_values` must be provided.\n+        attention_mask (`torch.Tensor` of shape `(batch_size * num_max_text_queries, sequence_length)`, *optional*):\n             Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:\n             - 1 for tokens that are **not masked**,\n             - 0 for tokens that are **masked**.\n             [What are attention masks?](../glossary#attention-mask)\n+        query_pixel_values (`torch.FloatTensor` of shape `(batch_size, num_queries, num_channels, height, width)`, *optional*):\n+            Pixel values for one-shot image-guided object detection. One of `input_ids` or `query_pixel_values` must\n+            be provided.\n+        query_mask (`torch.Tensor` of shape `(batch_size, num_queries)`, *optional*):\n+            Mask to avoid performing detection with padded query images. Mask values selected in `[0, 1]`.\n \"\"\"\n \n \n@@ -1249,27 +1255,21 @@ class OwlViTForObjectDetection(OwlViTPreTrainedModel):\n \n         return (pred_logits, image_class_embeds)\n \n-    def image_text_embedder(\n+    def image_embedder(\n         self,\n-        input_ids: torch.Tensor,\n         pixel_values: torch.FloatTensor,\n-        attention_mask: torch.Tensor,\n         output_attentions: Optional[bool] = None,\n         output_hidden_states: Optional[bool] = None,\n     ) -> Tuple[torch.FloatTensor]:\n-\n-        # Encode text and image\n-        outputs = self.owlvit(\n+        vision_outputs = self.owlvit.vision_model(\n             pixel_values=pixel_values,\n-            input_ids=input_ids,\n-            attention_mask=attention_mask,\n             output_attentions=output_attentions,\n             output_hidden_states=output_hidden_states,\n             return_dict=True,\n         )\n \n         # Resize class token\n-        last_hidden_state = outputs.vision_model_output[0]\n+        last_hidden_state = vision_outputs[0]\n         image_embeds = self.owlvit.vision_model.post_layernorm(last_hidden_state)\n         new_size = tuple(np.array(image_embeds.shape) - np.array((0, 1, 0)))\n         class_token_out = torch.broadcast_to(image_embeds[:, :1, :], new_size)\n@@ -1286,11 +1286,66 @@ class OwlViTForObjectDetection(OwlViTPreTrainedModel):\n             image_embeds.shape[-1],\n         )\n         image_embeds = image_embeds.reshape(new_size)\n-        text_embeds = outputs.text_embeds\n \n-        # Last hidden states from text and vision transformers\n-        text_model_last_hidden_state = outputs[-2][0]\n-        vision_model_last_hidden_state = outputs[-1][0]\n+        return (image_embeds, vision_outputs[0])\n+\n+    def text_query_embedder(\n+        self,\n+        input_ids: torch.Tensor,\n+        attention_mask: torch.Tensor,\n+        output_attentions: Optional[bool] = None,\n+        output_hidden_states: Optional[bool] = None,\n+    ) -> Tuple[torch.FloatTensor]:\n+        text_outputs = self.owlvit.text_model(\n+            input_ids=input_ids,\n+            attention_mask=attention_mask,\n+            output_attentions=output_attentions,\n+            output_hidden_states=output_hidden_states,\n+            return_dict=True,\n+        )\n+\n+        text_embeds = self.owlvit.text_projection(text_outputs[1])\n+        text_embeds = text_embeds / torch.linalg.norm(text_embeds, ord=2, dim=-1, keepdim=True)\n+\n+        return (text_embeds, text_outputs[0])\n+\n+    def image_query_embedder(\n+        self,\n+        query_pixel_values: torch.FloatTensor,\n+        output_attentions: Optional[bool] = None,\n+        output_hidden_states: Optional[bool] = None,\n+    ) -> torch.FloatTensor:\n+        query_outputs = self.owlvit.vision_model(\n+            pixel_values=query_pixel_values,\n+            output_attentions=output_attentions,\n+            output_hidden_states=output_hidden_states,\n+            return_dict=True,\n+        )\n+\n+        query_embeds = self.owlvit.visual_projection(query_outputs[1])\n+        query_embeds = query_embeds / torch.linalg.norm(query_embeds, ord=2, dim=-1, keepdim=True)\n+\n+        return query_embeds\n+\n+    def image_text_embedder(\n+        self,\n+        input_ids: torch.Tensor,\n+        pixel_values: torch.FloatTensor,\n+        attention_mask: torch.Tensor,\n+        output_attentions: Optional[bool] = None,\n+        output_hidden_states: Optional[bool] = None,\n+    ) -> Tuple[torch.FloatTensor]:\n+        image_embeds, vision_model_last_hidden_state = self.image_embedder(\n+            pixel_values=pixel_values,\n+            output_attentions=output_attentions,\n+            output_hidden_states=output_hidden_states,\n+        )\n+        text_embeds, text_model_last_hidden_state = self.text_query_embedder(\n+            input_ids=input_ids,\n+            attention_mask=attention_mask,\n+            output_attentions=output_attentions,\n+            output_hidden_states=output_hidden_states,\n+        )\n \n         return (text_embeds, image_embeds, text_model_last_hidden_state, vision_model_last_hidden_state)\n \n@@ -1298,9 +1353,11 @@ class OwlViTForObjectDetection(OwlViTPreTrainedModel):\n     @replace_return_docstrings(output_type=OwlViTObjectDetectionOutput, config_class=OwlViTConfig)\n     def forward(\n         self,\n-        input_ids: torch.Tensor,\n-        pixel_values: torch.FloatTensor,\n+        input_ids: Optional[torch.Tensor] = None,\n+        pixel_values: Optional[torch.FloatTensor] = None,\n         attention_mask: Optional[torch.Tensor] = None,\n+        query_pixel_values: Optional[torch.FloatTensor] = None,\n+        query_mask: Optional[torch.Tensor] = None,\n         output_attentions: Optional[bool] = None,\n         output_hidden_states: Optional[bool] = None,\n         return_dict: Optional[bool] = None,\n@@ -1346,32 +1403,77 @@ class OwlViTForObjectDetection(OwlViTPreTrainedModel):\n         )\n         return_dict = return_dict if return_dict is not None else self.config.return_dict\n \n-        # Embed images and text queries\n-        outputs = self.image_text_embedder(\n-            input_ids=input_ids,\n+        if pixel_values is None:\n+            raise ValueError(\"`pixel_values` must be provided.\")\n+        if input_ids is None and query_pixel_values is None:\n+            raise ValueError(\"One of `input_ids` or `query_pixel_values` must be provided.\")\n+        if input_ids is not None and query_pixel_values is not None:\n+            raise ValueError(\"Only one of `input_ids` or `query_pixel_values` can be provided.\")\n+\n+        feature_map, vision_model_last_hidden_state = self.image_embedder(\n             pixel_values=pixel_values,\n-            attention_mask=attention_mask,\n             output_attentions=output_attentions,\n             output_hidden_states=output_hidden_states,\n         )\n \n-        # Last hidden states of text and vision transformers\n-        text_model_last_hidden_state = outputs[2]\n-        vision_model_last_hidden_state = outputs[3]\n-\n-        query_embeds = outputs[0]\n-        feature_map = outputs[1]\n-\n         batch_size, num_patches, num_patches, hidden_dim = feature_map.shape\n         image_feats = torch.reshape(feature_map, (batch_size, num_patches * num_patches, hidden_dim))\n \n-        # Reshape from [batch_size * max_text_queries, hidden_dim] -> [batch_size, max_text_queries, hidden_dim]\n-        max_text_queries = input_ids.shape[0] // batch_size\n-        query_embeds = query_embeds.reshape(batch_size, max_text_queries, query_embeds.shape[-1])\n+        if input_ids is not None:\n+            query_embeds, text_model_last_hidden_state = self.text_query_embedder(\n+                input_ids=input_ids,\n+                attention_mask=attention_mask,\n+                output_attentions=output_attentions,\n+                output_hidden_states=output_hidden_states,\n+            )\n+\n+            # Reshape from [batch_size * max_text_queries, hidden_dim] -> [batch_size, max_text_queries, hidden_dim]\n+            max_text_queries = input_ids.shape[0] // batch_size\n+            query_embeds = query_embeds.reshape(batch_size, max_text_queries, query_embeds.shape[-1])\n \n-        # If first token is 0, then this is a padded query [batch_size, num_queries].\n-        input_ids = input_ids.reshape(batch_size, max_text_queries, input_ids.shape[-1])\n-        query_mask = input_ids[..., 0] > 0\n+            # If first token is 0, then this is a padded query [batch_size, num_queries].\n+            input_ids = input_ids.reshape(batch_size, max_text_queries, input_ids.shape[-1])\n+            query_mask = input_ids[..., 0] > 0\n+        else:\n+            text_model_last_hidden_state = None\n+\n+            if query_pixel_values.ndim == 4:\n+                if batch_size == 1:\n+                    query_pixel_values = query_pixel_values.unsqueeze(0)\n+                elif query_pixel_values.shape[0] == batch_size:\n+                    query_pixel_values = query_pixel_values.unsqueeze(1)\n+                else:\n+                    raise ValueError(\n+                        \"When `query_pixel_values` is 4-dimensional, it must either contain queries for a single \"\n+                        \"target image or a single query per target image.\"\n+                    )\n+            elif query_pixel_values.ndim != 5:\n+                raise ValueError(\n+                    \"`query_pixel_values` must have shape `(batch_size, num_queries, num_channels, height, width)`.\"\n+                )\n+\n+            if query_pixel_values.shape[0] != batch_size:\n+                raise ValueError(\"The batch dimension of `query_pixel_values` must match the batch dimension of `pixel_values`.\")\n+\n+            num_queries = query_pixel_values.shape[1]\n+            flat_query_pixel_values = query_pixel_values.reshape(\n+                batch_size * num_queries, *query_pixel_values.shape[-3:]\n+            )\n+            query_embeds = self.image_query_embedder(\n+                query_pixel_values=flat_query_pixel_values,\n+                output_attentions=output_attentions,\n+                output_hidden_states=output_hidden_states,\n+            )\n+            query_embeds = query_embeds.reshape(batch_size, num_queries, query_embeds.shape[-1])\n+\n+            if query_mask is None:\n+                query_mask = torch.ones((batch_size, num_queries), device=query_embeds.device, dtype=torch.bool)\n+            else:\n+                if query_mask.ndim == 1:\n+                    query_mask = query_mask.unsqueeze(0)\n+                if query_mask.ndim != 2 or query_mask.shape != (batch_size, num_queries):\n+                    raise ValueError(\"`query_mask` must have shape `(batch_size, num_queries)`.\")\n+                query_mask = query_mask.to(device=query_embeds.device)\n \n         # Predict object classes [batch_size, num_patches, num_queries+1]\n         (pred_logits, class_embeds) = self.class_predictor(image_feats, query_embeds, query_mask)\ndiff --git a/src/transformers/models/owlvit/processing_owlvit.py b/src/transformers/models/owlvit/processing_owlvit.py\nindex 707fa47690..96792a41c6 100644\n--- a/src/transformers/models/owlvit/processing_owlvit.py\n+++ b/src/transformers/models/owlvit/processing_owlvit.py\n@@ -43,12 +43,51 @@ class OwlViTProcessor(ProcessorMixin):\n     def __init__(self, feature_extractor, tokenizer):\n         super().__init__(feature_extractor, tokenizer)\n \n-    def __call__(self, text=None, images=None, padding=\"max_length\", return_tensors=\"np\", **kwargs):\n+    def _preprocess_query_images(self, query_images, images=None, return_tensors=\"np\", **kwargs):\n+        if not isinstance(query_images, (list, tuple)):\n+            query_images = [[query_images]]\n+        elif len(query_images) == 0:\n+            raise ValueError(\"`query_images` must contain at least one image.\")\n+        elif not isinstance(query_images[0], (list, tuple)):\n+            if isinstance(images, (list, tuple)) and len(images) > 1:\n+                raise ValueError(\"When batching multiple target images, `query_images` must be a nested list.\")\n+            query_images = [list(query_images)]\n+\n+        if any(len(batch_query_images) == 0 for batch_query_images in query_images):\n+            raise ValueError(\"Each batch element of `query_images` must contain at least one image.\")\n+\n+        if images is not None and isinstance(images, (list, tuple)) and len(query_images) != len(images):\n+            raise ValueError(\"The number of query image batches must match the number of target images.\")\n+\n+        num_query_images = [len(batch_query_images) for batch_query_images in query_images]\n+        max_num_query_images = max(num_query_images)\n+        flat_query_images = [query_image for batch_query_images in query_images for query_image in batch_query_images]\n+\n+        query_pixel_values = self.feature_extractor(flat_query_images, return_tensors=\"np\", **kwargs)[\"pixel_values\"]\n+        padded_query_pixel_values = np.zeros(\n+            (len(query_images), max_num_query_images) + query_pixel_values.shape[1:], dtype=query_pixel_values.dtype\n+        )\n+        query_mask = np.zeros((len(query_images), max_num_query_images), dtype=np.int64)\n+\n+        query_offset = 0\n+        for index, num_batch_query_images in enumerate(num_query_images):\n+            padded_query_pixel_values[index, :num_batch_query_images] = query_pixel_values[\n+                query_offset : query_offset + num_batch_query_images\n+            ]\n+            query_mask[index, :num_batch_query_images] = 1\n+            query_offset += num_batch_query_images\n+\n+        return BatchEncoding(\n+            data={\"query_pixel_values\": padded_query_pixel_values, \"query_mask\": query_mask},\n+            tensor_type=return_tensors,\n+        )\n+\n+    def __call__(self, text=None, images=None, query_images=None, padding=\"max_length\", return_tensors=\"np\", **kwargs):\n         \"\"\"\n         Main method to prepare for the model one or several text(s) and image(s). This method forwards the `text` and\n         `kwargs` arguments to CLIPTokenizerFast's [`~CLIPTokenizerFast.__call__`] if `text` is not `None` to encode:\n-        the text. To prepare the image(s), this method forwards the `images` and `kwrags` arguments to\n-        CLIPFeatureExtractor's [`~CLIPFeatureExtractor.__call__`] if `images` is not `None`. Please refer to the\n+        the text. To prepare the image(s), this method forwards the `images`, `query_images` and `kwrags` arguments\n+        to CLIPFeatureExtractor's [`~CLIPFeatureExtractor.__call__`] if they are not `None`. Please refer to the\n         doctsring of the above two methods for more information.\n \n         Args:\n@@ -61,6 +100,10 @@ class OwlViTProcessor(ProcessorMixin):\n                 The image or batch of images to be prepared. Each image can be a PIL image, NumPy array or PyTorch\n                 tensor. In case of a NumPy array/PyTorch tensor, each image should be of shape (C, H, W), where C is a\n                 number of channels, H and W are image height and width.\n+            query_images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, `List[PIL.Image.Image]`, `List[np.ndarray]`,\n+            `List[torch.Tensor]`, `List[List[PIL.Image.Image]]`, `List[List[np.ndarray]]`, `List[List[torch.Tensor]]`):\n+                The query image or batch of query images to be prepared. Query images can be provided as a flat list\n+                for a single target image or as a nested list that matches the batch of target `images`.\n             return_tensors (`str` or [`~utils.TensorType`], *optional*):\n                 If set, will return tensors of a particular framework. Acceptable values are:\n                 - `'tf'`: Return TensorFlow `tf.constant` objects.\n@@ -74,10 +117,17 @@ class OwlViTProcessor(ProcessorMixin):\n               `return_attention_mask=True` or if *\"attention_mask\"* is in `self.model_input_names` and if `text` is not\n               `None`).\n             - **pixel_values** -- Pixel values to be fed to a model. Returned when `images` is not `None`.\n+            - **query_pixel_values** -- Pixel values to be fed to a model as image queries. Returned when\n+              `query_images` is not `None`.\n+            - **query_mask** -- Mask that identifies valid query images per batch element. Returned when `query_images`\n+              is not `None`.\n         \"\"\"\n \n-        if text is None and images is None:\n-            raise ValueError(\"You have to specify at least one text or image. Both cannot be none.\")\n+        if text is None and query_images is None and images is None:\n+            raise ValueError(\"You have to specify at least one of `text`, `query_images` or `images`.\")\n+\n+        if text is not None and query_images is not None:\n+            raise ValueError(\"Only one of `text` or `query_images` can be specified.\")\n \n         if text is not None:\n             if isinstance(text, str) or (isinstance(text, List) and not isinstance(text[0], List)):\n@@ -131,13 +181,24 @@ class OwlViTProcessor(ProcessorMixin):\n         if images is not None:\n             image_features = self.feature_extractor(images, return_tensors=return_tensors, **kwargs)\n \n+        if query_images is not None:\n+            query_image_features = self._preprocess_query_images(\n+                query_images=query_images, images=images, return_tensors=return_tensors, **kwargs\n+            )\n+\n         if text is not None and images is not None:\n             encoding[\"pixel_values\"] = image_features.pixel_values\n-            return encoding\n-        elif text is not None:\n-            return encoding\n-        else:\n-            return BatchEncoding(data=dict(**image_features), tensor_type=return_tensors)\n+        elif images is not None:\n+            encoding = BatchEncoding(data=dict(**image_features), tensor_type=return_tensors)\n+\n+        if query_images is not None:\n+            if text is None and images is None:\n+                return query_image_features\n+\n+            encoding[\"query_pixel_values\"] = query_image_features[\"query_pixel_values\"]\n+            encoding[\"query_mask\"] = query_image_features[\"query_mask\"]\n+\n+        return encoding\n \n     def post_process(self, *args, **kwargs):\n         \"\"\"\ndiff --git a/tests/models/owlvit/test_modeling_owlvit.py b/tests/models/owlvit/test_modeling_owlvit.py\nindex 48848f3328..34a740a0e5 100644\n--- a/tests/models/owlvit/test_modeling_owlvit.py\n+++ b/tests/models/owlvit/test_modeling_owlvit.py\n@@ -567,6 +567,42 @@ class OwlViTForObjectDetectionTester:\n         self.parent.assertEqual(result.logits.shape, pred_logits_size)\n         self.parent.assertEqual(result.class_embeds.shape, pred_class_embeds_size)\n \n+    def create_and_check_model_with_query_images(self, config, pixel_values):\n+        model = OwlViTForObjectDetection(config).to(torch_device).eval()\n+        query_pixel_values = pixel_values.unsqueeze(1).repeat(1, 2, 1, 1, 1)\n+        query_mask = torch.ones((self.vision_model_tester.batch_size, 2), device=torch_device, dtype=torch.bool)\n+        query_mask[-1, -1] = 0\n+\n+        with torch.no_grad():\n+            result = model(\n+                pixel_values=pixel_values,\n+                query_pixel_values=query_pixel_values,\n+                query_mask=query_mask,\n+                return_dict=True,\n+            )\n+\n+        pred_boxes_size = (\n+            self.vision_model_tester.batch_size,\n+            (self.vision_model_tester.image_size // self.vision_model_tester.patch_size) ** 2,\n+            4,\n+        )\n+        pred_logits_size = (\n+            self.vision_model_tester.batch_size,\n+            (self.vision_model_tester.image_size // self.vision_model_tester.patch_size) ** 2,\n+            2,\n+        )\n+        pred_class_embeds_size = (\n+            self.vision_model_tester.batch_size,\n+            (self.vision_model_tester.image_size // self.vision_model_tester.patch_size) ** 2,\n+            self.text_model_tester.hidden_size,\n+        )\n+        self.parent.assertEqual(result.pred_boxes.shape, pred_boxes_size)\n+        self.parent.assertEqual(result.logits.shape, pred_logits_size)\n+        self.parent.assertEqual(result.class_embeds.shape, pred_class_embeds_size)\n+        self.parent.assertEqual(result.text_embeds.shape, (self.vision_model_tester.batch_size, 2, config.projection_dim))\n+        self.parent.assertTrue(torch.all(result.logits[-1, :, -1] == -1e6))\n+        self.parent.assertIsNone(result.text_model_last_hidden_state)\n+\n     def prepare_config_and_inputs_for_common(self):\n         config_and_inputs = self.prepare_config_and_inputs()\n         config, pixel_values, input_ids, attention_mask = config_and_inputs\n@@ -594,6 +630,10 @@ class OwlViTForObjectDetectionTest(ModelTesterMixin, unittest.TestCase):\n         config_and_inputs = self.model_tester.prepare_config_and_inputs()\n         self.model_tester.create_and_check_model(*config_and_inputs)\n \n+    def test_model_with_query_images(self):\n+        config, pixel_values, _, _ = self.model_tester.prepare_config_and_inputs()\n+        self.model_tester.create_and_check_model_with_query_images(config, pixel_values)\n+\n     @unittest.skip(reason=\"Hidden_states is tested in individual model tests\")\n     def test_hidden_states_output(self):\n         pass\ndiff --git a/tests/models/owlvit/test_processor_owlvit.py b/tests/models/owlvit/test_processor_owlvit.py\nindex 98fd1222e3..9b5789a1f1 100644\n--- a/tests/models/owlvit/test_processor_owlvit.py\n+++ b/tests/models/owlvit/test_processor_owlvit.py\n@@ -175,6 +175,31 @@ class OwlViTProcessorTest(unittest.TestCase):\n         with pytest.raises(ValueError):\n             processor()\n \n+    def test_processor_with_query_images(self):\n+        feature_extractor = self.get_feature_extractor()\n+        tokenizer = self.get_tokenizer()\n+\n+        processor = OwlViTProcessor(tokenizer=tokenizer, feature_extractor=feature_extractor)\n+\n+        image_inputs = self.prepare_image_inputs() * 2\n+        query_images = [self.prepare_image_inputs() * 2, self.prepare_image_inputs()]\n+\n+        inputs = processor(images=image_inputs, query_images=query_images, return_tensors=\"np\")\n+\n+        self.assertListEqual(list(inputs.keys()), [\"pixel_values\", \"query_pixel_values\", \"query_mask\"])\n+        self.assertEqual(inputs[\"pixel_values\"].shape, (2, 3, 18, 18))\n+        self.assertEqual(inputs[\"query_pixel_values\"].shape, (2, 2, 3, 18, 18))\n+        self.assertListEqual(inputs[\"query_mask\"].tolist(), [[1, 1], [1, 0]])\n+\n+    def test_processor_raises_when_text_and_query_images_are_provided(self):\n+        feature_extractor = self.get_feature_extractor()\n+        tokenizer = self.get_tokenizer()\n+\n+        processor = OwlViTProcessor(tokenizer=tokenizer, feature_extractor=feature_extractor)\n+\n+        with pytest.raises(ValueError):\n+            processor(text=\"lower newer\", query_images=self.prepare_image_inputs(), return_tensors=\"np\")\n+\n     def test_processor_with_text_list(self):\n         model_name = \"google/owlvit-base-patch32\"\n         processor = OwlViTProcessor.from_pretrained(model_name)\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Implemented image-guided OWL-ViT object detection support.\n\nChanges:\n- Extended `OwlViTProcessor` to accept `query_images`, pad nested per-image query batches, and return `query_pixel_values` plus `query_mask` alongside normal `pixel_values`/text inputs.\n- Updated `OwlViTForObjectDetection` to accept either text queries (`input_ids`) or image queries (`query_pixel_values`), compute image-query embeddings through the vision tower + visual projection, validate exclusive inputs, and propagate masked query handling.\n- Added targeted processor/model tests covering query-image preprocessing, invalid mixed text+image query usage, and model forward behavior with image queries.\n\nVerification:\n- `python3 -m compileall src/transformers/models/owlvit tests/models/owlvit`\n- `git diff --check`\n\nVerification limitations:\n- Could not run the OWL-ViT pytest modules because this benchmark environment does not provide `pytest`.\n- Could not run import-time/runtime model tests because the environment also lacks core deps used by these tests (`torch`, `PIL`, `numpy`).",
         "notes": "Static verification passed via `compileall` and `git diff --check`. Full unit/runtime validation was not possible in this environment because `pytest` is missing and `python3` reports no installed `torch`, `PIL`, or `numpy`, so the added OWL-ViT tests could not be executed here.",
         "retrievedContextFiles": [
-          "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
-          "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
-          "<worktree>/tests/models/owlvit/test_processor_owlvit.py",
-          "<worktree>/tests/models/owlvit/test_modeling_owlvit.py"
+          "src/transformers/models/owlvit/processing_owlvit.py",
+          "src/transformers/models/owlvit/modeling_owlvit.py",
+          "tests/models/owlvit/test_processor_owlvit.py",
+          "tests/models/owlvit/test_modeling_owlvit.py"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
+            "file": "src/transformers/models/owlvit/processing_owlvit.py",
             "start": 46,
             "end": 201
           },
           {
-            "file": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+            "file": "src/transformers/models/owlvit/modeling_owlvit.py",
             "start": 1258,
             "end": 1505
           },
           {
-            "file": "<worktree>/tests/models/owlvit/test_processor_owlvit.py",
+            "file": "tests/models/owlvit/test_processor_owlvit.py",
             "start": 161,
             "end": 201
           },
           {
-            "file": "<worktree>/tests/models/owlvit/test_modeling_owlvit.py",
+            "file": "tests/models/owlvit/test_modeling_owlvit.py",
             "start": 541,
             "end": 635
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
+            "file": "src/transformers/models/owlvit/processing_owlvit.py",
             "name": "OwlViTProcessor.__call__"
           },
           {
-            "file": "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
+            "file": "src/transformers/models/owlvit/processing_owlvit.py",
             "name": "OwlViTProcessor._preprocess_query_images"
           },
           {
-            "file": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+            "file": "src/transformers/models/owlvit/modeling_owlvit.py",
             "name": "OwlViTForObjectDetection.forward"
           },
           {
-            "file": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+            "file": "src/transformers/models/owlvit/modeling_owlvit.py",
             "name": "OwlViTForObjectDetection.image_embedder"
           },
           {
-            "file": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+            "file": "src/transformers/models/owlvit/modeling_owlvit.py",
             "name": "OwlViTForObjectDetection.image_query_embedder"
           },
           {
-            "file": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+            "file": "src/transformers/models/owlvit/modeling_owlvit.py",
             "name": "OwlViTForObjectDetection.text_query_embedder"
           }
         ]
@@ -89,986 +126,13 @@
         "predSteps": [
           {
             "files": [
-              "src/transformers/models/owlvit/__init__.py",
-              "src/transformers/models/owlvit/configuration_owlvit.py",
-              "src/transformers/models/owlvit/convert_owlvit_original_flax_to_hf.py",
-              "src/transformers/models/owlvit/feature_extraction_owlvit.py",
-              "src/transformers/models/owlvit/modeling_owlvit.py",
-              "src/transformers/models/owlvit/processing_owlvit.py",
-              "tests/models/owlvit/__init__.py",
-              "tests/models/owlvit/test_feature_extraction_owlvit.py",
-              "tests/models/owlvit/test_modeling_owlvit.py",
               "tests/models/owlvit/test_processor_owlvit.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/transformers/models/auto/modeling_auto.py",
-              "src/transformers/models/auto/processing_auto.py",
-              "src/transformers/models/clip/configuration_clip.py",
-              "src/transformers/models/clip/modeling_clip.py",
-              "src/transformers/models/clip/modeling_flax_clip.py",
-              "src/transformers/models/clip/modeling_tf_clip.py",
-              "src/transformers/models/clipseg/modeling_clipseg.py",
-              "src/transformers/models/conditional_detr/feature_extraction_conditional_detr.py",
-              "src/transformers/models/conditional_detr/modeling_conditional_detr.py",
-              "src/transformers/models/deformable_detr/feature_extraction_deformable_detr.py",
-              "src/transformers/models/deformable_detr/modeling_deformable_detr.py",
-              "src/transformers/models/detr/feature_extraction_detr.py",
-              "src/transformers/models/detr/modeling_detr.py",
-              "src/transformers/models/groupvit/configuration_groupvit.py",
-              "src/transformers/models/groupvit/modeling_groupvit.py",
-              "src/transformers/models/groupvit/modeling_tf_groupvit.py",
-              "src/transformers/models/owlvit/__init__.py",
-              "src/transformers/models/owlvit/configuration_owlvit.py",
-              "src/transformers/models/owlvit/convert_owlvit_original_flax_to_hf.py",
-              "src/transformers/models/owlvit/feature_extraction_owlvit.py",
-              "src/transformers/models/owlvit/modeling_owlvit.py",
-              "src/transformers/models/owlvit/processing_owlvit.py",
-              "src/transformers/models/table_transformer/modeling_table_transformer.py",
-              "src/transformers/models/vilt/modeling_vilt.py",
-              "src/transformers/models/vision_text_dual_encoder/modeling_flax_vision_text_dual_encoder.py",
-              "src/transformers/models/vision_text_dual_encoder/modeling_vision_text_dual_encoder.py",
-              "src/transformers/models/yolos/feature_extraction_yolos.py",
-              "src/transformers/models/yolos/modeling_yolos.py",
-              "src/transformers/pipelines/object_detection.py",
-              "src/transformers/pipelines/zero_shot_object_detection.py",
-              "src/transformers/utils/dummy_pt_objects.py",
-              "src/transformers/utils/dummy_vision_objects.py"
-            ],
             "spans": {
-              "src/transformers/pipelines/object_detection.py": [
+              "tests/models/owlvit/test_processor_owlvit.py": [
                 {
-                  "start": 126,
-                  "end": 126
-                }
-              ],
-              "src/transformers/models/detr/feature_extraction_detr.py": [
-                {
-                  "start": 853,
-                  "end": 853
-                },
-                {
-                  "start": 1112,
-                  "end": 1112
-                }
-              ],
-              "src/transformers/models/detr/modeling_detr.py": [
-                {
-                  "start": 147,
-                  "end": 147
-                },
-                {
-                  "start": 210,
-                  "end": 210
-                },
-                {
-                  "start": 1425,
-                  "end": 1425
-                }
-              ],
-              "src/transformers/models/yolos/feature_extraction_yolos.py": [
-                {
-                  "start": 678,
-                  "end": 678
-                },
-                {
-                  "start": 702,
-                  "end": 702
-                },
-                {
-                  "start": 703,
-                  "end": 703
-                }
-              ],
-              "src/transformers/models/yolos/modeling_yolos.py": [
-                {
-                  "start": 775,
-                  "end": 775
-                }
-              ],
-              "src/transformers/models/owlvit/__init__.py": [
-                {
-                  "start": 39,
-                  "end": 39
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 74,
-                  "end": 74
-                },
-                {
-                  "start": 92,
-                  "end": 92
-                }
-              ],
-              "src/transformers/models/owlvit/feature_extraction_owlvit.py": [
-                {
-                  "start": 45,
-                  "end": 45
-                },
-                {
-                  "start": 109,
-                  "end": 109
-                }
-              ],
-              "src/transformers/models/owlvit/processing_owlvit.py": [
-                {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 32,
-                  "end": 32
-                }
-              ],
-              "src/transformers/models/owlvit/convert_owlvit_original_flax_to_hf.py": [
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 35,
-                  "end": 35
-                },
-                {
-                  "start": 340,
+                  "start": 1,
                   "end": 340
-                },
-                {
-                  "start": 362,
-                  "end": 362
-                }
-              ],
-              "src/transformers/models/owlvit/configuration_owlvit.py": [
-                {
-                  "start": 41,
-                  "end": 41
-                },
-                {
-                  "start": 149,
-                  "end": 149
-                },
-                {
-                  "start": 256,
-                  "end": 256
-                },
-                {
-                  "start": 351,
-                  "end": 351
-                },
-                {
-                  "start": 369,
-                  "end": 369
-                }
-              ],
-              "src/transformers/models/owlvit/modeling_owlvit.py": [
-                {
-                  "start": 80,
-                  "end": 80
-                },
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 89,
-                  "end": 89
-                },
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 106,
-                  "end": 106
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 120,
-                  "end": 120
-                },
-                {
-                  "start": 138,
-                  "end": 138
-                },
-                {
-                  "start": 156,
-                  "end": 156
-                },
-                {
-                  "start": 162,
-                  "end": 162
-                },
-                {
-                  "start": 194,
-                  "end": 194
-                },
-                {
-                  "start": 224,
-                  "end": 224
-                },
-                {
-                  "start": 329,
-                  "end": 329
-                },
-                {
-                  "start": 345,
-                  "end": 345
-                },
-                {
-                  "start": 395,
-                  "end": 395
-                },
-                {
-                  "start": 540,
-                  "end": 540
-                },
-                {
-                  "start": 635,
-                  "end": 635
-                },
-                {
-                  "start": 716,
-                  "end": 716
-                },
-                {
-                  "start": 746,
-                  "end": 746
-                },
-                {
-                  "start": 749,
-                  "end": 749
-                },
-                {
-                  "start": 768,
-                  "end": 768
-                },
-                {
-                  "start": 822,
-                  "end": 822
-                },
-                {
-                  "start": 851,
-                  "end": 851
-                },
-                {
-                  "start": 854,
-                  "end": 854
-                },
-                {
-                  "start": 873,
-                  "end": 873
-                },
-                {
-                  "start": 924,
-                  "end": 924
-                },
-                {
-                  "start": 927,
-                  "end": 927
-                },
-                {
-                  "start": 970,
-                  "end": 970
-                },
-                {
-                  "start": 973,
-                  "end": 973
-                },
-                {
-                  "start": 1010,
-                  "end": 1010
-                },
-                {
-                  "start": 1020,
-                  "end": 1020
-                },
-                {
-                  "start": 1023,
-                  "end": 1023
-                },
-                {
-                  "start": 1056,
-                  "end": 1056
-                },
-                {
-                  "start": 1057,
-                  "end": 1057
-                },
-                {
-                  "start": 1060,
-                  "end": 1060
-                },
-                {
-                  "start": 1065,
-                  "end": 1065
-                },
-                {
-                  "start": 1072,
-                  "end": 1072
-                },
-                {
-                  "start": 1074,
-                  "end": 1074
-                },
-                {
-                  "start": 1079,
-                  "end": 1079
-                },
-                {
-                  "start": 1082,
-                  "end": 1082
-                },
-                {
-                  "start": 1090,
-                  "end": 1090
-                },
-                {
-                  "start": 1096,
-                  "end": 1096
-                },
-                {
-                  "start": 1115,
-                  "end": 1115
-                },
-                {
-                  "start": 1129,
-                  "end": 1129
-                },
-                {
-                  "start": 1134,
-                  "end": 1134
-                },
-                {
-                  "start": 1144,
-                  "end": 1144
-                },
-                {
-                  "start": 1145,
-                  "end": 1145
-                },
-                {
-                  "start": 1160,
-                  "end": 1160
-                },
-                {
-                  "start": 1273,
-                  "end": 1273
-                },
-                {
-                  "start": 1274,
-                  "end": 1274
-                },
-                {
-                  "start": 1275,
-                  "end": 1275
-                },
-                {
-                  "start": 1278,
-                  "end": 1278
-                },
-                {
-                  "start": 1279,
-                  "end": 1279
-                },
-                {
-                  "start": 1283,
-                  "end": 1283
-                },
-                {
-                  "start": 1284,
-                  "end": 1284
-                },
-                {
-                  "start": 1285,
-                  "end": 1285
-                },
-                {
-                  "start": 1286,
-                  "end": 1286
-                },
-                {
-                  "start": 1288,
-                  "end": 1288
-                },
-                {
-                  "start": 1295,
-                  "end": 1295
-                },
-                {
-                  "start": 1316,
-                  "end": 1316
-                },
-                {
-                  "start": 1318,
-                  "end": 1318
-                },
-                {
-                  "start": 1319,
-                  "end": 1319
-                },
-                {
-                  "start": 1396,
-                  "end": 1396
-                }
-              ],
-              "src/transformers/models/deformable_detr/modeling_deformable_detr.py": [
-                {
-                  "start": 239,
-                  "end": 239
-                },
-                {
-                  "start": 1884,
-                  "end": 1884
-                }
-              ],
-              "src/transformers/models/deformable_detr/feature_extraction_deformable_detr.py": [
-                {
-                  "start": 710,
-                  "end": 710
-                },
-                {
-                  "start": 738,
-                  "end": 738
-                }
-              ],
-              "src/transformers/models/clipseg/modeling_clipseg.py": [
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 89,
-                  "end": 89
-                },
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 106,
-                  "end": 106
-                },
-                {
-                  "start": 1132,
-                  "end": 1132
-                },
-                {
-                  "start": 1133,
-                  "end": 1133
-                },
-                {
-                  "start": 1139,
-                  "end": 1139
-                },
-                {
-                  "start": 1144,
-                  "end": 1144
-                },
-                {
-                  "start": 1152,
-                  "end": 1152
-                },
-                {
-                  "start": 1160,
-                  "end": 1160
-                }
-              ],
-              "src/transformers/models/groupvit/modeling_tf_groupvit.py": [
-                {
-                  "start": 222,
-                  "end": 222
-                },
-                {
-                  "start": 225,
-                  "end": 225
-                },
-                {
-                  "start": 241,
-                  "end": 241
-                },
-                {
-                  "start": 255,
-                  "end": 255
-                },
-                {
-                  "start": 1387,
-                  "end": 1387
-                },
-                {
-                  "start": 1389,
-                  "end": 1389
-                },
-                {
-                  "start": 1396,
-                  "end": 1396
-                },
-                {
-                  "start": 1401,
-                  "end": 1401
-                },
-                {
-                  "start": 1428,
-                  "end": 1428
-                },
-                {
-                  "start": 1452,
-                  "end": 1452
-                },
-                {
-                  "start": 1457,
-                  "end": 1457
-                },
-                {
-                  "start": 1466,
-                  "end": 1466
-                }
-              ],
-              "src/transformers/models/groupvit/modeling_groupvit.py": [
-                {
-                  "start": 297,
-                  "end": 297
-                },
-                {
-                  "start": 300,
-                  "end": 300
-                },
-                {
-                  "start": 316,
-                  "end": 316
-                },
-                {
-                  "start": 330,
-                  "end": 330
-                },
-                {
-                  "start": 1532,
-                  "end": 1532
-                },
-                {
-                  "start": 1533,
-                  "end": 1533
-                },
-                {
-                  "start": 1539,
-                  "end": 1539
-                },
-                {
-                  "start": 1544,
-                  "end": 1544
-                },
-                {
-                  "start": 1567,
-                  "end": 1567
-                },
-                {
-                  "start": 1590,
-                  "end": 1590
-                },
-                {
-                  "start": 1595,
-                  "end": 1595
-                },
-                {
-                  "start": 1604,
-                  "end": 1604
-                }
-              ],
-              "src/transformers/models/groupvit/configuration_groupvit.py": [
-                {
-                  "start": 382,
-                  "end": 382
-                }
-              ],
-              "src/transformers/pipelines/zero_shot_object_detection.py": [
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 189,
-                  "end": 189
-                }
-              ],
-              "src/transformers/models/clip/modeling_clip.py": [
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 85,
-                  "end": 85
-                },
-                {
-                  "start": 89,
-                  "end": 89
-                },
-                {
-                  "start": 101,
-                  "end": 101
-                },
-                {
-                  "start": 1045,
-                  "end": 1045
-                },
-                {
-                  "start": 1046,
-                  "end": 1046
-                },
-                {
-                  "start": 1052,
-                  "end": 1052
-                },
-                {
-                  "start": 1057,
-                  "end": 1057
-                },
-                {
-                  "start": 1065,
-                  "end": 1065
-                },
-                {
-                  "start": 1073,
-                  "end": 1073
-                }
-              ],
-              "src/transformers/models/auto/processing_auto.py": [
-                {
-                  "start": 52,
-                  "end": 52
-                }
-              ],
-              "src/transformers/models/auto/modeling_auto.py": [
-                {
-                  "start": 490,
-                  "end": 490
-                }
-              ],
-              "src/transformers/models/clip/configuration_clip.py": [
-                {
-                  "start": 374,
-                  "end": 374
-                }
-              ],
-              "src/transformers/models/clip/modeling_flax_clip.py": [
-                {
-                  "start": 163,
-                  "end": 163
-                },
-                {
-                  "start": 166,
-                  "end": 166
-                },
-                {
-                  "start": 171,
-                  "end": 171
-                },
-                {
-                  "start": 183,
-                  "end": 183
-                },
-                {
-                  "start": 1119,
-                  "end": 1119
-                },
-                {
-                  "start": 1120,
-                  "end": 1120
-                },
-                {
-                  "start": 1126,
-                  "end": 1126
-                },
-                {
-                  "start": 1131,
-                  "end": 1131
-                },
-                {
-                  "start": 1135,
-                  "end": 1135
-                },
-                {
-                  "start": 1141,
-                  "end": 1141
-                }
-              ],
-              "src/transformers/models/clip/modeling_tf_clip.py": [
-                {
-                  "start": 98,
-                  "end": 98
-                },
-                {
-                  "start": 101,
-                  "end": 101
-                },
-                {
-                  "start": 105,
-                  "end": 105
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 869,
-                  "end": 869
-                },
-                {
-                  "start": 870,
-                  "end": 870
-                },
-                {
-                  "start": 876,
-                  "end": 876
-                },
-                {
-                  "start": 881,
-                  "end": 881
-                },
-                {
-                  "start": 890,
-                  "end": 890
-                },
-                {
-                  "start": 898,
-                  "end": 898
-                }
-              ],
-              "src/transformers/models/vision_text_dual_encoder/modeling_vision_text_dual_encoder.py": [
-                {
-                  "start": 375,
-                  "end": 375
-                },
-                {
-                  "start": 376,
-                  "end": 376
-                },
-                {
-                  "start": 382,
-                  "end": 382
-                },
-                {
-                  "start": 387,
-                  "end": 387
-                },
-                {
-                  "start": 395,
-                  "end": 395
-                },
-                {
-                  "start": 403,
-                  "end": 403
-                }
-              ],
-              "src/transformers/models/conditional_detr/feature_extraction_conditional_detr.py": [
-                {
-                  "start": 844,
-                  "end": 844
-                },
-                {
-                  "start": 872,
-                  "end": 872
-                },
-                {
-                  "start": 873,
-                  "end": 873
-                }
-              ],
-              "src/transformers/models/vision_text_dual_encoder/modeling_flax_vision_text_dual_encoder.py": [
-                {
-                  "start": 190,
-                  "end": 190
-                },
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 197,
-                  "end": 197
-                },
-                {
-                  "start": 202,
-                  "end": 202
-                },
-                {
-                  "start": 206,
-                  "end": 206
-                },
-                {
-                  "start": 212,
-                  "end": 212
-                }
-              ],
-              "src/transformers/models/conditional_detr/modeling_conditional_detr.py": [
-                {
-                  "start": 152,
-                  "end": 152
-                },
-                {
-                  "start": 216,
-                  "end": 216
-                },
-                {
-                  "start": 1702,
-                  "end": 1702
-                }
-              ],
-              "src/transformers/models/vilt/modeling_vilt.py": [
-                {
-                  "start": 205,
-                  "end": 205
-                },
-                {
-                  "start": 214,
-                  "end": 214
-                },
-                {
-                  "start": 215,
-                  "end": 215
-                },
-                {
-                  "start": 228,
-                  "end": 228
-                },
-                {
-                  "start": 233,
-                  "end": 233
-                },
-                {
-                  "start": 653,
-                  "end": 653
-                },
-                {
-                  "start": 708,
-                  "end": 708
-                },
-                {
-                  "start": 766,
-                  "end": 766
-                },
-                {
-                  "start": 815,
-                  "end": 815
-                },
-                {
-                  "start": 816,
-                  "end": 816
-                },
-                {
-                  "start": 817,
-                  "end": 817
-                },
-                {
-                  "start": 818,
-                  "end": 818
-                },
-                {
-                  "start": 820,
-                  "end": 820
-                },
-                {
-                  "start": 840,
-                  "end": 840
-                },
-                {
-                  "start": 921,
-                  "end": 921
-                },
-                {
-                  "start": 993,
-                  "end": 993
-                },
-                {
-                  "start": 1095,
-                  "end": 1095
-                },
-                {
-                  "start": 1143,
-                  "end": 1143
-                },
-                {
-                  "start": 1200,
-                  "end": 1200
-                },
-                {
-                  "start": 1244,
-                  "end": 1244
-                },
-                {
-                  "start": 1306,
-                  "end": 1306
-                },
-                {
-                  "start": 1352,
-                  "end": 1352
-                },
-                {
-                  "start": 1354,
-                  "end": 1354
-                },
-                {
-                  "start": 1358,
-                  "end": 1358
-                },
-                {
-                  "start": 1376,
-                  "end": 1376
-                },
-                {
-                  "start": 1443,
-                  "end": 1443
-                },
-                {
-                  "start": 1466,
-                  "end": 1466
-                }
-              ],
-              "src/transformers/models/table_transformer/modeling_table_transformer.py": [
-                {
-                  "start": 152,
-                  "end": 152
-                },
-                {
-                  "start": 1371,
-                  "end": 1371
-                }
-              ],
-              "src/transformers/utils/dummy_vision_objects.py": [
-                {
-                  "start": 256,
-                  "end": 256
-                }
-              ],
-              "src/transformers/utils/dummy_pt_objects.py": [
-                {
-                  "start": 3928,
-                  "end": 3928
-                },
-                {
-                  "start": 3935,
-                  "end": 3935
-                },
-                {
-                  "start": 3942,
-                  "end": 3942
-                },
-                {
-                  "start": 3949,
-                  "end": 3949
-                },
-                {
-                  "start": 3956,
-                  "end": 3956
                 }
               ]
             },
@@ -1076,23 +140,72 @@
           },
           {
             "files": [
-              "tests/models/owlvit/test_processor_owlvit.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "tests/models/owlvit/test_modeling_owlvit.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/models/owlvit/test_modeling_owlvit.py": [
+                {
+                  "start": 520,
+                  "end": 860
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/transformers/models/owlvit/processing_owlvit.py"
             ],
-            "spans": {},
+            "spans": {
+              "src/transformers/models/owlvit/processing_owlvit.py": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/owlvit/modeling_owlvit.py"
+            ],
+            "spans": {
+              "src/transformers/models/owlvit/modeling_owlvit.py": [
+                {
+                  "start": 1160,
+                  "end": 1425
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/owlvit/modeling_owlvit.py"
+            ],
+            "spans": {
+              "src/transformers/models/owlvit/modeling_owlvit.py": [
+                {
+                  "start": 1096,
+                  "end": 1165
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/owlvit/modeling_owlvit.py"
+            ],
+            "spans": {
+              "src/transformers/models/owlvit/modeling_owlvit.py": [
+                {
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -1104,1112 +217,227 @@
           },
           {
             "files": [
-              "src/transformers/models/owlvit/feature_extraction_owlvit.py"
+              "src/transformers/models/owlvit/modeling_owlvit.py"
             ],
-            "spans": {},
+            "spans": {
+              "src/transformers/models/owlvit/modeling_owlvit.py": [
+                {
+                  "start": 500,
+                  "end": 590
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "examples/flax/question-answering/requirements.txt",
-              "examples/flax/token-classification/requirements.txt",
-              "examples/flax/vision/requirements.txt",
-              "examples/legacy/pytorch-lightning/requirements.txt",
-              "examples/legacy/seq2seq/requirements.txt",
-              "examples/pytorch/benchmarking/requirements.txt",
-              "examples/pytorch/multiple-choice/requirements.txt",
-              "examples/research_projects/adversarial/requirements.txt",
-              "examples/research_projects/bert-loses-patience/requirements.txt",
-              "examples/research_projects/bertabs/requirements.txt",
-              "examples/research_projects/bertology/requirements.txt",
-              "examples/research_projects/codeparrot/examples/requirements.txt",
-              "examples/research_projects/codeparrot/requirements.txt",
-              "examples/research_projects/decision_transformer/requirements.txt",
-              "examples/research_projects/deebert/requirements.txt",
-              "examples/research_projects/distillation/requirements.txt",
-              "examples/research_projects/fsner/pyproject.toml",
-              "examples/research_projects/fsner/requirements.txt",
-              "examples/research_projects/fsner/setup.py",
-              "examples/research_projects/information-gain-filtration/requirements.txt",
-              "examples/research_projects/jax-projects/big_bird/requirements.txt",
-              "examples/research_projects/jax-projects/hybrid_clip/requirements.txt",
-              "examples/research_projects/layoutlmv3/requirements.txt",
-              "examples/research_projects/longform-qa/requirements.txt",
-              "examples/research_projects/lxmert/requirements.txt",
-              "examples/research_projects/mlm_wwm/requirements.txt",
-              "examples/research_projects/movement-pruning/requirements.txt",
-              "examples/research_projects/onnx/summarization/requirements.txt",
-              "examples/research_projects/pplm/requirements.txt",
-              "examples/research_projects/rag-end2end-retriever/requirements.txt",
-              "examples/research_projects/rag/requirements.txt",
-              "examples/research_projects/self-training-text-classification/requirements.txt",
-              "examples/research_projects/seq2seq-distillation/requirements.txt",
-              "examples/research_projects/tapex/requirements.txt",
-              "examples/research_projects/visual_bert/requirements.txt",
-              "examples/research_projects/wav2vec2/requirements.txt",
-              "examples/research_projects/xtreme-s/requirements.txt",
-              "examples/tensorflow/benchmarking/requirements.txt",
-              "examples/tensorflow/language-modeling/requirements.txt",
-              "examples/tensorflow/multiple-choice/requirements.txt",
-              "examples/tensorflow/question-answering/requirements.txt",
-              "examples/tensorflow/summarization/requirements.txt",
-              "examples/tensorflow/text-classification/requirements.txt",
-              "examples/tensorflow/token-classification/requirements.txt",
-              "examples/tensorflow/translation/requirements.txt",
-              "pyproject.toml",
-              "setup.cfg",
-              "setup.py",
-              "tests/sagemaker/scripts/pytorch/requirements.txt",
-              "tests/sagemaker/scripts/tensorflow/requirements.txt"
+              "src/transformers/models/owlvit/modeling_owlvit.py"
             ],
-            "spans": {},
+            "spans": {
+              "src/transformers/models/owlvit/modeling_owlvit.py": [
+                {
+                  "start": 873,
+                  "end": 1095
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/owlvit/feature_extraction_owlvit.py"
+            ],
+            "spans": {
+              "src/transformers/models/owlvit/feature_extraction_owlvit.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/owlvit/test_modeling_owlvit.py"
+            ],
+            "spans": {
+              "tests/models/owlvit/test_modeling_owlvit.py": [
+                {
+                  "start": 1,
+                  "end": 210
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/owlvit/processing_owlvit.py"
+            ],
+            "spans": {
+              "src/transformers/models/owlvit/processing_owlvit.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/owlvit/test_processor_owlvit.py"
+            ],
+            "spans": {
+              "tests/models/owlvit/test_processor_owlvit.py": [
+                {
+                  "start": 100,
+                  "end": 280
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/owlvit/test_modeling_owlvit.py"
+            ],
+            "spans": {
+              "tests/models/owlvit/test_modeling_owlvit.py": [
+                {
+                  "start": 523,
+                  "end": 720
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/owlvit/modeling_owlvit.py"
+            ],
+            "spans": {
+              "src/transformers/models/owlvit/modeling_owlvit.py": [
+                {
+                  "start": 1180,
+                  "end": 1435
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/owlvit/modeling_owlvit.py"
+            ],
+            "spans": {
+              "src/transformers/models/owlvit/modeling_owlvit.py": [
+                {
+                  "start": 1435,
+                  "end": 1505
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/owlvit/test_modeling_owlvit.py"
+            ],
+            "spans": {
+              "tests/models/owlvit/test_modeling_owlvit.py": [
+                {
+                  "start": 1,
+                  "end": 80
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/owlvit/modeling_owlvit.py"
+            ],
+            "spans": {
+              "src/transformers/models/owlvit/modeling_owlvit.py": [
+                {
+                  "start": 1180,
+                  "end": 1505
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/owlvit/processing_owlvit.py"
+            ],
+            "spans": {
+              "src/transformers/models/owlvit/processing_owlvit.py": [
+                {
+                  "start": 35,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/owlvit/test_modeling_owlvit.py"
+            ],
+            "spans": {
+              "tests/models/owlvit/test_modeling_owlvit.py": [
+                {
+                  "start": 540,
+                  "end": 660
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/owlvit/test_processor_owlvit.py"
+            ],
+            "spans": {
+              "tests/models/owlvit/test_processor_owlvit.py": [
+                {
+                  "start": 150,
+                  "end": 230
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
-          "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
-          "<worktree>/tests/models/owlvit/test_modeling_owlvit.py",
-          "<worktree>/tests/models/owlvit/test_processor_owlvit.py",
-          "examples/flax/question-answering/requirements.txt",
-          "examples/flax/token-classification/requirements.txt",
-          "examples/flax/vision/requirements.txt",
-          "examples/legacy/pytorch-lightning/requirements.txt",
-          "examples/legacy/seq2seq/requirements.txt",
-          "examples/pytorch/benchmarking/requirements.txt",
-          "examples/pytorch/multiple-choice/requirements.txt",
-          "examples/research_projects/adversarial/requirements.txt",
-          "examples/research_projects/bert-loses-patience/requirements.txt",
-          "examples/research_projects/bertabs/requirements.txt",
-          "examples/research_projects/bertology/requirements.txt",
-          "examples/research_projects/codeparrot/examples/requirements.txt",
-          "examples/research_projects/codeparrot/requirements.txt",
-          "examples/research_projects/decision_transformer/requirements.txt",
-          "examples/research_projects/deebert/requirements.txt",
-          "examples/research_projects/distillation/requirements.txt",
-          "examples/research_projects/fsner/pyproject.toml",
-          "examples/research_projects/fsner/requirements.txt",
-          "examples/research_projects/fsner/setup.py",
-          "examples/research_projects/information-gain-filtration/requirements.txt",
-          "examples/research_projects/jax-projects/big_bird/requirements.txt",
-          "examples/research_projects/jax-projects/hybrid_clip/requirements.txt",
-          "examples/research_projects/layoutlmv3/requirements.txt",
-          "examples/research_projects/longform-qa/requirements.txt",
-          "examples/research_projects/lxmert/requirements.txt",
-          "examples/research_projects/mlm_wwm/requirements.txt",
-          "examples/research_projects/movement-pruning/requirements.txt",
-          "examples/research_projects/onnx/summarization/requirements.txt",
-          "examples/research_projects/pplm/requirements.txt",
-          "examples/research_projects/rag-end2end-retriever/requirements.txt",
-          "examples/research_projects/rag/requirements.txt",
-          "examples/research_projects/self-training-text-classification/requirements.txt",
-          "examples/research_projects/seq2seq-distillation/requirements.txt",
-          "examples/research_projects/tapex/requirements.txt",
-          "examples/research_projects/visual_bert/requirements.txt",
-          "examples/research_projects/wav2vec2/requirements.txt",
-          "examples/research_projects/xtreme-s/requirements.txt",
-          "examples/tensorflow/benchmarking/requirements.txt",
-          "examples/tensorflow/language-modeling/requirements.txt",
-          "examples/tensorflow/multiple-choice/requirements.txt",
-          "examples/tensorflow/question-answering/requirements.txt",
-          "examples/tensorflow/summarization/requirements.txt",
-          "examples/tensorflow/text-classification/requirements.txt",
-          "examples/tensorflow/token-classification/requirements.txt",
-          "examples/tensorflow/translation/requirements.txt",
-          "pyproject.toml",
-          "setup.cfg",
-          "setup.py",
-          "src/transformers/models/auto/modeling_auto.py",
-          "src/transformers/models/auto/processing_auto.py",
-          "src/transformers/models/clip/configuration_clip.py",
-          "src/transformers/models/clip/modeling_clip.py",
-          "src/transformers/models/clip/modeling_flax_clip.py",
-          "src/transformers/models/clip/modeling_tf_clip.py",
-          "src/transformers/models/clipseg/modeling_clipseg.py",
-          "src/transformers/models/conditional_detr/feature_extraction_conditional_detr.py",
-          "src/transformers/models/conditional_detr/modeling_conditional_detr.py",
-          "src/transformers/models/deformable_detr/feature_extraction_deformable_detr.py",
-          "src/transformers/models/deformable_detr/modeling_deformable_detr.py",
-          "src/transformers/models/detr/feature_extraction_detr.py",
-          "src/transformers/models/detr/modeling_detr.py",
-          "src/transformers/models/groupvit/configuration_groupvit.py",
-          "src/transformers/models/groupvit/modeling_groupvit.py",
-          "src/transformers/models/groupvit/modeling_tf_groupvit.py",
-          "src/transformers/models/owlvit/__init__.py",
-          "src/transformers/models/owlvit/configuration_owlvit.py",
-          "src/transformers/models/owlvit/convert_owlvit_original_flax_to_hf.py",
-          "src/transformers/models/owlvit/feature_extraction_owlvit.py",
           "src/transformers/models/owlvit/modeling_owlvit.py",
           "src/transformers/models/owlvit/processing_owlvit.py",
-          "src/transformers/models/table_transformer/modeling_table_transformer.py",
-          "src/transformers/models/vilt/modeling_vilt.py",
-          "src/transformers/models/vision_text_dual_encoder/modeling_flax_vision_text_dual_encoder.py",
-          "src/transformers/models/vision_text_dual_encoder/modeling_vision_text_dual_encoder.py",
-          "src/transformers/models/yolos/feature_extraction_yolos.py",
-          "src/transformers/models/yolos/modeling_yolos.py",
-          "src/transformers/pipelines/object_detection.py",
-          "src/transformers/pipelines/zero_shot_object_detection.py",
-          "src/transformers/utils/dummy_pt_objects.py",
-          "src/transformers/utils/dummy_vision_objects.py",
-          "tests/models/owlvit/__init__.py",
-          "tests/models/owlvit/test_feature_extraction_owlvit.py",
           "tests/models/owlvit/test_modeling_owlvit.py",
-          "tests/models/owlvit/test_processor_owlvit.py",
-          "tests/sagemaker/scripts/pytorch/requirements.txt",
-          "tests/sagemaker/scripts/tensorflow/requirements.txt"
+          "tests/models/owlvit/test_processor_owlvit.py"
         ],
         "predSpans": {
-          "src/transformers/pipelines/object_detection.py": [
-            {
-              "start": 126,
-              "end": 126
-            }
-          ],
-          "src/transformers/models/detr/feature_extraction_detr.py": [
-            {
-              "start": 853,
-              "end": 853
-            },
-            {
-              "start": 1112,
-              "end": 1112
-            }
-          ],
-          "src/transformers/models/detr/modeling_detr.py": [
-            {
-              "start": 147,
-              "end": 147
-            },
-            {
-              "start": 210,
-              "end": 210
-            },
-            {
-              "start": 1425,
-              "end": 1425
-            }
-          ],
-          "src/transformers/models/yolos/feature_extraction_yolos.py": [
-            {
-              "start": 678,
-              "end": 678
-            },
-            {
-              "start": 702,
-              "end": 702
-            },
-            {
-              "start": 703,
-              "end": 703
-            }
-          ],
-          "src/transformers/models/yolos/modeling_yolos.py": [
-            {
-              "start": 775,
-              "end": 775
-            }
-          ],
-          "src/transformers/models/owlvit/__init__.py": [
-            {
-              "start": 39,
-              "end": 39
-            },
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 74,
-              "end": 74
-            },
-            {
-              "start": 92,
-              "end": 92
-            }
-          ],
-          "src/transformers/models/owlvit/feature_extraction_owlvit.py": [
-            {
-              "start": 45,
-              "end": 45
-            },
-            {
-              "start": 109,
-              "end": 109
-            }
-          ],
           "src/transformers/models/owlvit/processing_owlvit.py": [
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 32,
-              "end": 32
-            }
-          ],
-          "src/transformers/models/owlvit/convert_owlvit_original_flax_to_hf.py": [
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 35,
-              "end": 35
-            },
-            {
-              "start": 340,
-              "end": 340
-            },
-            {
-              "start": 362,
-              "end": 362
-            }
-          ],
-          "src/transformers/models/owlvit/configuration_owlvit.py": [
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
-              "start": 149,
-              "end": 149
-            },
-            {
-              "start": 256,
-              "end": 256
-            },
-            {
-              "start": 351,
-              "end": 351
-            },
-            {
-              "start": 369,
-              "end": 369
-            }
-          ],
-          "src/transformers/models/owlvit/modeling_owlvit.py": [
-            {
-              "start": 80,
-              "end": 80
-            },
-            {
-              "start": 86,
-              "end": 86
-            },
-            {
-              "start": 89,
-              "end": 89
-            },
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 106,
-              "end": 106
-            },
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 120,
-              "end": 120
-            },
-            {
-              "start": 138,
-              "end": 138
-            },
-            {
-              "start": 156,
-              "end": 156
-            },
-            {
-              "start": 162,
-              "end": 162
-            },
-            {
-              "start": 194,
-              "end": 194
-            },
-            {
-              "start": 224,
-              "end": 224
-            },
-            {
-              "start": 329,
-              "end": 329
-            },
-            {
-              "start": 345,
-              "end": 345
-            },
-            {
-              "start": 395,
-              "end": 395
-            },
-            {
-              "start": 540,
-              "end": 540
-            },
-            {
-              "start": 635,
-              "end": 635
-            },
-            {
-              "start": 716,
-              "end": 716
-            },
-            {
-              "start": 746,
-              "end": 746
-            },
-            {
-              "start": 749,
-              "end": 749
-            },
-            {
-              "start": 768,
-              "end": 768
-            },
-            {
-              "start": 822,
-              "end": 822
-            },
-            {
-              "start": 851,
-              "end": 851
-            },
-            {
-              "start": 854,
-              "end": 854
-            },
-            {
-              "start": 873,
-              "end": 873
-            },
-            {
-              "start": 924,
-              "end": 924
-            },
-            {
-              "start": 927,
-              "end": 927
-            },
-            {
-              "start": 970,
-              "end": 970
-            },
-            {
-              "start": 973,
-              "end": 973
-            },
-            {
-              "start": 1010,
-              "end": 1010
-            },
-            {
-              "start": 1020,
-              "end": 1020
-            },
-            {
-              "start": 1023,
-              "end": 1023
-            },
-            {
-              "start": 1056,
-              "end": 1056
-            },
-            {
-              "start": 1057,
-              "end": 1057
-            },
-            {
-              "start": 1060,
-              "end": 1060
-            },
-            {
-              "start": 1065,
-              "end": 1065
-            },
-            {
-              "start": 1072,
-              "end": 1072
-            },
-            {
-              "start": 1074,
-              "end": 1074
-            },
-            {
-              "start": 1079,
-              "end": 1079
-            },
-            {
-              "start": 1082,
-              "end": 1082
-            },
-            {
-              "start": 1090,
-              "end": 1090
-            },
-            {
-              "start": 1096,
-              "end": 1096
-            },
-            {
-              "start": 1115,
-              "end": 1115
-            },
-            {
-              "start": 1129,
-              "end": 1129
-            },
-            {
-              "start": 1134,
-              "end": 1134
-            },
-            {
-              "start": 1144,
-              "end": 1144
-            },
-            {
-              "start": 1145,
-              "end": 1145
-            },
-            {
-              "start": 1160,
-              "end": 1160
-            },
-            {
-              "start": 1273,
-              "end": 1273
-            },
-            {
-              "start": 1274,
-              "end": 1274
-            },
-            {
-              "start": 1275,
-              "end": 1275
-            },
-            {
-              "start": 1278,
-              "end": 1278
-            },
-            {
-              "start": 1279,
-              "end": 1279
-            },
-            {
-              "start": 1283,
-              "end": 1283
-            },
-            {
-              "start": 1284,
-              "end": 1284
-            },
-            {
-              "start": 1285,
-              "end": 1285
-            },
-            {
-              "start": 1286,
-              "end": 1286
-            },
-            {
-              "start": 1288,
-              "end": 1288
-            },
-            {
-              "start": 1295,
-              "end": 1295
-            },
-            {
-              "start": 1316,
-              "end": 1316
-            },
-            {
-              "start": 1318,
-              "end": 1318
-            },
-            {
-              "start": 1319,
-              "end": 1319
-            },
-            {
-              "start": 1396,
-              "end": 1396
-            }
-          ],
-          "src/transformers/models/deformable_detr/modeling_deformable_detr.py": [
-            {
-              "start": 239,
-              "end": 239
-            },
-            {
-              "start": 1884,
-              "end": 1884
-            }
-          ],
-          "src/transformers/models/deformable_detr/feature_extraction_deformable_detr.py": [
-            {
-              "start": 710,
-              "end": 710
-            },
-            {
-              "start": 738,
-              "end": 738
-            }
-          ],
-          "src/transformers/models/clipseg/modeling_clipseg.py": [
-            {
-              "start": 86,
-              "end": 86
-            },
-            {
-              "start": 89,
-              "end": 89
-            },
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 106,
-              "end": 106
-            },
-            {
-              "start": 1132,
-              "end": 1132
-            },
-            {
-              "start": 1133,
-              "end": 1133
-            },
-            {
-              "start": 1139,
-              "end": 1139
-            },
-            {
-              "start": 1144,
-              "end": 1144
-            },
-            {
-              "start": 1152,
-              "end": 1152
-            },
-            {
-              "start": 1160,
-              "end": 1160
-            }
-          ],
-          "src/transformers/models/groupvit/modeling_tf_groupvit.py": [
-            {
-              "start": 222,
-              "end": 222
-            },
-            {
-              "start": 225,
-              "end": 225
-            },
-            {
-              "start": 241,
-              "end": 241
-            },
-            {
-              "start": 255,
-              "end": 255
-            },
-            {
-              "start": 1387,
-              "end": 1387
-            },
-            {
-              "start": 1389,
-              "end": 1389
-            },
-            {
-              "start": 1396,
-              "end": 1396
-            },
-            {
-              "start": 1401,
-              "end": 1401
-            },
-            {
-              "start": 1428,
-              "end": 1428
-            },
-            {
-              "start": 1452,
-              "end": 1452
-            },
-            {
-              "start": 1457,
-              "end": 1457
-            },
-            {
-              "start": 1466,
-              "end": 1466
-            }
-          ],
-          "src/transformers/models/groupvit/modeling_groupvit.py": [
-            {
-              "start": 297,
-              "end": 297
-            },
-            {
-              "start": 300,
-              "end": 300
-            },
-            {
-              "start": 316,
-              "end": 316
-            },
-            {
-              "start": 330,
-              "end": 330
-            },
-            {
-              "start": 1532,
-              "end": 1532
-            },
-            {
-              "start": 1533,
-              "end": 1533
-            },
-            {
-              "start": 1539,
-              "end": 1539
-            },
-            {
-              "start": 1544,
-              "end": 1544
-            },
-            {
-              "start": 1567,
-              "end": 1567
-            },
-            {
-              "start": 1590,
-              "end": 1590
-            },
-            {
-              "start": 1595,
-              "end": 1595
-            },
-            {
-              "start": 1604,
-              "end": 1604
-            }
-          ],
-          "src/transformers/models/groupvit/configuration_groupvit.py": [
-            {
-              "start": 382,
-              "end": 382
-            }
-          ],
-          "src/transformers/pipelines/zero_shot_object_detection.py": [
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 189,
-              "end": 189
-            }
-          ],
-          "src/transformers/models/clip/modeling_clip.py": [
-            {
-              "start": 82,
-              "end": 82
-            },
-            {
-              "start": 85,
-              "end": 85
-            },
-            {
-              "start": 89,
-              "end": 89
-            },
-            {
-              "start": 101,
-              "end": 101
-            },
-            {
-              "start": 1045,
-              "end": 1045
-            },
-            {
-              "start": 1046,
-              "end": 1046
-            },
-            {
-              "start": 1052,
-              "end": 1052
-            },
-            {
-              "start": 1057,
-              "end": 1057
-            },
-            {
-              "start": 1065,
-              "end": 1065
-            },
-            {
-              "start": 1073,
-              "end": 1073
-            }
-          ],
-          "src/transformers/models/auto/processing_auto.py": [
-            {
-              "start": 52,
-              "end": 52
-            }
-          ],
-          "src/transformers/models/auto/modeling_auto.py": [
-            {
-              "start": 490,
-              "end": 490
-            }
-          ],
-          "src/transformers/models/clip/configuration_clip.py": [
-            {
-              "start": 374,
-              "end": 374
-            }
-          ],
-          "src/transformers/models/clip/modeling_flax_clip.py": [
-            {
-              "start": 163,
-              "end": 163
-            },
-            {
-              "start": 166,
-              "end": 166
-            },
-            {
-              "start": 171,
-              "end": 171
-            },
-            {
-              "start": 183,
-              "end": 183
-            },
-            {
-              "start": 1119,
-              "end": 1119
-            },
-            {
-              "start": 1120,
-              "end": 1120
-            },
-            {
-              "start": 1126,
-              "end": 1126
-            },
-            {
-              "start": 1131,
-              "end": 1131
-            },
-            {
-              "start": 1135,
-              "end": 1135
-            },
-            {
-              "start": 1141,
-              "end": 1141
-            }
-          ],
-          "src/transformers/models/clip/modeling_tf_clip.py": [
-            {
-              "start": 98,
-              "end": 98
-            },
-            {
-              "start": 101,
-              "end": 101
-            },
-            {
-              "start": 105,
-              "end": 105
-            },
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 869,
-              "end": 869
-            },
-            {
-              "start": 870,
-              "end": 870
-            },
-            {
-              "start": 876,
-              "end": 876
-            },
-            {
-              "start": 881,
-              "end": 881
-            },
-            {
-              "start": 890,
-              "end": 890
-            },
-            {
-              "start": 898,
-              "end": 898
-            }
-          ],
-          "src/transformers/models/vision_text_dual_encoder/modeling_vision_text_dual_encoder.py": [
-            {
-              "start": 375,
-              "end": 375
-            },
-            {
-              "start": 376,
-              "end": 376
-            },
-            {
-              "start": 382,
-              "end": 382
-            },
-            {
-              "start": 387,
-              "end": 387
-            },
-            {
-              "start": 395,
-              "end": 395
-            },
-            {
-              "start": 403,
-              "end": 403
-            }
-          ],
-          "src/transformers/models/conditional_detr/feature_extraction_conditional_detr.py": [
-            {
-              "start": 844,
-              "end": 844
-            },
-            {
-              "start": 872,
-              "end": 872
-            },
-            {
-              "start": 873,
-              "end": 873
-            }
-          ],
-          "src/transformers/models/vision_text_dual_encoder/modeling_flax_vision_text_dual_encoder.py": [
-            {
-              "start": 190,
-              "end": 190
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 197,
-              "end": 197
-            },
-            {
-              "start": 202,
-              "end": 202
-            },
-            {
-              "start": 206,
-              "end": 206
-            },
-            {
-              "start": 212,
-              "end": 212
-            }
-          ],
-          "src/transformers/models/conditional_detr/modeling_conditional_detr.py": [
-            {
-              "start": 152,
-              "end": 152
-            },
-            {
-              "start": 216,
-              "end": 216
-            },
-            {
-              "start": 1702,
-              "end": 1702
-            }
-          ],
-          "src/transformers/models/vilt/modeling_vilt.py": [
-            {
-              "start": 205,
-              "end": 205
-            },
-            {
-              "start": 214,
-              "end": 214
-            },
-            {
-              "start": 215,
-              "end": 215
-            },
-            {
-              "start": 228,
-              "end": 228
-            },
-            {
-              "start": 233,
-              "end": 233
-            },
-            {
-              "start": 653,
-              "end": 653
-            },
-            {
-              "start": 708,
-              "end": 708
-            },
-            {
-              "start": 766,
-              "end": 766
-            },
-            {
-              "start": 815,
-              "end": 815
-            },
-            {
-              "start": 816,
-              "end": 816
-            },
-            {
-              "start": 817,
-              "end": 817
-            },
-            {
-              "start": 818,
-              "end": 818
-            },
-            {
-              "start": 820,
-              "end": 820
-            },
-            {
-              "start": 840,
-              "end": 840
-            },
-            {
-              "start": 921,
-              "end": 921
-            },
-            {
-              "start": 993,
-              "end": 993
-            },
-            {
-              "start": 1095,
-              "end": 1095
-            },
-            {
-              "start": 1143,
-              "end": 1143
-            },
-            {
-              "start": 1200,
-              "end": 1200
-            },
-            {
-              "start": 1244,
-              "end": 1244
-            },
-            {
-              "start": 1306,
-              "end": 1306
-            },
-            {
-              "start": 1352,
-              "end": 1352
-            },
-            {
-              "start": 1354,
-              "end": 1354
-            },
-            {
-              "start": 1358,
-              "end": 1358
-            },
-            {
-              "start": 1376,
-              "end": 1376
-            },
-            {
-              "start": 1443,
-              "end": 1443
-            },
-            {
-              "start": 1466,
-              "end": 1466
-            }
-          ],
-          "src/transformers/models/table_transformer/modeling_table_transformer.py": [
-            {
-              "start": 152,
-              "end": 152
-            },
-            {
-              "start": 1371,
-              "end": 1371
-            }
-          ],
-          "src/transformers/utils/dummy_vision_objects.py": [
-            {
-              "start": 256,
-              "end": 256
-            }
-          ],
-          "src/transformers/utils/dummy_pt_objects.py": [
-            {
-              "start": 3928,
-              "end": 3928
-            },
-            {
-              "start": 3935,
-              "end": 3935
-            },
-            {
-              "start": 3942,
-              "end": 3942
-            },
-            {
-              "start": 3949,
-              "end": 3949
-            },
-            {
-              "start": 3956,
-              "end": 3956
-            }
-          ],
-          "<worktree>/src/transformers/models/owlvit/processing_owlvit.py": [
             {
               "start": 46,
               "end": 201
             }
           ],
-          "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py": [
+          "src/transformers/models/owlvit/modeling_owlvit.py": [
             {
               "start": 1258,
               "end": 1505
             }
           ],
-          "<worktree>/tests/models/owlvit/test_processor_owlvit.py": [
+          "tests/models/owlvit/test_processor_owlvit.py": [
             {
               "start": 161,
               "end": 201
             }
           ],
-          "<worktree>/tests/models/owlvit/test_modeling_owlvit.py": [
+          "tests/models/owlvit/test_modeling_owlvit.py": [
             {
               "start": 541,
               "end": 635
@@ -2217,11 +445,11 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/src/transformers/models/owlvit/processing_owlvit.py": [
+          "src/transformers/models/owlvit/processing_owlvit.py": [
             "OwlViTProcessor.__call__",
             "OwlViTProcessor._preprocess_query_images"
           ],
-          "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py": [
+          "src/transformers/models/owlvit/modeling_owlvit.py": [
             "OwlViTForObjectDetection.forward",
             "OwlViTForObjectDetection.image_embedder",
             "OwlViTForObjectDetection.image_query_embedder",
@@ -2234,7 +462,7 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.6,
+              "file": 0.0,
               "symbol": 0.0,
               "span": 0.0,
               "line": 0.0
@@ -2243,78 +471,195 @@
           {
             "step": 2,
             "coverage": {
-              "file": 0.6,
-              "symbol": 0.42857142857142855,
-              "span": 0.0734414129431923,
-              "line": 0.050742574257425746
+              "file": 0.0,
+              "symbol": 0.0,
+              "span": 0.0,
+              "line": 0.0
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.6,
-              "symbol": 0.42857142857142855,
-              "span": 0.0734414129431923,
-              "line": 0.050742574257425746
+              "file": 0.2,
+              "symbol": 0.16666666666666666,
+              "span": 0.19760115987873994,
+              "line": 0.17202970297029702
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.6,
-              "symbol": 0.42857142857142855,
-              "span": 0.0734414129431923,
-              "line": 0.050742574257425746
+              "file": 0.4,
+              "symbol": 0.35714285714285715,
+              "span": 0.46925003295110057,
+              "line": 0.47277227722772275
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.6,
+              "file": 0.4,
               "symbol": 0.42857142857142855,
-              "span": 0.0734414129431923,
-              "line": 0.050742574257425746
+              "span": 0.5125345986555951,
+              "line": 0.5284653465346535
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.6,
-              "symbol": 0.42857142857142855,
-              "span": 0.0734414129431923,
-              "line": 0.050742574257425746
+              "file": 0.4,
+              "symbol": 0.5714285714285714,
+              "span": 0.6490048767628839,
+              "line": 0.6410891089108911
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 0.6,
-              "symbol": 0.42857142857142855,
-              "span": 0.0734414129431923,
-              "line": 0.050742574257425746
+              "file": 0.4,
+              "symbol": 0.5714285714285714,
+              "span": 0.6490048767628839,
+              "line": 0.6410891089108911
             }
           },
           {
             "step": 8,
             "coverage": {
+              "file": 0.4,
+              "symbol": 0.5714285714285714,
+              "span": 0.6727560300514037,
+              "line": 0.6596534653465347
+            }
+          },
+          {
+            "step": 9,
+            "coverage": {
+              "file": 0.4,
+              "symbol": 0.6666666666666666,
+              "span": 0.7355740081718729,
+              "line": 0.7277227722772277
+            }
+          },
+          {
+            "step": 10,
+            "coverage": {
               "file": 0.6,
-              "symbol": 0.42857142857142855,
-              "span": 0.0734414129431923,
-              "line": 0.050742574257425746
+              "symbol": 0.7619047619047619,
+              "span": 0.9095030974034533,
+              "line": 0.8985148514851485
+            }
+          },
+          {
+            "step": 11,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7619047619047619,
+              "span": 0.9095030974034533,
+              "line": 0.8985148514851485
+            }
+          },
+          {
+            "step": 12,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7619047619047619,
+              "span": 0.9095030974034533,
+              "line": 0.8985148514851485
+            }
+          },
+          {
+            "step": 13,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7619047619047619,
+              "span": 0.9095030974034533,
+              "line": 0.8985148514851485
+            }
+          },
+          {
+            "step": 14,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7619047619047619,
+              "span": 0.9095030974034533,
+              "line": 0.8985148514851485
+            }
+          },
+          {
+            "step": 15,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7619047619047619,
+              "span": 0.9095030974034533,
+              "line": 0.8985148514851485
+            }
+          },
+          {
+            "step": 16,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7619047619047619,
+              "span": 0.9095030974034533,
+              "line": 0.8985148514851485
+            }
+          },
+          {
+            "step": 17,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7619047619047619,
+              "span": 0.9095030974034533,
+              "line": 0.8985148514851485
+            }
+          },
+          {
+            "step": 18,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7619047619047619,
+              "span": 0.9095030974034533,
+              "line": 0.8985148514851485
+            }
+          },
+          {
+            "step": 19,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7619047619047619,
+              "span": 0.9095030974034533,
+              "line": 0.8985148514851485
+            }
+          },
+          {
+            "step": 20,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7619047619047619,
+              "span": 0.9095030974034533,
+              "line": 0.8985148514851485
+            }
+          },
+          {
+            "step": 21,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7619047619047619,
+              "span": 0.9095030974034533,
+              "line": 0.8985148514851485
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.6,
-          "symbol": 0.37499999999999994,
-          "span": 0.06426123632529326,
-          "line": 0.04439975247524752
+          "file": 0.4666666666666667,
+          "symbol": 0.5941043083900227,
+          "span": 0.7047506072417105,
+          "line": 0.6964285714285714
         },
         "redundancy": {
-          "file": 0.11340206185567014,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.7619047619047619,
+          "symbol": 0.4362745098039216,
+          "span": 0.41009844612904334,
+          "line": 0.4134639537804572
         }
       },
       "fixOverlap": {
@@ -2459,7 +804,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2471,12 +825,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2488,7 +860,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/models/owlvit/test_processor_owlvit.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/models/owlvit/test_processor_owlvit.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2500,7 +881,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/models/owlvit/test_modeling_owlvit.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/models/owlvit/test_modeling_owlvit.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",
@@ -2553,7 +943,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2693,9 +1092,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-12T22:32:39Z",
       "completedAt": "2026-05-12T22:40:33Z",
       "durationMs": 474452,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1798670,
@@ -2704,54 +1118,76 @@
         "total_tokens": 1822169,
         "cache_read_input_tokens": 1559296
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 34,
+        "readToolCalls": 0,
+        "editToolCalls": 6
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/transformers/models/owlvit/modeling_owlvit.py b/src/transformers/models/owlvit/modeling_owlvit.py\nindex 684f155efd..ef0514d25f 100644\n--- a/src/transformers/models/owlvit/modeling_owlvit.py\n+++ b/src/transformers/models/owlvit/modeling_owlvit.py\n@@ -1294,13 +1294,45 @@ class OwlViTForObjectDetection(OwlViTPreTrainedModel):\n \n         return (text_embeds, image_embeds, text_model_last_hidden_state, vision_model_last_hidden_state)\n \n+    def image_embedder(\n+        self,\n+        pixel_values: torch.FloatTensor,\n+        output_attentions: Optional[bool] = None,\n+        output_hidden_states: Optional[bool] = None,\n+    ) -> Tuple[torch.FloatTensor]:\n+        vision_outputs = self.owlvit.vision_model(\n+            pixel_values=pixel_values,\n+            output_attentions=output_attentions,\n+            output_hidden_states=output_hidden_states,\n+            return_dict=True,\n+        )\n+\n+        last_hidden_state = vision_outputs[0]\n+        image_embeds = self.owlvit.vision_model.post_layernorm(last_hidden_state)\n+        new_size = tuple(np.array(image_embeds.shape) - np.array((0, 1, 0)))\n+        class_token_out = torch.broadcast_to(image_embeds[:, :1, :], new_size)\n+\n+        image_embeds = image_embeds[:, 1:, :] * class_token_out\n+        image_embeds = self.layer_norm(image_embeds)\n+\n+        new_size = (\n+            image_embeds.shape[0],\n+            int(np.sqrt(image_embeds.shape[1])),\n+            int(np.sqrt(image_embeds.shape[1])),\n+            image_embeds.shape[-1],\n+        )\n+        image_embeds = image_embeds.reshape(new_size)\n+\n+        return (image_embeds, last_hidden_state)\n+\n     @add_start_docstrings_to_model_forward(OWLVIT_OBJECT_DETECTION_INPUTS_DOCSTRING)\n     @replace_return_docstrings(output_type=OwlViTObjectDetectionOutput, config_class=OwlViTConfig)\n     def forward(\n         self,\n-        input_ids: torch.Tensor,\n-        pixel_values: torch.FloatTensor,\n+        input_ids: Optional[torch.Tensor] = None,\n+        pixel_values: Optional[torch.FloatTensor] = None,\n         attention_mask: Optional[torch.Tensor] = None,\n+        query_pixel_values: Optional[torch.FloatTensor] = None,\n         output_attentions: Optional[bool] = None,\n         output_hidden_states: Optional[bool] = None,\n         return_dict: Optional[bool] = None,\n@@ -1346,32 +1378,59 @@ class OwlViTForObjectDetection(OwlViTPreTrainedModel):\n         )\n         return_dict = return_dict if return_dict is not None else self.config.return_dict\n \n-        # Embed images and text queries\n-        outputs = self.image_text_embedder(\n-            input_ids=input_ids,\n-            pixel_values=pixel_values,\n-            attention_mask=attention_mask,\n-            output_attentions=output_attentions,\n-            output_hidden_states=output_hidden_states,\n-        )\n+        if pixel_values is None:\n+            raise ValueError(\"You have to specify pixel_values\")\n+        if input_ids is None and query_pixel_values is None:\n+            raise ValueError(\"You have to specify either input_ids or query_pixel_values\")\n+        if input_ids is not None and query_pixel_values is not None:\n+            raise ValueError(\"You have to specify either input_ids or query_pixel_values, but not both\")\n+\n+        if input_ids is not None:\n+            # Embed images and text queries\n+            outputs = self.image_text_embedder(\n+                input_ids=input_ids,\n+                pixel_values=pixel_values,\n+                attention_mask=attention_mask,\n+                output_attentions=output_attentions,\n+                output_hidden_states=output_hidden_states,\n+            )\n \n-        # Last hidden states of text and vision transformers\n-        text_model_last_hidden_state = outputs[2]\n-        vision_model_last_hidden_state = outputs[3]\n+            # Last hidden states of text and vision transformers\n+            text_model_last_hidden_state = outputs[2]\n+            vision_model_last_hidden_state = outputs[3]\n \n-        query_embeds = outputs[0]\n-        feature_map = outputs[1]\n+            query_embeds = outputs[0]\n+            feature_map = outputs[1]\n+        else:\n+            feature_map, vision_model_last_hidden_state = self.image_embedder(\n+                pixel_values=pixel_values,\n+                output_attentions=output_attentions,\n+                output_hidden_states=output_hidden_states,\n+            )\n+            text_model_last_hidden_state = None\n+            query_embeds = self.owlvit.get_image_features(\n+                pixel_values=query_pixel_values,\n+                output_attentions=output_attentions,\n+                output_hidden_states=output_hidden_states,\n+                return_dict=True,\n+            )\n \n         batch_size, num_patches, num_patches, hidden_dim = feature_map.shape\n         image_feats = torch.reshape(feature_map, (batch_size, num_patches * num_patches, hidden_dim))\n \n-        # Reshape from [batch_size * max_text_queries, hidden_dim] -> [batch_size, max_text_queries, hidden_dim]\n-        max_text_queries = input_ids.shape[0] // batch_size\n-        query_embeds = query_embeds.reshape(batch_size, max_text_queries, query_embeds.shape[-1])\n+        if query_embeds.shape[0] % batch_size != 0:\n+            raise ValueError(\"query embeddings must be provided for each image in the batch\")\n \n-        # If first token is 0, then this is a padded query [batch_size, num_queries].\n-        input_ids = input_ids.reshape(batch_size, max_text_queries, input_ids.shape[-1])\n-        query_mask = input_ids[..., 0] > 0\n+        # Reshape from [batch_size * max_text_queries, hidden_dim] -> [batch_size, num_queries, hidden_dim]\n+        num_queries = query_embeds.shape[0] // batch_size\n+        query_embeds = query_embeds.reshape(batch_size, num_queries, query_embeds.shape[-1])\n+\n+        if input_ids is not None:\n+            # If first token is 0, then this is a padded query [batch_size, num_queries].\n+            input_ids = input_ids.reshape(batch_size, num_queries, input_ids.shape[-1])\n+            query_mask = input_ids[..., 0] > 0\n+        else:\n+            query_mask = None\n \n         # Predict object classes [batch_size, num_patches, num_queries+1]\n         (pred_logits, class_embeds) = self.class_predictor(image_feats, query_embeds, query_mask)\ndiff --git a/src/transformers/models/owlvit/processing_owlvit.py b/src/transformers/models/owlvit/processing_owlvit.py\nindex 707fa47690..493e5694cc 100644\n--- a/src/transformers/models/owlvit/processing_owlvit.py\n+++ b/src/transformers/models/owlvit/processing_owlvit.py\n@@ -43,7 +43,7 @@ class OwlViTProcessor(ProcessorMixin):\n     def __init__(self, feature_extractor, tokenizer):\n         super().__init__(feature_extractor, tokenizer)\n \n-    def __call__(self, text=None, images=None, padding=\"max_length\", return_tensors=\"np\", **kwargs):\n+    def __call__(self, text=None, images=None, query_images=None, padding=\"max_length\", return_tensors=\"np\", **kwargs):\n         \"\"\"\n         Main method to prepare for the model one or several text(s) and image(s). This method forwards the `text` and\n         `kwargs` arguments to CLIPTokenizerFast's [`~CLIPTokenizerFast.__call__`] if `text` is not `None` to encode:\n@@ -61,6 +61,11 @@ class OwlViTProcessor(ProcessorMixin):\n                 The image or batch of images to be prepared. Each image can be a PIL image, NumPy array or PyTorch\n                 tensor. In case of a NumPy array/PyTorch tensor, each image should be of shape (C, H, W), where C is a\n                 number of channels, H and W are image height and width.\n+            query_images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, `List[PIL.Image.Image]`,\n+            `List[np.ndarray]`, `List[torch.Tensor]`):\n+                The query image or batch of query images to be prepared. These images are encoded the same way as the\n+                target images and can be passed to [`OwlViTForObjectDetection`] instead of text queries for image-guided\n+                object detection.\n             return_tensors (`str` or [`~utils.TensorType`], *optional*):\n                 If set, will return tensors of a particular framework. Acceptable values are:\n                 - `'tf'`: Return TensorFlow `tf.constant` objects.\n@@ -74,10 +79,15 @@ class OwlViTProcessor(ProcessorMixin):\n               `return_attention_mask=True` or if *\"attention_mask\"* is in `self.model_input_names` and if `text` is not\n               `None`).\n             - **pixel_values** -- Pixel values to be fed to a model. Returned when `images` is not `None`.\n+            - **query_pixel_values** -- Pixel values to be fed to a model as image queries. Returned when\n+              `query_images` is not `None`.\n         \"\"\"\n \n-        if text is None and images is None:\n-            raise ValueError(\"You have to specify at least one text or image. Both cannot be none.\")\n+        if text is None and images is None and query_images is None:\n+            raise ValueError(\"You have to specify at least one text, query image or image. All three cannot be none.\")\n+\n+        if text is not None and query_images is not None:\n+            raise ValueError(\"You have to specify either text or query images, but not both.\")\n \n         if text is not None:\n             if isinstance(text, str) or (isinstance(text, List) and not isinstance(text[0], List)):\n@@ -131,13 +141,18 @@ class OwlViTProcessor(ProcessorMixin):\n         if images is not None:\n             image_features = self.feature_extractor(images, return_tensors=return_tensors, **kwargs)\n \n-        if text is not None and images is not None:\n-            encoding[\"pixel_values\"] = image_features.pixel_values\n-            return encoding\n-        elif text is not None:\n-            return encoding\n-        else:\n-            return BatchEncoding(data=dict(**image_features), tensor_type=return_tensors)\n+        if query_images is not None:\n+            query_image_features = self.feature_extractor(query_images, return_tensors=return_tensors, **kwargs)\n+\n+        data = {}\n+        if text is not None:\n+            data.update(encoding)\n+        if query_images is not None:\n+            data[\"query_pixel_values\"] = query_image_features.pixel_values\n+        if images is not None:\n+            data[\"pixel_values\"] = image_features.pixel_values\n+\n+        return BatchEncoding(data=data, tensor_type=return_tensors)\n \n     def post_process(self, *args, **kwargs):\n         \"\"\"\n@@ -164,4 +179,4 @@ class OwlViTProcessor(ProcessorMixin):\n     def model_input_names(self):\n         tokenizer_input_names = self.tokenizer.model_input_names\n         feature_extractor_input_names = self.feature_extractor.model_input_names\n-        return list(dict.fromkeys(tokenizer_input_names + feature_extractor_input_names))\n+        return list(dict.fromkeys(tokenizer_input_names + feature_extractor_input_names + [\"query_pixel_values\"]))\ndiff --git a/tests/models/owlvit/test_modeling_owlvit.py b/tests/models/owlvit/test_modeling_owlvit.py\nindex 48848f3328..72523a1e26 100644\n--- a/tests/models/owlvit/test_modeling_owlvit.py\n+++ b/tests/models/owlvit/test_modeling_owlvit.py\n@@ -567,6 +567,29 @@ class OwlViTForObjectDetectionTester:\n         self.parent.assertEqual(result.logits.shape, pred_logits_size)\n         self.parent.assertEqual(result.class_embeds.shape, pred_class_embeds_size)\n \n+    def create_and_check_image_guided_detection_model(self, config, pixel_values):\n+        model = OwlViTForObjectDetection(config).to(torch_device).eval()\n+        query_pixel_values = floats_tensor(\n+            [self.vision_model_tester.batch_size * 2, self.vision_model_tester.num_channels]\n+            + [self.vision_model_tester.image_size] * 2\n+        )\n+\n+        with torch.no_grad():\n+            result = model(\n+                pixel_values=pixel_values,\n+                query_pixel_values=query_pixel_values,\n+                return_dict=True,\n+            )\n+\n+        num_patches = (self.vision_model_tester.image_size // self.vision_model_tester.patch_size) ** 2\n+        self.parent.assertEqual(result.pred_boxes.shape, (self.vision_model_tester.batch_size, num_patches, 4))\n+        self.parent.assertEqual(result.logits.shape, (self.vision_model_tester.batch_size, num_patches, 2))\n+        self.parent.assertEqual(\n+            result.text_embeds.shape,\n+            (self.vision_model_tester.batch_size, 2, config.projection_dim),\n+        )\n+        self.parent.assertIsNone(result.text_model_last_hidden_state)\n+\n     def prepare_config_and_inputs_for_common(self):\n         config_and_inputs = self.prepare_config_and_inputs()\n         config, pixel_values, input_ids, attention_mask = config_and_inputs\n@@ -594,6 +617,10 @@ class OwlViTForObjectDetectionTest(ModelTesterMixin, unittest.TestCase):\n         config_and_inputs = self.model_tester.prepare_config_and_inputs()\n         self.model_tester.create_and_check_model(*config_and_inputs)\n \n+    def test_image_guided_detection_model(self):\n+        config, pixel_values, _, _ = self.model_tester.prepare_config_and_inputs()\n+        self.model_tester.create_and_check_image_guided_detection_model(config, pixel_values)\n+\n     @unittest.skip(reason=\"Hidden_states is tested in individual model tests\")\n     def test_hidden_states_output(self):\n         pass\ndiff --git a/tests/models/owlvit/test_processor_owlvit.py b/tests/models/owlvit/test_processor_owlvit.py\nindex 98fd1222e3..238cbf1a65 100644\n--- a/tests/models/owlvit/test_processor_owlvit.py\n+++ b/tests/models/owlvit/test_processor_owlvit.py\n@@ -227,6 +227,21 @@ class OwlViTProcessorTest(unittest.TestCase):\n         self.assertListEqual(list(input_ids[0]), predicted_ids[0])\n         self.assertListEqual(list(input_ids[1]), predicted_ids[1])\n \n+    def test_processor_with_query_images(self):\n+        feature_extractor = self.get_feature_extractor()\n+        tokenizer = self.get_tokenizer()\n+\n+        processor = OwlViTProcessor(tokenizer=tokenizer, feature_extractor=feature_extractor)\n+\n+        image_input = self.prepare_image_inputs()\n+        query_image_inputs = self.prepare_image_inputs() + self.prepare_image_inputs()\n+\n+        inputs = processor(images=image_input, query_images=query_image_inputs, return_tensors=\"np\")\n+\n+        self.assertListEqual(list(inputs.keys()), [\"query_pixel_values\", \"pixel_values\"])\n+        self.assertEqual(inputs[\"query_pixel_values\"].shape[0], len(query_image_inputs))\n+        self.assertEqual(inputs[\"pixel_values\"].shape[0], len(image_input))\n+\n     def test_tokenizer_decode(self):\n         feature_extractor = self.get_feature_extractor()\n         tokenizer = self.get_tokenizer()\n@@ -245,10 +260,6 @@ class OwlViTProcessorTest(unittest.TestCase):\n         tokenizer = self.get_tokenizer()\n \n         processor = OwlViTProcessor(tokenizer=tokenizer, feature_extractor=feature_extractor)\n-\n-        input_str = \"lower newer\"\n-        image_input = self.prepare_image_inputs()\n-\n-        inputs = processor(text=input_str, images=image_input)\n-\n-        self.assertListEqual(list(inputs.keys()), processor.model_input_names)\n+        self.assertListEqual(\n+            processor.model_input_names, [\"input_ids\", \"attention_mask\", \"pixel_values\", \"query_pixel_values\"]\n+        )\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Implemented image-guided OWL-ViT object detection support in the local `owlvit` stack. `OwlViTProcessor` now accepts `query_images` and emits `query_pixel_values`, and `OwlViTForObjectDetection.forward()` now accepts `query_pixel_values` in place of text queries while preserving the existing text-guided path. Added focused regression coverage for processor outputs, model input names, and image-guided forward shapes.\n\nVerification: `python3 -m py_compile src/transformers/models/owlvit/processing_owlvit.py src/transformers/models/owlvit/modeling_owlvit.py tests/models/owlvit/test_processor_owlvit.py tests/models/owlvit/test_modeling_owlvit.py` and `git diff --check` both passed. Full unit-test execution was not possible in this benchmark runtime because the available Python environment is missing required test dependencies such as `numpy` and `pytest`.",
         "notes": "Focused runtime verification was limited by the benchmark Python environment: importing the owlvit test modules via `python3 -m unittest ...` failed immediately because `numpy` is not installed, and `pytest` is also unavailable. I therefore used the strongest offline-safe checks available locally: Python bytecode compilation of the changed source and test files, plus `git diff --check`.",
         "retrievedContextFiles": [
-          "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
-          "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
-          "<worktree>/tests/models/owlvit/test_processor_owlvit.py",
-          "<worktree>/tests/models/owlvit/test_modeling_owlvit.py"
+          "src/transformers/models/owlvit/processing_owlvit.py",
+          "src/transformers/models/owlvit/modeling_owlvit.py",
+          "tests/models/owlvit/test_processor_owlvit.py",
+          "tests/models/owlvit/test_modeling_owlvit.py"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
+            "file": "src/transformers/models/owlvit/processing_owlvit.py",
             "start": 46,
             "end": 182
           },
           {
-            "file": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+            "file": "src/transformers/models/owlvit/modeling_owlvit.py",
             "start": 1252,
             "end": 1415
           },
           {
-            "file": "<worktree>/tests/models/owlvit/test_processor_owlvit.py",
+            "file": "tests/models/owlvit/test_processor_owlvit.py",
             "start": 230,
             "end": 265
           },
           {
-            "file": "<worktree>/tests/models/owlvit/test_modeling_owlvit.py",
+            "file": "tests/models/owlvit/test_modeling_owlvit.py",
             "start": 570,
             "end": 622
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
+            "file": "src/transformers/models/owlvit/processing_owlvit.py",
             "name": "OwlViTProcessor.__call__"
           },
           {
-            "file": "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
+            "file": "src/transformers/models/owlvit/processing_owlvit.py",
             "name": "OwlViTProcessor.model_input_names"
           },
           {
-            "file": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+            "file": "src/transformers/models/owlvit/modeling_owlvit.py",
             "name": "OwlViTForObjectDetection.forward"
           },
           {
-            "file": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+            "file": "src/transformers/models/owlvit/modeling_owlvit.py",
             "name": "OwlViTForObjectDetection.image_embedder"
           }
         ]
@@ -2760,297 +1196,13 @@
         "predSteps": [
           {
             "files": [
-              "src/transformers/models/owlvit/__init__.py",
-              "src/transformers/models/owlvit/configuration_owlvit.py",
-              "src/transformers/models/owlvit/convert_owlvit_original_flax_to_hf.py",
-              "src/transformers/models/owlvit/feature_extraction_owlvit.py",
-              "src/transformers/models/owlvit/modeling_owlvit.py",
-              "src/transformers/models/owlvit/processing_owlvit.py",
-              "tests/models/owlvit/__init__.py",
-              "tests/models/owlvit/test_feature_extraction_owlvit.py",
-              "tests/models/owlvit/test_modeling_owlvit.py",
-              "tests/models/owlvit/test_processor_owlvit.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/transformers/__init__.py",
-              "src/transformers/models/conditional_detr/feature_extraction_conditional_detr.py",
-              "src/transformers/models/conditional_detr/modeling_conditional_detr.py",
-              "src/transformers/models/table_transformer/modeling_table_transformer.py",
-              "src/transformers/pipelines/object_detection.py",
-              "src/transformers/pipelines/zero_shot_object_detection.py",
-              "src/transformers/utils/dummy_pt_objects.py",
-              "src/transformers/utils/dummy_vision_objects.py",
-              "tests/models/conditional_detr/test_modeling_conditional_detr.py",
-              "tests/models/deformable_detr/test_modeling_deformable_detr.py",
-              "tests/models/owlvit/test_feature_extraction_owlvit.py",
-              "tests/models/owlvit/test_modeling_owlvit.py",
-              "tests/models/owlvit/test_processor_owlvit.py"
+              "src/transformers/models/owlvit/processing_owlvit.py"
             ],
             "spans": {
-              "src/transformers/models/conditional_detr/feature_extraction_conditional_detr.py": [
+              "src/transformers/models/owlvit/processing_owlvit.py": [
                 {
-                  "start": 844,
-                  "end": 844
-                },
-                {
-                  "start": 872,
-                  "end": 872
-                },
-                {
-                  "start": 873,
-                  "end": 873
-                }
-              ],
-              "src/transformers/models/conditional_detr/modeling_conditional_detr.py": [
-                {
-                  "start": 152,
-                  "end": 152
-                },
-                {
-                  "start": 216,
-                  "end": 216
-                },
-                {
-                  "start": 1702,
-                  "end": 1702
-                }
-              ],
-              "src/transformers/utils/dummy_vision_objects.py": [
-                {
-                  "start": 256,
-                  "end": 256
-                }
-              ],
-              "src/transformers/utils/dummy_pt_objects.py": [
-                {
-                  "start": 3928,
-                  "end": 3928
-                },
-                {
-                  "start": 3935,
-                  "end": 3935
-                },
-                {
-                  "start": 3942,
-                  "end": 3942
-                },
-                {
-                  "start": 3949,
-                  "end": 3949
-                },
-                {
-                  "start": 3956,
-                  "end": 3956
-                }
-              ],
-              "src/transformers/models/table_transformer/modeling_table_transformer.py": [
-                {
-                  "start": 152,
-                  "end": 152
-                },
-                {
-                  "start": 1371,
-                  "end": 1371
-                }
-              ],
-              "src/transformers/__init__.py": [
-                {
-                  "start": 317,
-                  "end": 317
-                },
-                {
-                  "start": 1744,
-                  "end": 1744
-                },
-                {
-                  "start": 3431,
-                  "end": 3431
-                },
-                {
-                  "start": 4602,
-                  "end": 4602
-                }
-              ],
-              "src/transformers/pipelines/object_detection.py": [
-                {
-                  "start": 126,
-                  "end": 126
-                }
-              ],
-              "src/transformers/pipelines/zero_shot_object_detection.py": [
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 189,
-                  "end": 189
-                }
-              ],
-              "tests/models/owlvit/test_feature_extraction_owlvit.py": [
-                {
-                  "start": 36,
-                  "end": 36
-                },
-                {
-                  "start": 84,
-                  "end": 84
-                }
-              ],
-              "tests/models/owlvit/test_processor_owlvit.py": [
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 37,
-                  "end": 37
-                },
-                {
-                  "start": 96,
-                  "end": 96
-                },
-                {
-                  "start": 98,
-                  "end": 98
-                },
-                {
-                  "start": 100,
-                  "end": 100
-                },
-                {
-                  "start": 102,
-                  "end": 102
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 122,
-                  "end": 122
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 150,
-                  "end": 150
-                },
-                {
-                  "start": 165,
-                  "end": 165
-                },
-                {
-                  "start": 180,
-                  "end": 180
-                },
-                {
-                  "start": 195,
-                  "end": 195
-                },
-                {
-                  "start": 213,
-                  "end": 213
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 247,
-                  "end": 247
-                }
-              ],
-              "tests/models/owlvit/test_modeling_owlvit.py": [
-                {
-                  "start": 45,
-                  "end": 45
-                },
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                },
-                {
-                  "start": 206,
-                  "end": 206
-                },
-                {
-                  "start": 296,
-                  "end": 296
-                },
-                {
-                  "start": 341,
-                  "end": 341
-                },
-                {
-                  "start": 399,
-                  "end": 399
-                },
-                {
-                  "start": 523,
-                  "end": 523
-                },
-                {
-                  "start": 542,
-                  "end": 542
-                },
-                {
-                  "start": 582,
-                  "end": 582
-                },
-                {
-                  "start": 583,
-                  "end": 583
-                },
-                {
-                  "start": 591,
-                  "end": 591
-                },
-                {
-                  "start": 729,
-                  "end": 729
-                },
-                {
-                  "start": 742,
-                  "end": 742
-                },
-                {
-                  "start": 747,
-                  "end": 747
-                },
-                {
-                  "start": 777,
-                  "end": 777
-                },
-                {
-                  "start": 779,
-                  "end": 779
-                }
-              ],
-              "tests/models/deformable_detr/test_modeling_deformable_detr.py": [
-                {
-                  "start": 569,
-                  "end": 569
-                }
-              ],
-              "tests/models/conditional_detr/test_modeling_conditional_detr.py": [
-                {
-                  "start": 511,
-                  "end": 511
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -3058,9 +1210,44 @@
           },
           {
             "files": [
-              "src/transformers/models/owlvit/processing_owlvit.py"
+              "src/transformers/models/owlvit/modeling_owlvit.py"
             ],
-            "spans": {},
+            "spans": {
+              "src/transformers/models/owlvit/modeling_owlvit.py": [
+                {
+                  "start": 1090,
+                  "end": 1420
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/owlvit/test_modeling_owlvit.py"
+            ],
+            "spans": {
+              "tests/models/owlvit/test_modeling_owlvit.py": [
+                {
+                  "start": 523,
+                  "end": 860
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/owlvit/test_processor_owlvit.py"
+            ],
+            "spans": {
+              "tests/models/owlvit/test_processor_owlvit.py": [
+                {
+                  "start": 1,
+                  "end": 340
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -3072,334 +1259,171 @@
           },
           {
             "files": [
-              "tests/models/owlvit/test_modeling_owlvit.py"
+              "src/transformers/models/owlvit/modeling_owlvit.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/models/owlvit/test_processor_owlvit.py"
-            ],
-            "spans": {},
+            "spans": {
+              "src/transformers/models/owlvit/modeling_owlvit.py": [
+                {
+                  "start": 873,
+                  "end": 1095
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/transformers/models/owlvit/feature_extraction_owlvit.py"
             ],
-            "spans": {},
+            "spans": {
+              "src/transformers/models/owlvit/feature_extraction_owlvit.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/owlvit/modeling_owlvit.py"
+            ],
+            "spans": {
+              "src/transformers/models/owlvit/modeling_owlvit.py": [
+                {
+                  "start": 1,
+                  "end": 180
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/owlvit/test_modeling_owlvit.py"
+            ],
+            "spans": {
+              "tests/models/owlvit/test_modeling_owlvit.py": [
+                {
+                  "start": 1,
+                  "end": 180
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/owlvit/test_modeling_owlvit.py"
+            ],
+            "spans": {
+              "tests/models/owlvit/test_modeling_owlvit.py": [
+                {
+                  "start": 180,
+                  "end": 360
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/owlvit/test_modeling_owlvit.py"
+            ],
+            "spans": {
+              "tests/models/owlvit/test_modeling_owlvit.py": [
+                {
+                  "start": 360,
+                  "end": 540
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/owlvit/processing_owlvit.py"
+            ],
+            "spans": {
+              "src/transformers/models/owlvit/processing_owlvit.py": [
+                {
+                  "start": 35,
+                  "end": 195
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/models/owlvit/modeling_owlvit.py"
+            ],
+            "spans": {
+              "src/transformers/models/owlvit/modeling_owlvit.py": [
+                {
+                  "start": 1235,
+                  "end": 1415
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/owlvit/test_processor_owlvit.py"
+            ],
+            "spans": {
+              "tests/models/owlvit/test_processor_owlvit.py": [
+                {
+                  "start": 210,
+                  "end": 275
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/models/owlvit/test_modeling_owlvit.py"
+            ],
+            "spans": {
+              "tests/models/owlvit/test_modeling_owlvit.py": [
+                {
+                  "start": 550,
+                  "end": 635
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
-          "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
-          "<worktree>/tests/models/owlvit/test_modeling_owlvit.py",
-          "<worktree>/tests/models/owlvit/test_processor_owlvit.py",
-          "src/transformers/__init__.py",
-          "src/transformers/models/conditional_detr/feature_extraction_conditional_detr.py",
-          "src/transformers/models/conditional_detr/modeling_conditional_detr.py",
-          "src/transformers/models/owlvit/__init__.py",
-          "src/transformers/models/owlvit/configuration_owlvit.py",
-          "src/transformers/models/owlvit/convert_owlvit_original_flax_to_hf.py",
-          "src/transformers/models/owlvit/feature_extraction_owlvit.py",
           "src/transformers/models/owlvit/modeling_owlvit.py",
           "src/transformers/models/owlvit/processing_owlvit.py",
-          "src/transformers/models/table_transformer/modeling_table_transformer.py",
-          "src/transformers/pipelines/object_detection.py",
-          "src/transformers/pipelines/zero_shot_object_detection.py",
-          "src/transformers/utils/dummy_pt_objects.py",
-          "src/transformers/utils/dummy_vision_objects.py",
-          "tests/models/conditional_detr/test_modeling_conditional_detr.py",
-          "tests/models/deformable_detr/test_modeling_deformable_detr.py",
-          "tests/models/owlvit/__init__.py",
-          "tests/models/owlvit/test_feature_extraction_owlvit.py",
           "tests/models/owlvit/test_modeling_owlvit.py",
           "tests/models/owlvit/test_processor_owlvit.py"
         ],
         "predSpans": {
-          "src/transformers/models/conditional_detr/feature_extraction_conditional_detr.py": [
-            {
-              "start": 844,
-              "end": 844
-            },
-            {
-              "start": 872,
-              "end": 872
-            },
-            {
-              "start": 873,
-              "end": 873
-            }
-          ],
-          "src/transformers/models/conditional_detr/modeling_conditional_detr.py": [
-            {
-              "start": 152,
-              "end": 152
-            },
-            {
-              "start": 216,
-              "end": 216
-            },
-            {
-              "start": 1702,
-              "end": 1702
-            }
-          ],
-          "src/transformers/utils/dummy_vision_objects.py": [
-            {
-              "start": 256,
-              "end": 256
-            }
-          ],
-          "src/transformers/utils/dummy_pt_objects.py": [
-            {
-              "start": 3928,
-              "end": 3928
-            },
-            {
-              "start": 3935,
-              "end": 3935
-            },
-            {
-              "start": 3942,
-              "end": 3942
-            },
-            {
-              "start": 3949,
-              "end": 3949
-            },
-            {
-              "start": 3956,
-              "end": 3956
-            }
-          ],
-          "src/transformers/models/table_transformer/modeling_table_transformer.py": [
-            {
-              "start": 152,
-              "end": 152
-            },
-            {
-              "start": 1371,
-              "end": 1371
-            }
-          ],
-          "src/transformers/__init__.py": [
-            {
-              "start": 317,
-              "end": 317
-            },
-            {
-              "start": 1744,
-              "end": 1744
-            },
-            {
-              "start": 3431,
-              "end": 3431
-            },
-            {
-              "start": 4602,
-              "end": 4602
-            }
-          ],
-          "src/transformers/pipelines/object_detection.py": [
-            {
-              "start": 126,
-              "end": 126
-            }
-          ],
-          "src/transformers/pipelines/zero_shot_object_detection.py": [
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 189,
-              "end": 189
-            }
-          ],
-          "tests/models/owlvit/test_feature_extraction_owlvit.py": [
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 84,
-              "end": 84
-            }
-          ],
-          "tests/models/owlvit/test_processor_owlvit.py": [
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 37,
-              "end": 37
-            },
-            {
-              "start": 96,
-              "end": 96
-            },
-            {
-              "start": 98,
-              "end": 98
-            },
-            {
-              "start": 100,
-              "end": 100
-            },
-            {
-              "start": 102,
-              "end": 102
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 122,
-              "end": 122
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 150,
-              "end": 150
-            },
-            {
-              "start": 165,
-              "end": 165
-            },
-            {
-              "start": 180,
-              "end": 180
-            },
-            {
-              "start": 195,
-              "end": 195
-            },
-            {
-              "start": 213,
-              "end": 213
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 247,
-              "end": 247
-            }
-          ],
-          "tests/models/owlvit/test_modeling_owlvit.py": [
-            {
-              "start": 45,
-              "end": 45
-            },
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 133,
-              "end": 133
-            },
-            {
-              "start": 206,
-              "end": 206
-            },
-            {
-              "start": 296,
-              "end": 296
-            },
-            {
-              "start": 341,
-              "end": 341
-            },
-            {
-              "start": 399,
-              "end": 399
-            },
-            {
-              "start": 523,
-              "end": 523
-            },
-            {
-              "start": 542,
-              "end": 542
-            },
-            {
-              "start": 582,
-              "end": 582
-            },
-            {
-              "start": 583,
-              "end": 583
-            },
-            {
-              "start": 591,
-              "end": 591
-            },
-            {
-              "start": 729,
-              "end": 729
-            },
-            {
-              "start": 742,
-              "end": 742
-            },
-            {
-              "start": 747,
-              "end": 747
-            },
-            {
-              "start": 777,
-              "end": 777
-            },
-            {
-              "start": 779,
-              "end": 779
-            }
-          ],
-          "tests/models/deformable_detr/test_modeling_deformable_detr.py": [
-            {
-              "start": 569,
-              "end": 569
-            }
-          ],
-          "tests/models/conditional_detr/test_modeling_conditional_detr.py": [
-            {
-              "start": 511,
-              "end": 511
-            }
-          ],
-          "<worktree>/src/transformers/models/owlvit/processing_owlvit.py": [
+          "src/transformers/models/owlvit/processing_owlvit.py": [
             {
               "start": 46,
               "end": 182
             }
           ],
-          "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py": [
+          "src/transformers/models/owlvit/modeling_owlvit.py": [
             {
               "start": 1252,
               "end": 1415
             }
           ],
-          "<worktree>/tests/models/owlvit/test_processor_owlvit.py": [
+          "tests/models/owlvit/test_processor_owlvit.py": [
             {
               "start": 230,
               "end": 265
             }
           ],
-          "<worktree>/tests/models/owlvit/test_modeling_owlvit.py": [
+          "tests/models/owlvit/test_modeling_owlvit.py": [
             {
               "start": 570,
               "end": 622
@@ -3407,11 +1431,11 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/src/transformers/models/owlvit/processing_owlvit.py": [
+          "src/transformers/models/owlvit/processing_owlvit.py": [
             "OwlViTProcessor.__call__",
             "OwlViTProcessor.model_input_names"
           ],
-          "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py": [
+          "src/transformers/models/owlvit/modeling_owlvit.py": [
             "OwlViTForObjectDetection.forward",
             "OwlViTForObjectDetection.image_embedder"
           ]
@@ -3422,114 +1446,150 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.2,
+              "symbol": 0.16666666666666666,
+              "span": 0.19760115987873994,
+              "line": 0.17202970297029702
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.47619047619047616,
+              "span": 0.5125345986555951,
+              "line": 0.5284653465346535
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.47619047619047616,
+              "span": 0.5125345986555951,
+              "line": 0.5284653465346535
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.47619047619047616,
+              "span": 0.5125345986555951,
+              "line": 0.5284653465346535
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.6,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.47619047619047616,
+              "span": 0.5125345986555951,
+              "line": 0.5284653465346535
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.6,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.4,
+              "symbol": 0.5238095238095238,
+              "span": 0.5753525767760643,
+              "line": 0.5965346534653465
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 0.6,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.6190476190476191,
+              "span": 0.7492816660076447,
+              "line": 0.7673267326732673
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 0.6,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.7142857142857143,
+              "span": 0.8786608672729669,
+              "line": 0.8712871287128713
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 0.6,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.7142857142857143,
+              "span": 0.8786608672729669,
+              "line": 0.8712871287128713
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 0.6,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.7142857142857143,
+              "span": 0.8786608672729669,
+              "line": 0.8712871287128713
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 0.6,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.7142857142857143,
+              "span": 0.8786608672729669,
+              "line": 0.8712871287128713
+            }
+          },
+          {
+            "step": 12,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7142857142857143,
+              "span": 0.8786608672729669,
+              "line": 0.8712871287128713
+            }
+          },
+          {
+            "step": 13,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7142857142857143,
+              "span": 0.8786608672729669,
+              "line": 0.8712871287128713
+            }
+          },
+          {
+            "step": 14,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7142857142857143,
+              "span": 0.8786608672729669,
+              "line": 0.8712871287128713
+            }
+          },
+          {
+            "step": 15,
+            "coverage": {
+              "file": 0.6,
+              "symbol": 0.7142857142857143,
+              "span": 0.8786608672729669,
+              "line": 0.8712871287128713
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.38181818181818183,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.5066666666666666,
+          "symbol": 0.5952380952380952,
+          "span": 0.706777382364571,
+          "line": 0.708003300330033
         },
         "redundancy": {
-          "file": 0.2857142857142857,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.6666666666666667,
+          "symbol": 0.23295454545454541,
+          "span": 0.18368373764600177,
+          "line": 0.17759562841530052
         }
       },
       "fixOverlap": {
@@ -3548,28 +1608,28 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/4103da85186c2d630c01/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/4103da85186c2d630c01/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/4103da85186c2d630c01/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/4103da85186c2d630c01/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
@@ -3747,12 +1807,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/models/owlvit/test_processor_owlvit.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/models/owlvit/test_processor_owlvit.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/models/owlvit/test_modeling_owlvit.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/models/owlvit/test_modeling_owlvit.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3795,22 +1873,58 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/models/owlvit/processing_owlvit.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/models/owlvit/modeling_owlvit.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

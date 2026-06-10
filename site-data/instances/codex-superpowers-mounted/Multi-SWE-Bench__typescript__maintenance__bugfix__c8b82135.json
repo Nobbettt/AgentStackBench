@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-11T00:14:24Z",
       "completedAt": "2026-05-11T00:19:34Z",
       "durationMs": 309889,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1401489,
@@ -25,6 +40,28 @@
         "total_tokens": 1415207,
         "cache_read_input_tokens": 1338112
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 49,
+        "readToolCalls": 0,
+        "editToolCalls": 6
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap b/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap\nindex 18b5d90e..dff4c8f1 100644\n--- a/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap\n+++ b/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap\n@@ -714,6 +714,21 @@ return { cond, get bar() { return bar }, get baz() { return baz } }\n })\"\n `;\n \n+exports[`SFC compile <script setup> > dev mode import usage check > dynamic directive arguments 1`] = `\n+\"import { defineComponent as _defineComponent } from 'vue'\n+import { arg, value, unused } from './x'\n+\n+export default /*#__PURE__*/_defineComponent({\n+  setup(__props, { expose: __expose }) {\n+  __expose();\n+\n+\n+return { get arg() { return arg }, get value() { return value } }\n+}\n+\n+})\"\n+`;\n+\n exports[`SFC compile <script setup> > dev mode import usage check > components 1`] = `\n \"import { defineComponent as _defineComponent } from 'vue'\n import { FooBar, FooBaz, FooQux, foo } from './x'\ndiff --git a/packages/compiler-sfc/__tests__/compileScript.spec.ts b/packages/compiler-sfc/__tests__/compileScript.spec.ts\nindex 6da274dd..3f97d38c 100644\n--- a/packages/compiler-sfc/__tests__/compileScript.spec.ts\n+++ b/packages/compiler-sfc/__tests__/compileScript.spec.ts\n@@ -430,6 +430,21 @@ describe('SFC compile <script setup>', () => {\n       assertCode(content)\n     })\n \n+    test('dynamic directive arguments', () => {\n+      const { content } = compile(`\n+        <script setup lang=\"ts\">\n+        import { arg, value, unused } from './x'\n+        </script>\n+        <template>\n+          <div :[arg]=\"value\"></div>\n+        </template>\n+        `)\n+      expect(content).toMatch(\n+        `return { get arg() { return arg }, get value() { return value } }`\n+      )\n+      assertCode(content)\n+    })\n+\n     test('vue interpolations', () => {\n       const { content } = compile(`\n       <script setup lang=\"ts\">\ndiff --git a/packages/compiler-sfc/__tests__/parse.spec.ts b/packages/compiler-sfc/__tests__/parse.spec.ts\nindex c7a17ab1..b4f34238 100644\n--- a/packages/compiler-sfc/__tests__/parse.spec.ts\n+++ b/packages/compiler-sfc/__tests__/parse.spec.ts\n@@ -1,4 +1,4 @@\n-import { parse } from '../src'\n+import { compileScript, parse } from '../src'\n import { baseParse, baseCompile } from '@vue/compiler-core'\n import { SourceMapConsumer } from 'source-map-js'\n \n@@ -275,6 +275,34 @@ h1 { color: red }\n     expect(descriptor.customBlocks[0].content).toBe(` <-& `)\n   })\n \n+  test(\n+    'should force reload when dynamic directive arguments start using imports',\n+    () => {\n+      const prev = parse(\n+        `<script setup lang=\"ts\">\n+        import { arg } from './x'\n+      </script>\n+      <template>\n+        <div />\n+      </template>`\n+      ).descriptor\n+      const next = parse(\n+        `<script setup lang=\"ts\">\n+        import { arg } from './x'\n+      </script>\n+      <template>\n+        <div :[arg]=\"true\" />\n+      </template>`\n+      ).descriptor\n+\n+      const prevImports = compileScript(prev, {\n+        id: 'test'\n+      }).imports!\n+\n+      expect(next.shouldForceReload(prevImports)).toBe(true)\n+    }\n+  )\n+\n   describe('warnings', () => {\n     function assertWarning(errors: Error[], msg: string) {\n       expect(errors.some(e => e.message.match(msg))).toBe(true)\ndiff --git a/packages/compiler-sfc/src/script/importUsageCheck.ts b/packages/compiler-sfc/src/script/importUsageCheck.ts\nindex b42397d5..4da8d7cf 100644\n--- a/packages/compiler-sfc/src/script/importUsageCheck.ts\n+++ b/packages/compiler-sfc/src/script/importUsageCheck.ts\n@@ -4,6 +4,7 @@ import {\n   NodeTypes,\n   SimpleExpressionNode,\n   createRoot,\n+  isStaticExp,\n   parserOptions,\n   transform,\n   walkIdentifiers\n@@ -50,6 +51,11 @@ function resolveTemplateUsageCheckString(sfc: SFCDescriptor) {\n               if (!isBuiltInDirective(prop.name)) {\n                 code += `,v${capitalize(camelize(prop.name))}`\n               }\n+              if (prop.arg && !isStaticExp(prop.arg)) {\n+                code += `,${processExp(\n+                  (prop.arg as SimpleExpressionNode).content\n+                )}`\n+              }\n               if (prop.exp) {\n                 code += `,${processExp(\n                   (prop.exp as SimpleExpressionNode).content,\n",
       "finalOutput": {
         "status": "completed",
@@ -83,252 +120,27 @@
         "predSteps": [
           {
             "files": [
-              "packages/compiler-core/__tests__/parse.spec.ts",
-              "packages/compiler-core/__tests__/transforms/__snapshots__/vModel.spec.ts.snap",
-              "packages/compiler-core/__tests__/transforms/vModel.spec.ts"
-            ],
-            "spans": {
-              "packages/compiler-core/__tests__/transforms/vModel.spec.ts": [
-                {
-                  "start": 291,
-                  "end": 291
-                },
-                {
-                  "start": 343,
-                  "end": 343
-                }
-              ],
-              "packages/compiler-core/__tests__/transforms/__snapshots__/vModel.spec.ts.snap": [
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                }
-              ],
-              "packages/compiler-core/__tests__/parse.spec.ts": [
-                {
-                  "start": 1195,
-                  "end": 1195
-                },
-                {
-                  "start": 1305,
-                  "end": 1305
-                }
-              ]
-            },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "packages/compiler-sfc/README.md",
-              "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts",
-              "packages/compiler-sfc/__tests__/utils.ts",
-              "packages/compiler-sfc/src/compileScript.ts",
-              "packages/compiler-sfc/src/index.ts",
-              "packages/compiler-sfc/src/parse.ts",
-              "packages/compiler-sfc/src/script/analyzeScriptBindings.ts",
-              "packages/compiler-sfc/src/script/context.ts",
-              "packages/compiler-sfc/src/script/importUsageCheck.ts",
-              "packages/compiler-sfc/src/script/resolveType.ts"
-            ],
-            "spans": {
-              "packages/compiler-sfc/README.md": [
-                {
-                  "start": 72,
-                  "end": 72
-                }
-              ],
-              "packages/compiler-sfc/src/index.ts": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                }
-              ],
-              "packages/compiler-sfc/src/compileScript.ts": [
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 149,
-                  "end": 149
-                },
-                {
-                  "start": 155,
-                  "end": 155
-                },
-                {
-                  "start": 244,
-                  "end": 244
-                },
-                {
-                  "start": 725,
-                  "end": 725
-                }
-              ],
-              "packages/compiler-sfc/src/parse.ts": [
-                {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 85,
-                  "end": 85
-                },
-                {
-                  "start": 443,
-                  "end": 443
-                },
-                {
-                  "start": 462,
-                  "end": 462
-                }
-              ],
-              "packages/compiler-sfc/__tests__/utils.ts": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 17,
-                  "end": 17
-                }
-              ],
-              "packages/compiler-sfc/src/script/resolveType.ts": [
-                {
-                  "start": 36,
-                  "end": 36
-                },
-                {
-                  "start": 766,
-                  "end": 766
-                }
-              ],
-              "packages/compiler-sfc/src/script/context.ts": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts": [
-                {
-                  "start": 923,
-                  "end": 923
-                }
-              ],
-              "packages/compiler-sfc/src/script/importUsageCheck.ts": [
-                {
-                  "start": 19,
-                  "end": 19
-                }
-              ],
-              "packages/compiler-sfc/src/script/analyzeScriptBindings.ts": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ]
-            },
-            "symbols": {}
-          },
-          {
-            "files": [
               "packages/compiler-sfc/src/script/importUsageCheck.ts"
             ],
-            "spans": {},
+            "spans": {
+              "packages/compiler-sfc/src/script/importUsageCheck.ts": [
+                {
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "packages/compiler-sfc/src/compileScript.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "compileScript.spec.ts",
-              "compileStyle.spec.ts",
-              "compileTemplate.spec.ts",
-              "cssVars.spec.ts",
-              "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/__snapshots__/compileTemplate.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/__snapshots__/cssVars.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/__snapshots__/templateTransformAssetUrl.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/__snapshots__/templateTransformSrcset.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/compileScript.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/defineEmits.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/defineProps.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/hoistStatic.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/reactivityTransform.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts",
-              "packages/compiler-sfc/__tests__/compileStyle.spec.ts",
-              "packages/compiler-sfc/__tests__/compileTemplate.spec.ts",
-              "packages/compiler-sfc/__tests__/cssVars.spec.ts",
-              "packages/compiler-sfc/__tests__/fixture/import.scss",
-              "packages/compiler-sfc/__tests__/parse.spec.ts",
-              "packages/compiler-sfc/__tests__/rewriteDefault.spec.ts",
-              "packages/compiler-sfc/__tests__/templateTransformAssetUrl.spec.ts",
-              "packages/compiler-sfc/__tests__/templateTransformSrcset.spec.ts",
-              "packages/compiler-sfc/__tests__/templateUtils.spec.ts",
-              "packages/compiler-sfc/__tests__/utils.ts",
-              "parse.spec.ts",
-              "rewriteDefault.spec.ts",
-              "templateTransformAssetUrl.spec.ts",
-              "templateTransformSrcset.spec.ts",
-              "templateUtils.spec.ts",
-              "utils.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "packages/compiler-sfc/src/compileScript.ts",
-              "packages/compiler-sfc/src/parse.ts",
-              "packages/compiler-sfc/src/script/importUsageCheck.ts"
-            ],
             "spans": {
               "packages/compiler-sfc/src/compileScript.ts": [
                 {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 244,
-                  "end": 244
-                }
-              ],
-              "packages/compiler-sfc/src/parse.ts": [
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 462,
-                  "end": 462
-                }
-              ],
-              "packages/compiler-sfc/src/script/importUsageCheck.ts": [
-                {
-                  "start": 19,
-                  "end": 19
+                  "start": 220,
+                  "end": 310
                 }
               ]
             },
@@ -336,20 +148,27 @@
           },
           {
             "files": [
-              "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts",
-              "packages/compiler-sfc/__tests__/compileTemplate.spec.ts"
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts"
             ],
             "spans": {
-              "packages/compiler-sfc/__tests__/compileTemplate.spec.ts": [
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
                 {
-                  "start": 196,
-                  "end": 196
+                  "start": 1,
+                  "end": 260
                 }
-              ],
-              "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/parse.spec.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/__tests__/parse.spec.ts": [
                 {
-                  "start": 303,
-                  "end": 303
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -364,27 +183,13 @@
           },
           {
             "files": [
-              "packages/compiler-sfc/__tests__/parse.spec.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "packages/compiler-sfc/__tests__/compileScript.spec.ts",
-              "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts"
+              "packages/compiler-sfc/src/parse.ts"
             ],
             "spans": {
-              "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
+              "packages/compiler-sfc/src/parse.ts": [
                 {
-                  "start": 651,
-                  "end": 651
-                }
-              ],
-              "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts": [
-                {
-                  "start": 36,
-                  "end": 36
+                  "start": 420,
+                  "end": 520
                 }
               ]
             },
@@ -392,126 +197,69 @@
           },
           {
             "files": [
-              "packages/compiler-sfc/src/parse.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "packages/compiler-sfc/__tests__/compileTemplate.spec.ts"
             ],
-            "spans": {},
+            "spans": {
+              "packages/compiler-sfc/__tests__/compileTemplate.spec.ts": [
+                {
+                  "start": 260,
+                  "end": 420
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "packages/compiler-sfc/__tests__/compileScript.spec.ts",
-              "packages/compiler-sfc/src/parse.ts"
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts"
             ],
             "spans": {
-              "packages/compiler-sfc/src/parse.ts": [
-                {
-                  "start": 85,
-                  "end": 85
-                },
-                {
-                  "start": 88,
-                  "end": 88
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 443,
-                  "end": 443
-                },
-                {
-                  "start": 446,
-                  "end": 446
-                },
-                {
-                  "start": 462,
-                  "end": 462
-                }
-              ],
               "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
                 {
-                  "start": 177,
-                  "end": 177
-                },
+                  "start": 400,
+                  "end": 480
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
                 {
-                  "start": 381,
-                  "end": 381
-                },
-                {
-                  "start": 405,
-                  "end": 405
-                },
-                {
-                  "start": 419,
-                  "end": 419
-                },
-                {
-                  "start": 435,
-                  "end": 435
-                },
-                {
-                  "start": 454,
-                  "end": 454
-                },
-                {
-                  "start": 471,
-                  "end": 471
-                },
-                {
-                  "start": 487,
-                  "end": 487
-                },
-                {
-                  "start": 508,
-                  "end": 508
-                },
-                {
-                  "start": 812,
-                  "end": 812
-                },
-                {
-                  "start": 831,
-                  "end": 831
-                },
-                {
-                  "start": 840,
+                  "start": 780,
                   "end": 840
-                },
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
                 {
-                  "start": 857,
-                  "end": 857
-                },
+                  "start": 1490,
+                  "end": 1565
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/parse.spec.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/__tests__/parse.spec.ts": [
                 {
-                  "start": 872,
-                  "end": 872
-                },
-                {
-                  "start": 885,
-                  "end": 885
-                },
-                {
-                  "start": 1014,
-                  "end": 1014
-                },
-                {
-                  "start": 1512,
-                  "end": 1512
-                },
-                {
-                  "start": 1529,
-                  "end": 1529
-                },
-                {
-                  "start": 1545,
-                  "end": 1545
+                  "start": 520,
+                  "end": 760
                 }
               ]
             },
@@ -521,307 +269,25 @@
             "files": [
               "packages/compiler-sfc/__tests__/utils.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "packages/compiler-core/src/ast.ts",
-              "packages/compiler-core/src/codegen.ts",
-              "packages/compiler-core/src/compat/transformFilter.ts",
-              "packages/compiler-core/src/transform.ts",
-              "packages/compiler-core/src/transforms/hoistStatic.ts",
-              "packages/compiler-core/src/transforms/transformExpression.ts",
-              "packages/compiler-core/src/transforms/vFor.ts",
-              "packages/compiler-core/src/transforms/vIf.ts",
-              "packages/compiler-core/src/transforms/vOn.ts",
-              "packages/compiler-core/src/transforms/vSlot.ts",
-              "packages/compiler-core/src/utils.ts",
-              "packages/compiler-core/src/validateExpression.ts"
-            ],
             "spans": {
-              "packages/compiler-core/src/ast.ts": [
-                {
-                  "start": 90,
-                  "end": 90
-                },
-                {
-                  "start": 140,
-                  "end": 140
-                },
-                {
-                  "start": 212,
-                  "end": 212
-                },
-                {
-                  "start": 238,
-                  "end": 238
-                },
-                {
-                  "start": 282,
-                  "end": 282
-                },
-                {
-                  "start": 299,
-                  "end": 299
-                },
-                {
-                  "start": 302,
-                  "end": 302
-                },
-                {
-                  "start": 427,
-                  "end": 427
-                },
-                {
-                  "start": 499,
-                  "end": 499
-                },
-                {
-                  "start": 649,
-                  "end": 649
-                },
-                {
-                  "start": 650,
-                  "end": 650
-                },
-                {
-                  "start": 653,
-                  "end": 653
-                },
-                {
-                  "start": 90,
-                  "end": 90
-                },
-                {
-                  "start": 140,
-                  "end": 140
-                },
-                {
-                  "start": 212,
-                  "end": 212
-                },
-                {
-                  "start": 238,
-                  "end": 238
-                },
-                {
-                  "start": 282,
-                  "end": 282
-                },
-                {
-                  "start": 299,
-                  "end": 299
-                },
-                {
-                  "start": 302,
-                  "end": 302
-                },
-                {
-                  "start": 427,
-                  "end": 427
-                },
-                {
-                  "start": 499,
-                  "end": 499
-                },
-                {
-                  "start": 649,
-                  "end": 649
-                },
-                {
-                  "start": 650,
-                  "end": 650
-                },
-                {
-                  "start": 653,
-                  "end": 653
-                }
-              ],
-              "packages/compiler-core/src/transform.ts": [
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 349,
-                  "end": 349
-                }
-              ],
-              "packages/compiler-core/src/utils.ts": [
-                {
-                  "start": 24,
-                  "end": 24
-                },
-                {
-                  "start": 45,
-                  "end": 45
-                }
-              ],
-              "packages/compiler-core/src/validateExpression.ts": [
+              "packages/compiler-sfc/__tests__/utils.ts": [
                 {
                   "start": 1,
-                  "end": 1
-                },
-                {
-                  "start": 29,
-                  "end": 29
+                  "end": 220
                 }
-              ],
-              "packages/compiler-core/src/codegen.ts": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-core/src/ast.ts"
+            ],
+            "spans": {
+              "packages/compiler-core/src/ast.ts": [
                 {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 671,
-                  "end": 671
-                },
-                {
-                  "start": 677,
-                  "end": 677
-                }
-              ],
-              "packages/compiler-core/src/transforms/vFor.ts": [
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 79,
-                  "end": 79
-                },
-                {
-                  "start": 85,
-                  "end": 85
-                },
-                {
-                  "start": 261,
-                  "end": 261
-                },
-                {
-                  "start": 325,
-                  "end": 325
-                },
-                {
-                  "start": 347,
-                  "end": 347
-                },
-                {
-                  "start": 352,
-                  "end": 352
-                },
-                {
-                  "start": 372,
-                  "end": 372
-                },
-                {
-                  "start": 398,
-                  "end": 398
-                },
-                {
-                  "start": 414,
-                  "end": 414
-                },
-                {
-                  "start": 428,
-                  "end": 428
-                }
-              ],
-              "packages/compiler-core/src/transforms/vOn.ts": [
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 29,
-                  "end": 29
-                },
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                }
-              ],
-              "packages/compiler-core/src/transforms/transformExpression.ts": [
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 100,
-                  "end": 100
-                }
-              ],
-              "packages/compiler-core/src/transforms/hoistStatic.ts": [
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 150,
-                  "end": 150
-                }
-              ],
-              "packages/compiler-core/src/transforms/vSlot.ts": [
-                {
-                  "start": 17,
-                  "end": 17
-                },
-                {
-                  "start": 82,
-                  "end": 82
-                },
-                {
-                  "start": 264,
-                  "end": 264
-                }
-              ],
-              "packages/compiler-core/src/transforms/vIf.ts": [
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 95,
-                  "end": 95
-                },
-                {
-                  "start": 107,
-                  "end": 107
-                },
-                {
-                  "start": 111,
-                  "end": 111
-                },
-                {
-                  "start": 332,
-                  "end": 332
-                },
-                {
-                  "start": 333,
-                  "end": 333
-                }
-              ],
-              "packages/compiler-core/src/compat/transformFilter.ts": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 61,
-                  "end": 61
+                  "start": 1,
+                  "end": 120
                 }
               ]
             },
@@ -830,170 +296,19 @@
           {
             "files": [
               "packages/compiler-core/src/ast.ts",
-              "packages/compiler-core/src/parse.ts",
-              "packages/compiler-core/src/transforms/vBind.ts",
-              "packages/compiler-core/src/transforms/vOn.ts",
-              "packages/compiler-core/src/transforms/vSlot.ts",
-              "packages/compiler-core/src/utils.ts",
-              "packages/compiler-dom/src/transforms/transformStyle.ts"
-            ],
-            "spans": {
-              "packages/compiler-core/src/utils.ts": [
-                {
-                  "start": 288,
-                  "end": 288
-                }
-              ],
-              "packages/compiler-core/src/ast.ts": [
-                {
-                  "start": 188,
-                  "end": 188
-                },
-                {
-                  "start": 192,
-                  "end": 192
-                }
-              ],
-              "packages/compiler-core/src/parse.ts": [
-                {
-                  "start": 816,
-                  "end": 816
-                }
-              ],
-              "packages/compiler-core/src/transforms/vSlot.ts": [
-                {
-                  "start": 191,
-                  "end": 191
-                }
-              ],
-              "packages/compiler-core/src/transforms/vOn.ts": [
-                {
-                  "start": 26,
-                  "end": 26
-                }
-              ],
-              "packages/compiler-core/src/transforms/vBind.ts": [
-                {
-                  "start": 64,
-                  "end": 64
-                }
-              ],
-              "packages/compiler-dom/src/transforms/transformStyle.ts": [
-                {
-                  "start": 25,
-                  "end": 25
-                }
-              ]
-            },
-            "symbols": {}
-          },
-          {
-            "files": [
               "packages/compiler-core/src/utils.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "packages/compiler-core/src/transforms/transformElement.ts",
-              "packages/compiler-core/src/transforms/transformSlotOutlet.ts",
-              "packages/compiler-core/src/transforms/vModel.ts",
-              "packages/compiler-core/src/transforms/vSlot.ts",
-              "packages/compiler-core/src/utils.ts",
-              "packages/compiler-dom/src/transforms/vOn.ts"
-            ],
             "spans": {
-              "packages/compiler-dom/src/transforms/vOn.ts": [
+              "packages/compiler-core/src/ast.ts": [
                 {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 66,
-                  "end": 66
-                },
-                {
-                  "start": 95,
-                  "end": 95
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 146,
-                  "end": 146
+                  "start": 180,
+                  "end": 230
                 }
               ],
               "packages/compiler-core/src/utils.ts": [
                 {
-                  "start": 45,
-                  "end": 45
-                },
-                {
-                  "start": 291,
-                  "end": 291
-                }
-              ],
-              "packages/compiler-core/src/transforms/vModel.ts": [
-                {
-                  "start": 17,
-                  "end": 17
-                },
-                {
-                  "start": 80,
+                  "start": 1,
                   "end": 80
-                },
-                {
-                  "start": 138,
-                  "end": 138
-                }
-              ],
-              "packages/compiler-core/src/transforms/vSlot.ts": [
-                {
-                  "start": 32,
-                  "end": 32
-                },
-                {
-                  "start": 146,
-                  "end": 146
-                },
-                {
-                  "start": 198,
-                  "end": 198
-                }
-              ],
-              "packages/compiler-core/src/transforms/transformSlotOutlet.ts": [
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                }
-              ],
-              "packages/compiler-core/src/transforms/transformElement.ts": [
-                {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 434,
-                  "end": 434
-                },
-                {
-                  "start": 686,
-                  "end": 686
-                },
-                {
-                  "start": 769,
-                  "end": 769
-                },
-                {
-                  "start": 785,
-                  "end": 785
                 }
               ]
             },
@@ -1003,7 +318,63 @@
             "files": [
               "packages/compiler-dom/src/index.ts"
             ],
+            "spans": {
+              "packages/compiler-dom/src/index.ts": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
+                {
+                  "start": 320,
+                  "end": 470
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/parse.spec.ts"
+            ],
             "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/src/parse.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/src/parse.ts": [
+                {
+                  "start": 1,
+                  "end": 160
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/src/script/importUsageCheck.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/src/script/importUsageCheck.ts": [
+                {
+                  "start": 1,
+                  "end": 80
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -1024,694 +395,104 @@
             "files": [
               "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap"
             ],
+            "spans": {
+              "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap": [
+                {
+                  "start": 220,
+                  "end": 320
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap"
+            ],
             "spans": {},
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap"
+            ],
+            "spans": {
+              "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap": [
+                {
+                  "start": 690,
+                  "end": 810
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/src/script/importUsageCheck.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/src/script/importUsageCheck.ts": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/parse.spec.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/__tests__/parse.spec.ts": [
+                {
+                  "start": 268,
+                  "end": 308
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
+                {
+                  "start": 410,
+                  "end": 455
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "compileScript.spec.ts",
-          "compileStyle.spec.ts",
-          "compileTemplate.spec.ts",
-          "cssVars.spec.ts",
-          "package.json",
-          "packages/compiler-core/__tests__/parse.spec.ts",
-          "packages/compiler-core/__tests__/transforms/__snapshots__/vModel.spec.ts.snap",
-          "packages/compiler-core/__tests__/transforms/vModel.spec.ts",
-          "packages/compiler-core/src/ast.ts",
-          "packages/compiler-core/src/codegen.ts",
-          "packages/compiler-core/src/compat/transformFilter.ts",
-          "packages/compiler-core/src/parse.ts",
-          "packages/compiler-core/src/transform.ts",
-          "packages/compiler-core/src/transforms/hoistStatic.ts",
-          "packages/compiler-core/src/transforms/transformElement.ts",
-          "packages/compiler-core/src/transforms/transformExpression.ts",
-          "packages/compiler-core/src/transforms/transformSlotOutlet.ts",
-          "packages/compiler-core/src/transforms/vBind.ts",
-          "packages/compiler-core/src/transforms/vFor.ts",
-          "packages/compiler-core/src/transforms/vIf.ts",
-          "packages/compiler-core/src/transforms/vModel.ts",
-          "packages/compiler-core/src/transforms/vOn.ts",
-          "packages/compiler-core/src/transforms/vSlot.ts",
-          "packages/compiler-core/src/utils.ts",
-          "packages/compiler-core/src/validateExpression.ts",
-          "packages/compiler-dom/src/index.ts",
-          "packages/compiler-dom/src/transforms/transformStyle.ts",
-          "packages/compiler-dom/src/transforms/vOn.ts",
-          "packages/compiler-sfc/README.md",
           "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/__snapshots__/compileTemplate.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/__snapshots__/cssVars.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/__snapshots__/templateTransformAssetUrl.spec.ts.snap",
-          "packages/compiler-sfc/__tests__/__snapshots__/templateTransformSrcset.spec.ts.snap",
           "packages/compiler-sfc/__tests__/compileScript.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/defineEmits.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/defineProps.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/hoistStatic.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/reactivityTransform.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts",
-          "packages/compiler-sfc/__tests__/compileStyle.spec.ts",
-          "packages/compiler-sfc/__tests__/compileTemplate.spec.ts",
-          "packages/compiler-sfc/__tests__/cssVars.spec.ts",
-          "packages/compiler-sfc/__tests__/fixture/import.scss",
           "packages/compiler-sfc/__tests__/parse.spec.ts",
-          "packages/compiler-sfc/__tests__/rewriteDefault.spec.ts",
-          "packages/compiler-sfc/__tests__/templateTransformAssetUrl.spec.ts",
-          "packages/compiler-sfc/__tests__/templateTransformSrcset.spec.ts",
-          "packages/compiler-sfc/__tests__/templateUtils.spec.ts",
-          "packages/compiler-sfc/__tests__/utils.ts",
-          "packages/compiler-sfc/package.json",
-          "packages/compiler-sfc/src/compileScript.ts",
-          "packages/compiler-sfc/src/index.ts",
           "packages/compiler-sfc/src/parse.ts",
-          "packages/compiler-sfc/src/script/analyzeScriptBindings.ts",
-          "packages/compiler-sfc/src/script/context.ts",
-          "packages/compiler-sfc/src/script/importUsageCheck.ts",
-          "packages/compiler-sfc/src/script/resolveType.ts",
-          "parse.spec.ts",
-          "rewriteDefault.spec.ts",
-          "templateTransformAssetUrl.spec.ts",
-          "templateTransformSrcset.spec.ts",
-          "templateUtils.spec.ts",
-          "utils.ts"
+          "packages/compiler-sfc/src/script/importUsageCheck.ts"
         ],
         "predSpans": {
-          "packages/compiler-core/__tests__/transforms/vModel.spec.ts": [
-            {
-              "start": 291,
-              "end": 291
-            },
-            {
-              "start": 343,
-              "end": 343
-            }
-          ],
-          "packages/compiler-core/__tests__/transforms/__snapshots__/vModel.spec.ts.snap": [
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 104,
-              "end": 104
-            }
-          ],
-          "packages/compiler-core/__tests__/parse.spec.ts": [
-            {
-              "start": 1195,
-              "end": 1195
-            },
-            {
-              "start": 1305,
-              "end": 1305
-            }
-          ],
-          "packages/compiler-sfc/README.md": [
-            {
-              "start": 72,
-              "end": 72
-            }
-          ],
-          "packages/compiler-sfc/src/index.ts": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 57,
-              "end": 57
-            }
-          ],
-          "packages/compiler-sfc/src/compileScript.ts": [
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 149,
-              "end": 149
-            },
-            {
-              "start": 155,
-              "end": 155
-            },
-            {
-              "start": 244,
-              "end": 244
-            },
-            {
-              "start": 725,
-              "end": 725
-            }
-          ],
-          "packages/compiler-sfc/src/parse.ts": [
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 85,
-              "end": 85
-            },
-            {
-              "start": 88,
-              "end": 88
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 443,
-              "end": 443
-            },
-            {
-              "start": 443,
-              "end": 462
-            },
-            {
-              "start": 446,
-              "end": 446
-            },
-            {
-              "start": 462,
-              "end": 462
-            }
-          ],
-          "packages/compiler-sfc/__tests__/utils.ts": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 17,
-              "end": 17
-            }
-          ],
-          "packages/compiler-sfc/src/script/resolveType.ts": [
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 766,
-              "end": 766
-            }
-          ],
-          "packages/compiler-sfc/src/script/context.ts": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts": [
-            {
-              "start": 923,
-              "end": 923
-            }
-          ],
           "packages/compiler-sfc/src/script/importUsageCheck.ts": [
             {
               "start": 1,
               "end": 107
-            },
-            {
-              "start": 19,
-              "end": 19
             }
           ],
-          "packages/compiler-sfc/src/script/analyzeScriptBindings.ts": [
+          "packages/compiler-sfc/src/parse.ts": [
             {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "packages/compiler-sfc/__tests__/compileTemplate.spec.ts": [
-            {
-              "start": 196,
-              "end": 196
-            }
-          ],
-          "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts": [
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 303,
-              "end": 303
+              "start": 443,
+              "end": 462
             }
           ],
           "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
             {
-              "start": 177,
-              "end": 177
-            },
-            {
-              "start": 381,
-              "end": 381
-            },
-            {
-              "start": 405,
-              "end": 405
-            },
-            {
               "start": 416,
               "end": 446
-            },
-            {
-              "start": 419,
-              "end": 419
-            },
-            {
-              "start": 435,
-              "end": 435
-            },
-            {
-              "start": 454,
-              "end": 454
-            },
-            {
-              "start": 471,
-              "end": 471
-            },
-            {
-              "start": 487,
-              "end": 487
-            },
-            {
-              "start": 508,
-              "end": 508
-            },
-            {
-              "start": 651,
-              "end": 651
-            },
-            {
-              "start": 812,
-              "end": 812
-            },
-            {
-              "start": 831,
-              "end": 831
-            },
-            {
-              "start": 840,
-              "end": 840
-            },
-            {
-              "start": 857,
-              "end": 857
-            },
-            {
-              "start": 872,
-              "end": 872
-            },
-            {
-              "start": 885,
-              "end": 885
-            },
-            {
-              "start": 1014,
-              "end": 1014
-            },
-            {
-              "start": 1512,
-              "end": 1512
-            },
-            {
-              "start": 1529,
-              "end": 1529
-            },
-            {
-              "start": 1545,
-              "end": 1545
-            }
-          ],
-          "packages/compiler-core/src/ast.ts": [
-            {
-              "start": 90,
-              "end": 90
-            },
-            {
-              "start": 140,
-              "end": 140
-            },
-            {
-              "start": 188,
-              "end": 188
-            },
-            {
-              "start": 192,
-              "end": 192
-            },
-            {
-              "start": 212,
-              "end": 212
-            },
-            {
-              "start": 238,
-              "end": 238
-            },
-            {
-              "start": 282,
-              "end": 282
-            },
-            {
-              "start": 299,
-              "end": 299
-            },
-            {
-              "start": 302,
-              "end": 302
-            },
-            {
-              "start": 427,
-              "end": 427
-            },
-            {
-              "start": 499,
-              "end": 499
-            },
-            {
-              "start": 649,
-              "end": 649
-            },
-            {
-              "start": 650,
-              "end": 650
-            },
-            {
-              "start": 653,
-              "end": 653
-            }
-          ],
-          "packages/compiler-core/src/transform.ts": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 349,
-              "end": 349
-            }
-          ],
-          "packages/compiler-core/src/utils.ts": [
-            {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 45,
-              "end": 45
-            },
-            {
-              "start": 288,
-              "end": 288
-            },
-            {
-              "start": 291,
-              "end": 291
-            }
-          ],
-          "packages/compiler-core/src/validateExpression.ts": [
-            {
-              "start": 1,
-              "end": 1
-            },
-            {
-              "start": 29,
-              "end": 29
-            }
-          ],
-          "packages/compiler-core/src/codegen.ts": [
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 671,
-              "end": 671
-            },
-            {
-              "start": 677,
-              "end": 677
-            }
-          ],
-          "packages/compiler-core/src/transforms/vFor.ts": [
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 79,
-              "end": 79
-            },
-            {
-              "start": 85,
-              "end": 85
-            },
-            {
-              "start": 261,
-              "end": 261
-            },
-            {
-              "start": 325,
-              "end": 325
-            },
-            {
-              "start": 347,
-              "end": 347
-            },
-            {
-              "start": 352,
-              "end": 352
-            },
-            {
-              "start": 372,
-              "end": 372
-            },
-            {
-              "start": 398,
-              "end": 398
-            },
-            {
-              "start": 414,
-              "end": 414
-            },
-            {
-              "start": 428,
-              "end": 428
-            }
-          ],
-          "packages/compiler-core/src/transforms/vOn.ts": [
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 26,
-              "end": 26
-            },
-            {
-              "start": 29,
-              "end": 29
-            },
-            {
-              "start": 82,
-              "end": 82
-            },
-            {
-              "start": 136,
-              "end": 136
-            }
-          ],
-          "packages/compiler-core/src/transforms/transformExpression.ts": [
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 100,
-              "end": 100
-            }
-          ],
-          "packages/compiler-core/src/transforms/hoistStatic.ts": [
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 150,
-              "end": 150
-            }
-          ],
-          "packages/compiler-core/src/transforms/vSlot.ts": [
-            {
-              "start": 17,
-              "end": 17
-            },
-            {
-              "start": 32,
-              "end": 32
-            },
-            {
-              "start": 82,
-              "end": 82
-            },
-            {
-              "start": 146,
-              "end": 146
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 198,
-              "end": 198
-            },
-            {
-              "start": 264,
-              "end": 264
-            }
-          ],
-          "packages/compiler-core/src/transforms/vIf.ts": [
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 95,
-              "end": 95
-            },
-            {
-              "start": 107,
-              "end": 107
-            },
-            {
-              "start": 111,
-              "end": 111
-            },
-            {
-              "start": 332,
-              "end": 332
-            },
-            {
-              "start": 333,
-              "end": 333
-            }
-          ],
-          "packages/compiler-core/src/compat/transformFilter.ts": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 61,
-              "end": 61
-            }
-          ],
-          "packages/compiler-core/src/parse.ts": [
-            {
-              "start": 816,
-              "end": 816
-            }
-          ],
-          "packages/compiler-core/src/transforms/vBind.ts": [
-            {
-              "start": 64,
-              "end": 64
-            }
-          ],
-          "packages/compiler-dom/src/transforms/transformStyle.ts": [
-            {
-              "start": 25,
-              "end": 25
-            }
-          ],
-          "packages/compiler-dom/src/transforms/vOn.ts": [
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 66,
-              "end": 66
-            },
-            {
-              "start": 95,
-              "end": 95
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 146,
-              "end": 146
-            }
-          ],
-          "packages/compiler-core/src/transforms/vModel.ts": [
-            {
-              "start": 17,
-              "end": 17
-            },
-            {
-              "start": 80,
-              "end": 80
-            },
-            {
-              "start": 138,
-              "end": 138
-            }
-          ],
-          "packages/compiler-core/src/transforms/transformSlotOutlet.ts": [
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 81,
-              "end": 81
-            }
-          ],
-          "packages/compiler-core/src/transforms/transformElement.ts": [
-            {
-              "start": 58,
-              "end": 58
-            },
-            {
-              "start": 434,
-              "end": 434
-            },
-            {
-              "start": 686,
-              "end": 686
-            },
-            {
-              "start": 769,
-              "end": 769
-            },
-            {
-              "start": 785,
-              "end": 785
             }
           ],
           "packages/compiler-sfc/__tests__/parse.spec.ts": [
@@ -1742,213 +523,258 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 8,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 9,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 10,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 11,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 12,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 0.25,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "symbol": 0.075,
+              "span": 0.0868019619313324,
+              "line": 0.09436225509796081
             }
           },
           {
             "step": 14,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "file": 0.375,
+              "symbol": 0.125,
+              "span": 0.13549025784097557,
+              "line": 0.14674130347860856
             }
           },
           {
             "step": 15,
             "coverage": {
-              "file": 0.625,
-              "symbol": 0.09166666666666666,
-              "span": 0.013784517541886034,
-              "line": 0.007197121151539384
+              "file": 0.5,
+              "symbol": 0.14166666666666666,
+              "span": 0.16919407820726273,
+              "line": 0.1759296281487405
             }
           },
           {
             "step": 16,
             "coverage": {
-              "file": 0.625,
-              "symbol": 0.10833333333333334,
-              "span": 0.015419460318888838,
-              "line": 0.008396641343462616
+              "file": 0.5,
+              "symbol": 0.14166666666666666,
+              "span": 0.16919407820726273,
+              "line": 0.1759296281487405
             }
           },
           {
             "step": 17,
             "coverage": {
-              "file": 0.625,
-              "symbol": 0.10833333333333334,
-              "span": 0.015419460318888838,
-              "line": 0.008396641343462616
+              "file": 0.5,
+              "symbol": 0.14166666666666666,
+              "span": 0.16919407820726273,
+              "line": 0.1759296281487405
             }
           },
           {
             "step": 18,
             "coverage": {
-              "file": 0.625,
-              "symbol": 0.10833333333333334,
-              "span": 0.016334428295009674,
-              "line": 0.008796481407437025
+              "file": 0.5,
+              "symbol": 0.14166666666666666,
+              "span": 0.16919407820726273,
+              "line": 0.1759296281487405
             }
           },
           {
             "step": 19,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.10833333333333334,
-              "span": 0.016334428295009674,
-              "line": 0.008796481407437025
+              "file": 0.5,
+              "symbol": 0.14166666666666666,
+              "span": 0.16919407820726273,
+              "line": 0.1759296281487405
             }
           },
           {
             "step": 20,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.10833333333333334,
-              "span": 0.016334428295009674,
-              "line": 0.008796481407437025
+              "file": 0.5,
+              "symbol": 0.14166666666666666,
+              "span": 0.16919407820726273,
+              "line": 0.1759296281487405
             }
           },
           {
             "step": 21,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.10833333333333334,
-              "span": 0.016334428295009674,
-              "line": 0.008796481407437025
+              "file": 0.5,
+              "symbol": 0.14166666666666666,
+              "span": 0.16919407820726273,
+              "line": 0.1759296281487405
             }
           },
           {
             "step": 22,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.10833333333333334,
-              "span": 0.016334428295009674,
-              "line": 0.008796481407437025
+              "file": 0.5,
+              "symbol": 0.14166666666666666,
+              "span": 0.16919407820726273,
+              "line": 0.1759296281487405
+            }
+          },
+          {
+            "step": 23,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.14166666666666666,
+              "span": 0.16919407820726273,
+              "line": 0.1759296281487405
+            }
+          },
+          {
+            "step": 24,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.14166666666666666,
+              "span": 0.16919407820726273,
+              "line": 0.1759296281487405
+            }
+          },
+          {
+            "step": 25,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.14166666666666666,
+              "span": 0.16919407820726273,
+              "line": 0.1759296281487405
+            }
+          },
+          {
+            "step": 26,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.14166666666666666,
+              "span": 0.16919407820726273,
+              "line": 0.1759296281487405
+            }
+          },
+          {
+            "step": 27,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 0.14166666666666666,
+              "span": 0.16919407820726273,
+              "line": 0.1759296281487405
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.3977272727272727,
-          "symbol": 0.04356060606060607,
-          "span": 0.007070207088206457,
-          "line": 0.0035622114790447453
+          "file": 0.3194444444444444,
+          "symbol": 0.09413580246913579,
+          "span": 0.11231606893758717,
+          "line": 0.11425059605787313
         },
         "redundancy": {
-          "file": 0.3058823529411765,
-          "symbol": 0.1707317073170732,
-          "span": 0.08530740791455571,
-          "line": 0.06338028169014087
+          "file": 0.5357142857142857,
+          "symbol": 0.18604651162790697,
+          "span": 0.15948202995570882,
+          "line": 0.10626885685551457
         }
       },
       "fixOverlap": {
@@ -2198,17 +1024,44 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/compiler-sfc/src/script/importUsageCheck.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/compiler-sfc/src/script/importUsageCheck.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/compiler-sfc/__tests__/compileScript.spec.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/compiler-sfc/__tests__/compileScript.spec.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/compiler-sfc/__tests__/parse.spec.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/compiler-sfc/__tests__/parse.spec.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",
@@ -2293,7 +1146,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2319,7 +1181,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2352,7 +1223,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/compiler-sfc/__tests__/parse.spec.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/compiler-sfc/__tests__/parse.spec.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2423,9 +1303,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-11T00:14:22Z",
       "completedAt": "2026-05-11T00:19:12Z",
       "durationMs": 290115,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1361733,
@@ -2434,6 +1329,28 @@
         "total_tokens": 1374096,
         "cache_read_input_tokens": 1310336
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 38,
+        "readToolCalls": 0,
+        "editToolCalls": 6
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/packages/compiler-sfc/__tests__/compileScript.spec.ts b/packages/compiler-sfc/__tests__/compileScript.spec.ts\nindex 6da274dd..96a04294 100644\n--- a/packages/compiler-sfc/__tests__/compileScript.spec.ts\n+++ b/packages/compiler-sfc/__tests__/compileScript.spec.ts\n@@ -430,6 +430,20 @@ describe('SFC compile <script setup>', () => {\n       assertCode(content)\n     })\n \n+    test('dynamic directive arguments', () => {\n+      const { content } = compile(`\n+        <script setup lang=\"ts\">\n+        import { bar, baz, qux } from './x'\n+        </script>\n+        <template>\n+          <div :[bar]=\"baz\" @[qux]=\"baz\"></div>\n+        </template>\n+        `)\n+      expect(content).toMatch(\n+        `return { get bar() { return bar }, get baz() { return baz }, get qux() { return qux } }`\n+      )\n+    })\n+\n     test('vue interpolations', () => {\n       const { content } = compile(`\n       <script setup lang=\"ts\">\ndiff --git a/packages/compiler-sfc/src/script/importUsageCheck.ts b/packages/compiler-sfc/src/script/importUsageCheck.ts\nindex b42397d5..f75e6dd8 100644\n--- a/packages/compiler-sfc/src/script/importUsageCheck.ts\n+++ b/packages/compiler-sfc/src/script/importUsageCheck.ts\n@@ -50,6 +50,13 @@ function resolveTemplateUsageCheckString(sfc: SFCDescriptor) {\n               if (!isBuiltInDirective(prop.name)) {\n                 code += `,v${capitalize(camelize(prop.name))}`\n               }\n+              if (\n+                prop.arg &&\n+                prop.arg.type === NodeTypes.SIMPLE_EXPRESSION &&\n+                !prop.arg.isStatic\n+              ) {\n+                code += `,${processExp(prop.arg.content)}`\n+              }\n               if (prop.exp) {\n                 code += `,${processExp(\n                   (prop.exp as SimpleExpressionNode).content,\n",
       "finalOutput": {
         "status": "completed",
@@ -2480,477 +1397,27 @@
         "predSteps": [
           {
             "files": [
-              "packages/compiler-sfc/README.md",
-              "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts",
-              "packages/compiler-sfc/__tests__/utils.ts",
-              "packages/compiler-sfc/src/compileScript.ts",
-              "packages/compiler-sfc/src/index.ts",
-              "packages/compiler-sfc/src/parse.ts",
-              "packages/compiler-sfc/src/script/analyzeScriptBindings.ts",
-              "packages/compiler-sfc/src/script/context.ts",
-              "packages/compiler-sfc/src/script/defineProps.ts",
-              "packages/compiler-sfc/src/script/normalScript.ts",
-              "packages/compiler-sfc/src/script/resolveType.ts"
-            ],
-            "spans": {
-              "packages/compiler-sfc/README.md": [
-                {
-                  "start": 72,
-                  "end": 72
-                }
-              ],
-              "packages/compiler-sfc/__tests__/utils.ts": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 17,
-                  "end": 17
-                }
-              ],
-              "packages/compiler-sfc/src/index.ts": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                }
-              ],
-              "packages/compiler-sfc/src/compileScript.ts": [
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 149,
-                  "end": 149
-                },
-                {
-                  "start": 155,
-                  "end": 155
-                },
-                {
-                  "start": 234,
-                  "end": 234
-                },
-                {
-                  "start": 728,
-                  "end": 728
-                }
-              ],
-              "packages/compiler-sfc/src/parse.ts": [
-                {
-                  "start": 14,
-                  "end": 14
-                }
-              ],
-              "packages/compiler-sfc/src/script/resolveType.ts": [
-                {
-                  "start": 36,
-                  "end": 36
-                },
-                {
-                  "start": 766,
-                  "end": 766
-                }
-              ],
-              "packages/compiler-sfc/src/script/context.ts": [
-                {
-                  "start": 5,
-                  "end": 5
-                }
-              ],
-              "packages/compiler-sfc/src/script/defineProps.ts": [
-                {
-                  "start": 23,
-                  "end": 23
-                }
-              ],
-              "packages/compiler-sfc/src/script/analyzeScriptBindings.ts": [
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 15,
-                  "end": 15
-                }
-              ],
-              "packages/compiler-sfc/src/script/normalScript.ts": [
-                {
-                  "start": 2,
-                  "end": 2
-                },
-                {
-                  "start": 24,
-                  "end": 24
-                }
-              ],
-              "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts": [
-                {
-                  "start": 923,
-                  "end": 923
-                }
-              ]
-            },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "packages/compiler-core/__tests__/parse.spec.ts",
-              "packages/compiler-core/__tests__/transforms/__snapshots__/vModel.spec.ts.snap",
-              "packages/compiler-core/__tests__/transforms/transformExpressions.spec.ts",
-              "packages/compiler-core/__tests__/transforms/vBind.spec.ts",
-              "packages/compiler-core/__tests__/transforms/vModel.spec.ts",
-              "packages/compiler-core/__tests__/transforms/vOn.spec.ts",
-              "packages/compiler-core/src/errors.ts",
-              "packages/compiler-core/src/transforms/transformElement.ts",
-              "packages/compiler-core/src/transforms/vFor.ts",
-              "packages/compiler-core/src/transforms/vIf.ts",
-              "packages/compiler-core/src/transforms/vMemo.ts",
-              "packages/compiler-core/src/transforms/vOnce.ts",
-              "packages/compiler-core/src/transforms/vSlot.ts",
-              "packages/compiler-core/src/utils.ts",
-              "packages/compiler-dom/src/transforms/vModel.ts",
-              "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts",
-              "packages/compiler-sfc/__tests__/utils.ts",
-              "packages/compiler-sfc/src/compileScript.ts",
-              "packages/compiler-sfc/src/parse.ts",
-              "packages/compiler-sfc/src/script/importUsageCheck.ts"
-            ],
-            "spans": {
-              "packages/compiler-dom/src/transforms/vModel.ts": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 35,
-                  "end": 35
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                }
-              ],
-              "packages/compiler-sfc/src/compileScript.ts": [
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 149,
-                  "end": 149
-                },
-                {
-                  "start": 244,
-                  "end": 244
-                }
-              ],
-              "packages/compiler-sfc/src/parse.ts": [
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 462,
-                  "end": 462
-                }
-              ],
-              "packages/compiler-sfc/src/script/importUsageCheck.ts": [
-                {
-                  "start": 19,
-                  "end": 19
-                }
-              ],
-              "packages/compiler-core/__tests__/parse.spec.ts": [
-                {
-                  "start": 1195,
-                  "end": 1195
-                },
-                {
-                  "start": 1305,
-                  "end": 1305
-                }
-              ],
-              "packages/compiler-core/src/errors.ts": [
-                {
-                  "start": 150,
-                  "end": 150
-                },
-                {
-                  "start": 151,
-                  "end": 151
-                }
-              ],
-              "packages/compiler-core/src/utils.ts": [
-                {
-                  "start": 247,
-                  "end": 247
-                },
-                {
-                  "start": 264,
-                  "end": 264
-                }
-              ],
-              "packages/compiler-core/src/transforms/vFor.ts": [
-                {
-                  "start": 36,
-                  "end": 36
-                },
-                {
-                  "start": 40,
-                  "end": 40
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 64,
-                  "end": 64
-                },
-                {
-                  "start": 124,
-                  "end": 124
-                }
-              ],
-              "packages/compiler-core/src/transforms/vMemo.ts": [
-                {
-                  "start": 2,
-                  "end": 2
-                },
-                {
-                  "start": 18,
-                  "end": 18
-                }
-              ],
-              "packages/compiler-core/src/transforms/vOnce.ts": [
-                {
-                  "start": 2,
-                  "end": 2
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                }
-              ],
-              "packages/compiler-core/src/transforms/vIf.ts": [
-                {
-                  "start": 35,
-                  "end": 35
-                },
-                {
-                  "start": 36,
-                  "end": 36
-                },
-                {
-                  "start": 217,
-                  "end": 217
-                },
-                {
-                  "start": 218,
-                  "end": 218
-                }
-              ],
-              "packages/compiler-core/src/transforms/vSlot.ts": [
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 79,
-                  "end": 79
-                },
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 171,
-                  "end": 171
-                },
-                {
-                  "start": 209,
-                  "end": 209
-                },
-                {
-                  "start": 219,
-                  "end": 219
-                },
-                {
-                  "start": 230,
-                  "end": 230
-                },
-                {
-                  "start": 260,
-                  "end": 260
-                }
-              ],
-              "packages/compiler-core/__tests__/transforms/__snapshots__/vModel.spec.ts.snap": [
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                }
-              ],
-              "packages/compiler-core/src/transforms/transformElement.ts": [
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 257,
-                  "end": 257
-                },
-                {
-                  "start": 289,
-                  "end": 289
-                },
-                {
-                  "start": 373,
-                  "end": 373
-                }
-              ],
-              "packages/compiler-core/__tests__/transforms/vOn.spec.ts": [
-                {
-                  "start": 71,
-                  "end": 71
-                },
-                {
-                  "start": 94,
-                  "end": 94
-                },
-                {
-                  "start": 119,
-                  "end": 119
-                }
-              ],
-              "packages/compiler-core/__tests__/transforms/vBind.spec.ts": [
-                {
-                  "start": 75,
-                  "end": 75
-                },
-                {
-                  "start": 145,
-                  "end": 145
-                },
-                {
-                  "start": 171,
-                  "end": 171
-                },
-                {
-                  "start": 222,
-                  "end": 222
-                },
-                {
-                  "start": 248,
-                  "end": 248
-                }
-              ],
-              "packages/compiler-core/__tests__/transforms/transformExpressions.spec.ts": [
-                {
-                  "start": 104,
-                  "end": 104
-                }
-              ],
-              "packages/compiler-core/__tests__/transforms/vModel.spec.ts": [
-                {
-                  "start": 291,
-                  "end": 291
-                },
-                {
-                  "start": 343,
-                  "end": 343
-                }
-              ],
-              "packages/compiler-sfc/__tests__/utils.ts": [
-                {
-                  "start": 17,
-                  "end": 17
-                }
-              ],
-              "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts": [
-                {
-                  "start": 923,
-                  "end": 923
-                }
-              ]
-            },
-            "symbols": {}
-          },
-          {
-            "files": [
               "packages/compiler-sfc/src/compileScript.ts"
             ],
-            "spans": {},
+            "spans": {
+              "packages/compiler-sfc/src/compileScript.ts": [
+                {
+                  "start": 210,
+                  "end": 280
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "packages/compiler-sfc/src/script/importUsageCheck.ts"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
-              "packages/compiler-sfc/__tests__/compileScript.spec.ts"
-            ],
             "spans": {
-              "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
+              "packages/compiler-sfc/src/script/importUsageCheck.ts": [
                 {
-                  "start": 376,
-                  "end": 376
-                },
-                {
-                  "start": 378,
-                  "end": 378
-                }
-              ],
-              "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap": [
-                {
-                  "start": 684,
-                  "end": 684
-                },
-                {
-                  "start": 701,
-                  "end": 701
-                },
-                {
-                  "start": 717,
-                  "end": 717
-                },
-                {
-                  "start": 733,
-                  "end": 733
-                },
-                {
-                  "start": 748,
-                  "end": 748
-                },
-                {
-                  "start": 763,
-                  "end": 763
-                },
-                {
-                  "start": 778,
-                  "end": 778
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
@@ -2960,7 +1427,14 @@
             "files": [
               "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap"
             ],
-            "spans": {},
+            "spans": {
+              "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap": [
+                {
+                  "start": 680,
+                  "end": 740
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -2974,179 +1448,53 @@
             "files": [
               "packages/compiler-sfc/__tests__/compileScript.spec.ts"
             ],
-            "spans": {},
+            "spans": {
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
+                {
+                  "start": 360,
+                  "end": 460
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "packages/compiler-sfc/__tests__/utils.ts"
             ],
-            "spans": {},
+            "spans": {
+              "packages/compiler-sfc/__tests__/utils.ts": [
+                {
+                  "start": 1,
+                  "end": 120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "packages/compiler-core/src/ast.ts",
-              "packages/compiler-core/src/babelUtils.ts",
-              "packages/compiler-core/src/compat/transformFilter.ts",
-              "packages/compiler-core/src/parse.ts",
-              "packages/compiler-core/src/transform.ts",
-              "packages/compiler-core/src/transforms/hoistStatic.ts",
-              "packages/compiler-core/src/transforms/transformExpression.ts",
-              "packages/compiler-core/src/transforms/transformText.ts",
-              "packages/compiler-core/src/transforms/vBind.ts",
-              "packages/compiler-core/src/transforms/vOn.ts",
-              "packages/compiler-core/src/utils.ts",
-              "packages/compiler-dom/src/transforms/Transition.ts",
-              "packages/compiler-dom/src/transforms/stringifyStatic.ts",
-              "packages/compiler-dom/src/transforms/transformStyle.ts",
-              "packages/compiler-dom/src/transforms/vModel.ts"
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts"
             ],
             "spans": {
-              "packages/compiler-core/src/babelUtils.ts": [
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
                 {
-                  "start": 192,
-                  "end": 192
+                  "start": 460,
+                  "end": 560
                 }
-              ],
-              "packages/compiler-core/src/ast.ts": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
                 {
-                  "start": 189,
-                  "end": 189
-                }
-              ],
-              "packages/compiler-core/src/utils.ts": [
-                {
-                  "start": 255,
-                  "end": 255
-                },
-                {
-                  "start": 297,
-                  "end": 297
-                },
-                {
-                  "start": 301,
-                  "end": 301
-                },
-                {
-                  "start": 312,
-                  "end": 312
-                },
-                {
-                  "start": 473,
-                  "end": 473
-                }
-              ],
-              "packages/compiler-core/src/parse.ts": [
-                {
-                  "start": 217,
-                  "end": 217
-                },
-                {
-                  "start": 563,
-                  "end": 563
-                },
-                {
-                  "start": 602,
-                  "end": 602
-                },
-                {
-                  "start": 628,
-                  "end": 628
-                },
-                {
-                  "start": 902,
-                  "end": 902
-                }
-              ],
-              "packages/compiler-core/src/transform.ts": [
-                {
-                  "start": 491,
-                  "end": 491
-                }
-              ],
-              "packages/compiler-core/src/compat/transformFilter.ts": [
-                {
-                  "start": 33,
-                  "end": 33
-                }
-              ],
-              "packages/compiler-core/src/transforms/transformExpression.ts": [
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 80,
-                  "end": 80
-                }
-              ],
-              "packages/compiler-core/src/transforms/vOn.ts": [
-                {
-                  "start": 44,
-                  "end": 44
-                }
-              ],
-              "packages/compiler-core/src/transforms/hoistStatic.ts": [
-                {
-                  "start": 212,
-                  "end": 212
-                },
-                {
-                  "start": 232,
-                  "end": 232
-                }
-              ],
-              "packages/compiler-dom/src/transforms/vModel.ts": [
-                {
-                  "start": 59,
-                  "end": 59
-                }
-              ],
-              "packages/compiler-dom/src/transforms/Transition.ts": [
-                {
-                  "start": 42,
-                  "end": 42
-                }
-              ],
-              "packages/compiler-dom/src/transforms/transformStyle.ts": [
-                {
-                  "start": 23,
-                  "end": 23
-                }
-              ],
-              "packages/compiler-core/src/transforms/vBind.ts": [
-                {
-                  "start": 22,
-                  "end": 22
-                },
-                {
-                  "start": 29,
-                  "end": 29
-                },
-                {
-                  "start": 66,
-                  "end": 66
-                }
-              ],
-              "packages/compiler-dom/src/transforms/stringifyStatic.ts": [
-                {
-                  "start": 212,
-                  "end": 212
-                },
-                {
-                  "start": 217,
-                  "end": 217
-                },
-                {
-                  "start": 291,
-                  "end": 291
-                }
-              ],
-              "packages/compiler-core/src/transforms/transformText.ts": [
-                {
-                  "start": 74,
-                  "end": 74
+                  "start": 1,
+                  "end": 120
                 }
               ]
             },
@@ -3156,598 +1504,109 @@
             "files": [
               "packages/compiler-core/src/transforms/transformExpression.ts"
             ],
-            "spans": {},
+            "spans": {
+              "packages/compiler-core/src/transforms/transformExpression.ts": [
+                {
+                  "start": 50,
+                  "end": 95
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap"
+            ],
+            "spans": {
+              "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap": [
+                {
+                  "start": 700,
+                  "end": 760
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap"
+            ],
+            "spans": {
+              "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap": [
+                {
+                  "start": 714,
+                  "end": 732
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/src/script/importUsageCheck.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/src/script/importUsageCheck.ts": [
+                {
+                  "start": 40,
+                  "end": 70
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
+                {
+                  "start": 424,
+                  "end": 452
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "packages/compiler-sfc/src/compileScript.ts"
+            ],
+            "spans": {
+              "packages/compiler-sfc/src/compileScript.ts": [
+                {
+                  "start": 234,
+                  "end": 250
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "package.json",
-          "packages/compiler-core/__tests__/parse.spec.ts",
-          "packages/compiler-core/__tests__/transforms/__snapshots__/vModel.spec.ts.snap",
-          "packages/compiler-core/__tests__/transforms/transformExpressions.spec.ts",
-          "packages/compiler-core/__tests__/transforms/vBind.spec.ts",
-          "packages/compiler-core/__tests__/transforms/vModel.spec.ts",
-          "packages/compiler-core/__tests__/transforms/vOn.spec.ts",
-          "packages/compiler-core/src/ast.ts",
-          "packages/compiler-core/src/babelUtils.ts",
-          "packages/compiler-core/src/compat/transformFilter.ts",
-          "packages/compiler-core/src/errors.ts",
-          "packages/compiler-core/src/parse.ts",
-          "packages/compiler-core/src/transform.ts",
-          "packages/compiler-core/src/transforms/hoistStatic.ts",
-          "packages/compiler-core/src/transforms/transformElement.ts",
-          "packages/compiler-core/src/transforms/transformExpression.ts",
-          "packages/compiler-core/src/transforms/transformText.ts",
-          "packages/compiler-core/src/transforms/vBind.ts",
-          "packages/compiler-core/src/transforms/vFor.ts",
-          "packages/compiler-core/src/transforms/vIf.ts",
-          "packages/compiler-core/src/transforms/vMemo.ts",
-          "packages/compiler-core/src/transforms/vOn.ts",
-          "packages/compiler-core/src/transforms/vOnce.ts",
-          "packages/compiler-core/src/transforms/vSlot.ts",
-          "packages/compiler-core/src/utils.ts",
-          "packages/compiler-dom/src/transforms/Transition.ts",
-          "packages/compiler-dom/src/transforms/stringifyStatic.ts",
-          "packages/compiler-dom/src/transforms/transformStyle.ts",
-          "packages/compiler-dom/src/transforms/vModel.ts",
-          "packages/compiler-sfc/README.md",
-          "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
           "packages/compiler-sfc/__tests__/compileScript.spec.ts",
-          "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts",
-          "packages/compiler-sfc/__tests__/utils.ts",
           "packages/compiler-sfc/src/compileScript.ts",
-          "packages/compiler-sfc/src/index.ts",
-          "packages/compiler-sfc/src/parse.ts",
-          "packages/compiler-sfc/src/script/analyzeScriptBindings.ts",
-          "packages/compiler-sfc/src/script/context.ts",
-          "packages/compiler-sfc/src/script/defineProps.ts",
-          "packages/compiler-sfc/src/script/importUsageCheck.ts",
-          "packages/compiler-sfc/src/script/normalScript.ts",
-          "packages/compiler-sfc/src/script/resolveType.ts"
+          "packages/compiler-sfc/src/script/importUsageCheck.ts"
         ],
         "predSpans": {
-          "packages/compiler-sfc/README.md": [
-            {
-              "start": 72,
-              "end": 72
-            }
-          ],
-          "packages/compiler-sfc/__tests__/utils.ts": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 17,
-              "end": 17
-            }
-          ],
-          "packages/compiler-sfc/src/index.ts": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 57,
-              "end": 57
-            }
-          ],
-          "packages/compiler-sfc/src/compileScript.ts": [
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 149,
-              "end": 149
-            },
-            {
-              "start": 155,
-              "end": 155
-            },
-            {
-              "start": 234,
-              "end": 234
-            },
-            {
-              "start": 234,
-              "end": 245
-            },
-            {
-              "start": 244,
-              "end": 244
-            },
-            {
-              "start": 728,
-              "end": 728
-            }
-          ],
-          "packages/compiler-sfc/src/parse.ts": [
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 462,
-              "end": 462
-            }
-          ],
-          "packages/compiler-sfc/src/script/resolveType.ts": [
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 766,
-              "end": 766
-            }
-          ],
-          "packages/compiler-sfc/src/script/context.ts": [
-            {
-              "start": 5,
-              "end": 5
-            }
-          ],
-          "packages/compiler-sfc/src/script/defineProps.ts": [
-            {
-              "start": 23,
-              "end": 23
-            }
-          ],
-          "packages/compiler-sfc/src/script/analyzeScriptBindings.ts": [
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 15,
-              "end": 15
-            }
-          ],
-          "packages/compiler-sfc/src/script/normalScript.ts": [
-            {
-              "start": 2,
-              "end": 2
-            },
-            {
-              "start": 24,
-              "end": 24
-            }
-          ],
-          "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts": [
-            {
-              "start": 923,
-              "end": 923
-            }
-          ],
-          "packages/compiler-dom/src/transforms/vModel.ts": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 35,
-              "end": 35
-            },
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 59,
-              "end": 59
-            }
-          ],
           "packages/compiler-sfc/src/script/importUsageCheck.ts": [
-            {
-              "start": 19,
-              "end": 19
-            },
             {
               "start": 40,
               "end": 65
             }
           ],
-          "packages/compiler-core/__tests__/parse.spec.ts": [
+          "packages/compiler-sfc/src/compileScript.ts": [
             {
-              "start": 1195,
-              "end": 1195
-            },
-            {
-              "start": 1305,
-              "end": 1305
-            }
-          ],
-          "packages/compiler-core/src/errors.ts": [
-            {
-              "start": 150,
-              "end": 150
-            },
-            {
-              "start": 151,
-              "end": 151
-            }
-          ],
-          "packages/compiler-core/src/utils.ts": [
-            {
-              "start": 247,
-              "end": 247
-            },
-            {
-              "start": 255,
-              "end": 255
-            },
-            {
-              "start": 264,
-              "end": 264
-            },
-            {
-              "start": 297,
-              "end": 297
-            },
-            {
-              "start": 301,
-              "end": 301
-            },
-            {
-              "start": 312,
-              "end": 312
-            },
-            {
-              "start": 473,
-              "end": 473
-            }
-          ],
-          "packages/compiler-core/src/transforms/vFor.ts": [
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 40,
-              "end": 40
-            },
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 64,
-              "end": 64
-            },
-            {
-              "start": 124,
-              "end": 124
-            }
-          ],
-          "packages/compiler-core/src/transforms/vMemo.ts": [
-            {
-              "start": 2,
-              "end": 2
-            },
-            {
-              "start": 18,
-              "end": 18
-            }
-          ],
-          "packages/compiler-core/src/transforms/vOnce.ts": [
-            {
-              "start": 2,
-              "end": 2
-            },
-            {
-              "start": 9,
-              "end": 9
-            }
-          ],
-          "packages/compiler-core/src/transforms/vIf.ts": [
-            {
-              "start": 35,
-              "end": 35
-            },
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 217,
-              "end": 217
-            },
-            {
-              "start": 218,
-              "end": 218
-            }
-          ],
-          "packages/compiler-core/src/transforms/vSlot.ts": [
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 79,
-              "end": 79
-            },
-            {
-              "start": 143,
-              "end": 143
-            },
-            {
-              "start": 171,
-              "end": 171
-            },
-            {
-              "start": 209,
-              "end": 209
-            },
-            {
-              "start": 219,
-              "end": 219
-            },
-            {
-              "start": 230,
-              "end": 230
-            },
-            {
-              "start": 260,
-              "end": 260
-            }
-          ],
-          "packages/compiler-core/__tests__/transforms/__snapshots__/vModel.spec.ts.snap": [
-            {
-              "start": 93,
-              "end": 93
-            },
-            {
-              "start": 104,
-              "end": 104
-            }
-          ],
-          "packages/compiler-core/src/transforms/transformElement.ts": [
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 257,
-              "end": 257
-            },
-            {
-              "start": 289,
-              "end": 289
-            },
-            {
-              "start": 373,
-              "end": 373
-            }
-          ],
-          "packages/compiler-core/__tests__/transforms/vOn.spec.ts": [
-            {
-              "start": 71,
-              "end": 71
-            },
-            {
-              "start": 94,
-              "end": 94
-            },
-            {
-              "start": 119,
-              "end": 119
-            }
-          ],
-          "packages/compiler-core/__tests__/transforms/vBind.spec.ts": [
-            {
-              "start": 75,
-              "end": 75
-            },
-            {
-              "start": 145,
-              "end": 145
-            },
-            {
-              "start": 171,
-              "end": 171
-            },
-            {
-              "start": 222,
-              "end": 222
-            },
-            {
-              "start": 248,
-              "end": 248
-            }
-          ],
-          "packages/compiler-core/__tests__/transforms/transformExpressions.spec.ts": [
-            {
-              "start": 104,
-              "end": 104
-            }
-          ],
-          "packages/compiler-core/__tests__/transforms/vModel.spec.ts": [
-            {
-              "start": 291,
-              "end": 291
-            },
-            {
-              "start": 343,
-              "end": 343
+              "start": 234,
+              "end": 245
             }
           ],
           "packages/compiler-sfc/__tests__/compileScript.spec.ts": [
             {
               "start": 376,
-              "end": 376
-            },
-            {
-              "start": 376,
               "end": 445
-            },
-            {
-              "start": 378,
-              "end": 378
-            }
-          ],
-          "packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap": [
-            {
-              "start": 684,
-              "end": 684
-            },
-            {
-              "start": 701,
-              "end": 701
-            },
-            {
-              "start": 717,
-              "end": 717
-            },
-            {
-              "start": 733,
-              "end": 733
-            },
-            {
-              "start": 748,
-              "end": 748
-            },
-            {
-              "start": 763,
-              "end": 763
-            },
-            {
-              "start": 778,
-              "end": 778
-            }
-          ],
-          "packages/compiler-core/src/babelUtils.ts": [
-            {
-              "start": 192,
-              "end": 192
-            }
-          ],
-          "packages/compiler-core/src/ast.ts": [
-            {
-              "start": 189,
-              "end": 189
-            }
-          ],
-          "packages/compiler-core/src/parse.ts": [
-            {
-              "start": 217,
-              "end": 217
-            },
-            {
-              "start": 563,
-              "end": 563
-            },
-            {
-              "start": 602,
-              "end": 602
-            },
-            {
-              "start": 628,
-              "end": 628
-            },
-            {
-              "start": 902,
-              "end": 902
-            }
-          ],
-          "packages/compiler-core/src/transform.ts": [
-            {
-              "start": 491,
-              "end": 491
-            }
-          ],
-          "packages/compiler-core/src/compat/transformFilter.ts": [
-            {
-              "start": 33,
-              "end": 33
-            }
-          ],
-          "packages/compiler-core/src/transforms/transformExpression.ts": [
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 80,
-              "end": 80
-            }
-          ],
-          "packages/compiler-core/src/transforms/vOn.ts": [
-            {
-              "start": 44,
-              "end": 44
-            }
-          ],
-          "packages/compiler-core/src/transforms/hoistStatic.ts": [
-            {
-              "start": 212,
-              "end": 212
-            },
-            {
-              "start": 232,
-              "end": 232
-            }
-          ],
-          "packages/compiler-dom/src/transforms/Transition.ts": [
-            {
-              "start": 42,
-              "end": 42
-            }
-          ],
-          "packages/compiler-dom/src/transforms/transformStyle.ts": [
-            {
-              "start": 23,
-              "end": 23
-            }
-          ],
-          "packages/compiler-core/src/transforms/vBind.ts": [
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 29,
-              "end": 29
-            },
-            {
-              "start": 66,
-              "end": 66
-            }
-          ],
-          "packages/compiler-dom/src/transforms/stringifyStatic.ts": [
-            {
-              "start": 212,
-              "end": 212
-            },
-            {
-              "start": 217,
-              "end": 217
-            },
-            {
-              "start": 291,
-              "end": 291
-            }
-          ],
-          "packages/compiler-core/src/transforms/transformText.ts": [
-            {
-              "start": 74,
-              "end": 74
             }
           ]
         },
@@ -3775,150 +1634,132 @@
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 0.125,
-              "symbol": 0.008333333333333333,
-              "span": 0.0022499212527561535,
-              "line": 0.0007996801279488205
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 0.375,
-              "symbol": 0.03333333333333333,
-              "span": 0.004139855105071323,
-              "line": 0.001999200319872051
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 8,
             "coverage": {
-              "file": 0.375,
-              "symbol": 0.03333333333333333,
-              "span": 0.004139855105071323,
-              "line": 0.001999200319872051
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 9,
             "coverage": {
-              "file": 0.375,
-              "symbol": 0.03333333333333333,
-              "span": 0.004139855105071323,
-              "line": 0.001999200319872051
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 10,
             "coverage": {
-              "file": 0.375,
-              "symbol": 0.03333333333333333,
-              "span": 0.004139855105071323,
-              "line": 0.001999200319872051
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 11,
             "coverage": {
-              "file": 0.375,
-              "symbol": 0.03333333333333333,
-              "span": 0.004139855105071323,
-              "line": 0.001999200319872051
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 12,
             "coverage": {
-              "file": 0.375,
-              "symbol": 0.03333333333333333,
-              "span": 0.004139855105071323,
-              "line": 0.001999200319872051
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 13,
             "coverage": {
-              "file": 0.375,
-              "symbol": 0.03333333333333333,
-              "span": 0.004139855105071323,
-              "line": 0.001999200319872051
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           },
           {
             "step": 14,
             "coverage": {
-              "file": 0.375,
-              "symbol": 0.03333333333333333,
-              "span": 0.004139855105071323,
-              "line": 0.001999200319872051
-            }
-          },
-          {
-            "step": 15,
-            "coverage": {
-              "file": 0.75,
-              "symbol": 0.08333333333333333,
-              "span": 0.009779657711980081,
-              "line": 0.005197920831667333
-            }
-          },
-          {
-            "step": 16,
-            "coverage": {
-              "file": 0.75,
-              "symbol": 0.08333333333333333,
-              "span": 0.009779657711980081,
-              "line": 0.005197920831667333
+              "file": 0.125,
+              "symbol": 0.041666666666666664,
+              "span": 0.05089321873734419,
+              "line": 0.04638144742103159
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.2890625,
-          "symbol": 0.027604166666666662,
-          "span": 0.0034330048448304317,
-          "line": 0.0016993202718912437
+          "file": 0.11607142857142858,
+          "symbol": 0.038690476190476185,
+          "span": 0.04725798882753389,
+          "line": 0.0430684868909579
         },
         "redundancy": {
-          "file": 0.21818181818181814,
-          "symbol": 0.1515151515151515,
-          "span": 0.021838729383017674,
-          "line": 0.02608695652173909
+          "file": 0.5,
+          "symbol": 0.19999999999999996,
+          "span": 0.1759416134497589,
+          "line": 0.133076181292189
         }
       },
       "fixOverlap": {
@@ -3937,35 +1778,35 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/8e027334440d4d4eb0e3/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/8e027334440d4d4eb0e3/home/.agents/skills/superpowers/systematic-debugging/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: systematic-debugging\ndescription: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes\n---\n\n# Systematic Debugging\n\n## Overview\n\nRandom fixes waste time and create new bugs. Quick patches mask underlying issues.\n\n**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.\n\n**Violating the letter of this process is violating the spirit of debugging.**\n\n## The Iron Law\n\n```\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST\n```\n\nIf you haven't completed Phase 1, you cannot propose fixes.\n\n## When to Use\n\nUse for ANY technical issue:\n- Test failures\n- Bugs in production\n- Unexpected behavior\n- Performance problems\n- Build failures\n- Integration issues\n\n**Use this ESPECIALLY when:**\n- Under time pressure (emergencies make guessing tempting)\n- \"Just one quick fix\" seems obvious\n- You've already tried multiple fixes\n- Previous fix didn't work\n- You don't fully understand the issue\n\n**Don't skip when:**\n- Issue seems simple (simple bugs have root causes too)\n- You're in a hurry (rushing guarantees rework)\n- Manager wants it fixed NOW (systematic is faster than thrashing)\n\n## The Four Phases\n\nYou MUST complete each phase before proceeding to the next.\n\n### Phase 1: Root Cause Investigation\n\n**BEFORE attempting ANY fix:**\n\n1. **Read Error Messages Carefully**\n   - Don't skip past errors or warnings\n   - They often contain the exact solution\n   - Read stack traces completely\n   - Note line numbers, file paths, error codes\n\n2. **Reproduce Consistently**\n   - Can you trigger it reliably?\n   - What are the exact steps?\n   - Does it happen every time?\n   - If not reproducible \u2192 gather more data, don't guess\n\n3. **Check Recent Changes**\n   - What changed that could cause this?\n   - Git diff, recent commits\n   - New dependencies, config changes\n   - Environmental differences\n\n4. **Gather Evidence in Multi-Component Systems**\n\n   **WHEN system has multiple components (CI \u2192 build \u2192 signing, API \u2192 service \u2192 database):**\n\n   **BEFORE proposing fixes, add diagnostic instrumentation:**\n   ```\n   For EACH component boundary:\n     - Log what data enters component\n     - Log what data exits component\n     - Verify environment/config propagation\n     - Check state at each layer\n\n   Run once to gather evidence showing WHERE it breaks\n   THEN analyze evidence to identify failing component\n   THEN investigate that specific component\n   ```\n\n   **Example (multi-layer system):**\n   ```bash\n   # Layer 1: Workflow\n   echo \"=== Secrets available in workflow: ===\"\n   echo \"IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}\"\n\n   # Layer 2: Build script\n   echo \"=== Env vars in build script: ===\"\n   env | grep IDENTITY || echo \"IDENTITY not in environment\"\n\n   # Layer 3: Signing script\n   echo \"=== Keychain state: ===\"\n   security list-keychains\n   security find-identity -v\n\n   # Layer 4: Actual signing\n   codesign --sign \"$IDENTITY\" --verbose=4 \"$APP\"\n   ```\n\n   **This reveals:** Which layer fails (secrets \u2192 workflow \u2713, workflow \u2192 build \u2717)\n\n5. **Trace Data Flow**\n\n   **WHEN error is deep in call stack:**\n\n   See `root-cause-tracing.md` in this directory for the complete backward tracing technique.\n\n   **Quick version:**\n   - Where does bad value originate?\n   - What called this with bad value?\n   - Keep tracing up until you find the source\n   - Fix at source, not at symptom\n\n### Phase 2: Pattern Analysis\n\n**Find the pattern before fixing:**\n\n1. **Find Working Examples**\n   - Locate similar working code in same codebase\n   - What works that's similar to what's broken?\n\n2. **Compare Against References**\n   - If implementing pattern, read reference implementation COMPLETELY\n   - Don't skim - read every line\n   - Understand the pattern fully before applying\n\n3. **Identify Differences**\n   - What's different between working and broken?\n   - List every difference, however small\n   - Don't assume \"that can't matter\"\n\n4. **Understand Dependencies**\n   - What other components does this need?\n   - \u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/8e027334440d4d4eb0e3/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/8e027334440d4d4eb0e3/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/8e027334440d4d4eb0e3/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
@@ -4094,7 +1935,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/compiler-sfc/__tests__/compileScript.spec.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/compiler-sfc/__tests__/compileScript.spec.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -4165,12 +2015,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/compiler-sfc/src/script/importUsageCheck.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/compiler-sfc/src/script/importUsageCheck.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -4182,7 +2050,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -4239,12 +2116,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/compiler-sfc/__tests__/compileScript.spec.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/compiler-sfc/__tests__/compileScript.spec.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/packages/compiler-sfc/__tests__/__snapshots__/compileScript.spec.ts.snap",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

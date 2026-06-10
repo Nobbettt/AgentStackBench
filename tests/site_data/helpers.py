@@ -19,13 +19,23 @@ def _record(
     ok: bool = True,
     model_patch: str = "",
     retry: dict[str, object] | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cached_input_tokens: int | None = None,
 ) -> str:
     record_path = task_dir / f"{task_dir.name}.codex-record.json"
+    token_usage: dict[str, int] = {"total_tokens": total_tokens}
+    if input_tokens is not None:
+        token_usage["input_tokens"] = input_tokens
+    if output_tokens is not None:
+        token_usage["output_tokens"] = output_tokens
+    if cached_input_tokens is not None:
+        token_usage["cached_input_tokens"] = cached_input_tokens
     payload = {
         "status": status,
         "ok": ok,
         "duration_ms": duration_ms,
-        "token_usage": {"total_tokens": total_tokens},
+        "token_usage": token_usage,
         "tool_calls": [{} for _ in range(tool_calls)],
         "model_patch": model_patch,
     }

@@ -14,9 +14,26 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [
+          "af86c6fb46d:src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts"
+        ],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 1
+      },
       "startedAt": "2026-05-11T05:56:19Z",
       "completedAt": "2026-05-11T06:02:41Z",
       "durationMs": 381500,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1044349,
@@ -25,44 +42,66 @@
         "total_tokens": 1060336,
         "cache_read_input_tokens": 770816
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 35,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts b/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts\nindex 57dcd68c78a..68f60d7ad85 100644\n--- a/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts\n+++ b/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts\n@@ -204,12 +204,17 @@ export function toLinkSuffix(match: RegExpExecArray | null): ILinkSuffix | null\n \t};\n }\n \n-// Paths cannot start with opening brackets\n-const linkWithSuffixPathCharacters = /(?<path>[^\\s\\[\\({][^\\s]*)$/;\n+function getLinkWithSuffixPathCharacters(os: OperatingSystem): RegExp {\n+\t// `|` commonly separates log fields and is not valid in Windows paths, so stop suffix-based\n+\t// link detection from absorbing surrounding fields before the actual path.\n+\treturn os === OperatingSystem.Windows\n+\t\t? /(?<path>[^\\s\\[\\({|][^\\s|]*)$/\n+\t\t: /(?<path>[^\\s\\[\\({][^\\s]*)$/;\n+}\n \n export function detectLinks(line: string, os: OperatingSystem) {\n \t// 1: Detect all links on line via suffixes first\n-\tconst results = detectLinksViaSuffix(line);\n+\tconst results = detectLinksViaSuffix(line, os);\n \n \t// 2: Detect all links without suffixes and merge non-conflicting ranges into the results\n \tconst noSuffixPaths = detectPathsNoSuffix(line, os);\n@@ -257,14 +262,14 @@ function binaryInsert(list: IParsedLink[], newItem: IParsedLink, low: number, hi\n \t}\n }\n \n-function detectLinksViaSuffix(line: string): IParsedLink[] {\n+function detectLinksViaSuffix(line: string, os: OperatingSystem): IParsedLink[] {\n \tconst results: IParsedLink[] = [];\n \n \t// 1: Detect link suffixes on the line\n \tconst suffixes = detectLinkSuffixes(line);\n \tfor (const suffix of suffixes) {\n \t\tconst beforeSuffix = line.substring(0, suffix.suffix.index);\n-\t\tconst possiblePathMatch = beforeSuffix.match(linkWithSuffixPathCharacters);\n+\t\tconst possiblePathMatch = beforeSuffix.match(getLinkWithSuffixPathCharacters(os));\n \t\tif (possiblePathMatch && possiblePathMatch.index !== undefined && possiblePathMatch.groups?.path) {\n \t\t\tlet linkStartIndex = possiblePathMatch.index;\n \t\t\tlet path = possiblePathMatch.groups.path;\ndiff --git a/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts b/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts\nindex df5db85dd4a..36f26ad103c 100644\n--- a/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts\n+++ b/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts\n@@ -329,6 +329,31 @@ suite('TerminalLinkParsing', () => {\n \t\t\t);\n \t\t});\n \n+\t\ttest('should not absorb pipe-delimited log fields into Windows file links', () => {\n+\t\t\tconst path = 'C:\\\\dist\\\\work\\\\multitenant-fullstack-test\\\\tools\\\\scim.py';\n+\t\t\tconst line = `20230310122934.069|ERROR|${path}:495|user not found`;\n+\t\t\tdeepStrictEqual(\n+\t\t\t\tdetectLinks(line, OperatingSystem.Windows),\n+\t\t\t\t[\n+\t\t\t\t\t{\n+\t\t\t\t\t\tpath: {\n+\t\t\t\t\t\t\tindex: line.indexOf(path),\n+\t\t\t\t\t\t\ttext: path\n+\t\t\t\t\t\t},\n+\t\t\t\t\t\tprefix: undefined,\n+\t\t\t\t\t\tsuffix: {\n+\t\t\t\t\t\t\trow: 495,\n+\t\t\t\t\t\t\tcol: undefined,\n+\t\t\t\t\t\t\tsuffix: {\n+\t\t\t\t\t\t\t\tindex: line.indexOf(':495', line.indexOf(path) + path.length),\n+\t\t\t\t\t\t\t\ttext: ':495'\n+\t\t\t\t\t\t\t}\n+\t\t\t\t\t\t}\n+\t\t\t\t\t}\n+\t\t\t\t] as IParsedLink[]\n+\t\t\t);\n+\t\t});\n+\n \t\tsuite('should detect file names in git diffs', () => {\n \t\t\ttest('--- a/foo/bar', () => {\n \t\t\t\tdeepStrictEqual(\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Adjusted terminal suffix link parsing to use an OS-aware path matcher so Windows file links stop at pipe-delimited log fields instead of absorbing prefixes like `20230310122934.069|ERROR|`. This fixes `file.py:495|...` detection for ctrl-click code-line lookup and keeps the actual `C:\\...\\file.py` path isolated. I also added a regression test for pipe-delimited Windows terminal output in the terminal link parsing suite.\n\nVerification: `git diff --check` passed. I also ran a direct Node regex check showing the old matcher captured `20230310122934.069|ERROR|C:\\...\\scim.py`, while the new matcher captures only `C:\\...\\scim.py`. Full repo-native tests were not run in this environment because the workspace does not include `node_modules` or built `out` test artifacts.",
         "notes": "Offline-safe verification was limited by the benchmark workspace: `node_modules` and compiled `out` browser test artifacts were absent, so I could not run the repo's mocha/playwright terminal link tests. The implemented change and regression test are confined to terminal link parsing and were sanity-checked with `git diff --check` and direct Node regex evaluation.",
         "retrievedContextFiles": [
-          "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
-          "<worktree>/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
-          "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts"
+          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
+          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
+          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
+            "file": "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
             "start": 207,
             "end": 273
           },
           {
-            "file": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
+            "file": "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
             "start": 332,
             "end": 355
           },
           {
-            "file": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts",
+            "file": "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts",
             "start": 70,
             "end": 153
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
+            "file": "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
             "name": "detectLinks"
           },
           {
-            "file": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
+            "file": "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
             "name": "detectLinksViaSuffix"
           },
           {
-            "file": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts",
+            "file": "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts",
             "name": "TerminalLocalLinkDetector"
           }
         ]
@@ -71,189 +110,13 @@
         "predSteps": [
           {
             "files": [
-              "src/vs/workbench/contrib/terminalContrib/links/browser/links.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminal.links.contribution.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalExternalLinkDetector.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLink.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkDetectorAdapter.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkHelpers.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkManager.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkOpeners.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkProviderService.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkQuickpick.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalUriLinkDetector.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalWordLinkDetector.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/vs/workbench/contrib/terminalContrib/links/browser/links.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkDetectorAdapter.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkManager.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkOpeners.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts"
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts"
             ],
             "spans": {
-              "src/vs/workbench/contrib/terminalContrib/links/browser/links.ts": [
-                {
-                  "start": 34,
-                  "end": 34
-                }
-              ],
               "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts": [
                 {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 45,
-                  "end": 45
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 66,
-                  "end": 66
-                },
-                {
-                  "start": 69,
-                  "end": 69
-                },
-                {
-                  "start": 72,
-                  "end": 72
-                },
-                {
-                  "start": 73,
-                  "end": 73
-                },
-                {
-                  "start": 115,
-                  "end": 115
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 121,
-                  "end": 121
-                },
-                {
-                  "start": 124,
-                  "end": 124
-                },
-                {
-                  "start": 125,
-                  "end": 125
-                },
-                {
-                  "start": 147,
-                  "end": 147
-                },
-                {
-                  "start": 159,
-                  "end": 159
-                },
-                {
-                  "start": 178,
-                  "end": 178
-                },
-                {
-                  "start": 271,
-                  "end": 271
-                },
-                {
-                  "start": 329,
-                  "end": 329
-                },
-                {
-                  "start": 332,
-                  "end": 332
-                },
-                {
-                  "start": 335,
-                  "end": 335
-                },
-                {
-                  "start": 341,
-                  "end": 341
-                },
-                {
-                  "start": 344,
-                  "end": 344
-                },
-                {
-                  "start": 349,
-                  "end": 349
-                },
-                {
-                  "start": 351,
-                  "end": 351
-                },
-                {
-                  "start": 356,
-                  "end": 356
-                }
-              ],
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkOpeners.ts": [
-                {
-                  "start": 216,
-                  "end": 216
-                }
-              ],
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkManager.ts": [
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 73,
-                  "end": 73
-                },
-                {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 239,
-                  "end": 239
-                }
-              ],
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkDetectorAdapter.ts": [
-                {
-                  "start": 28,
-                  "end": 28
-                }
-              ],
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts": [
-                {
-                  "start": 37,
-                  "end": 37
-                },
-                {
-                  "start": 38,
-                  "end": 38
-                },
-                {
-                  "start": 40,
-                  "end": 40
-                },
-                {
-                  "start": 45,
-                  "end": 45
-                },
-                {
-                  "start": 103,
-                  "end": 103
+                  "start": 260,
+                  "end": 430
                 }
               ]
             },
@@ -263,14 +126,42 @@
             "files": [
               "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts"
+            ],
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts": [
+                {
+                  "start": 260,
+                  "end": 420
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -280,231 +171,74 @@
             "spans": {
               "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts": [
                 {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 112,
-                  "end": 112
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 122,
-                  "end": 122
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 134,
-                  "end": 134
-                },
-                {
-                  "start": 139,
-                  "end": 139
-                },
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 151,
-                  "end": 151
-                },
-                {
-                  "start": 158,
-                  "end": 158
-                },
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 247,
-                  "end": 247
-                },
-                {
-                  "start": 273,
-                  "end": 273
-                },
-                {
-                  "start": 300,
-                  "end": 300
-                },
-                {
-                  "start": 335,
-                  "end": 335
-                },
-                {
-                  "start": 350,
-                  "end": 350
-                },
-                {
-                  "start": 365,
-                  "end": 365
-                },
-                {
-                  "start": 395,
-                  "end": 395
-                },
-                {
-                  "start": 454,
-                  "end": 454
+                  "start": 1,
+                  "end": 260
                 }
               ]
             },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/vs/platform/terminal/test/common/requestStore.test.ts",
-              "src/vs/platform/terminal/test/common/terminalEnvironment.test.ts",
-              "src/vs/platform/terminal/test/common/terminalProfiles.test.ts",
-              "src/vs/platform/terminal/test/common/terminalRecorder.test.ts",
-              "src/vs/platform/terminal/test/node/terminalEnvironment.test.ts",
-              "src/vs/workbench/contrib/debug/test/node/terminals.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/capabilities/commandDetectionCapability.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/capabilities/partialCommandDetectionCapability.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/capabilities/terminalCapabilityStore.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/quickFixAddon.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalActions.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalConfigHelper.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalInstance.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalInstanceService.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalProcessManager.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalProfileService.integrationTest.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalService.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalStatusList.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalTypeahead.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalUri.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/xterm/decorationAddon.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/xterm/lineDataEventAddon.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/xterm/shellIntegrationAddon.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/xterm/xtermTerminal.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/environmentVariableCollection.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/environmentVariableService.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/environmentVariableShared.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/history.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/terminalColorRegistry.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/terminalDataBuffering.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/terminalEnvironment.test.ts",
-              "src/vs/workbench/contrib/terminal/test/node/terminalProfiles.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/linkTestUtils.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkHelpers.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkManager.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkOpeners.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLocalLinkDetector.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalUriLinkDetector.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalWordLinkDetector.test.ts"
-            ],
-            "spans": {},
             "symbols": {}
           },
           {
             "files": [
               "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts": [
+                {
+                  "start": 260,
+                  "end": 540
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLocalLinkDetector.test.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLocalLinkDetector.test.ts": [
+                {
+                  "start": 260,
+                  "end": 520
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLocalLinkDetector.test.ts"
+            ],
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLocalLinkDetector.test.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkOpeners.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts"
+              "package.json"
             ],
-            "spans": {
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts": [
-                {
-                  "start": 247,
-                  "end": 247
-                },
-                {
-                  "start": 275,
-                  "end": 275
-                },
-                {
-                  "start": 285,
-                  "end": 285
-                }
-              ],
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkOpeners.ts": [
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 140,
-                  "end": 140
-                },
-                {
-                  "start": 141,
-                  "end": 141
-                },
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 178,
-                  "end": 178
-                },
-                {
-                  "start": 195,
-                  "end": 195
-                },
-                {
-                  "start": 199,
-                  "end": 199
-                },
-                {
-                  "start": 210,
-                  "end": 210
-                },
-                {
-                  "start": 212,
-                  "end": 212
-                }
-              ],
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 56,
-                  "end": 56
-                },
-                {
-                  "start": 131,
-                  "end": 131
-                }
-              ]
-            },
+            "spans": {},
             "symbols": {}
           },
           {
@@ -514,24 +248,8 @@
             "spans": {
               "package.json": [
                 {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 193,
-                  "end": 193
-                },
-                {
-                  "start": 194,
-                  "end": 194
-                },
-                {
-                  "start": 195,
-                  "end": 195
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -539,75 +257,13 @@
           },
           {
             "files": [
-              "package.json"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "test/unit/browser/index.js"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
-              "test/unit/browser/index.js",
-              "test/unit/browser/renderer.html",
-              "test/unit/electron/index.js",
-              "test/unit/electron/renderer.js"
-            ],
             "spans": {
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts": [
-                {
-                  "start": 8,
-                  "end": 8
-                }
-              ],
-              "test/unit/browser/renderer.html": [
-                {
-                  "start": 117,
-                  "end": 117
-                },
-                {
-                  "start": 135,
-                  "end": 135
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                }
-              ],
               "test/unit/browser/index.js": [
                 {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 26,
-                  "end": 26
-                },
-                {
-                  "start": 172,
-                  "end": 172
-                }
-              ],
-              "test/unit/electron/index.js": [
-                {
-                  "start": 24,
-                  "end": 24
-                }
-              ],
-              "test/unit/electron/renderer.js": [
-                {
-                  "start": 304,
-                  "end": 304
-                },
-                {
-                  "start": 305,
-                  "end": 305
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -617,456 +273,64 @@
             "files": [
               "af86c6fb46d:src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts"
             ],
-            "spans": {},
+            "spans": {
+              "af86c6fb46d:src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts"
+            ],
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts": [
+                {
+                  "start": 312,
+                  "end": 372
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts"
+            ],
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts": [
+                {
+                  "start": 198,
+                  "end": 290
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
-          "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts",
-          "<worktree>/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
-          "af86c6fb46d:src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
-          "package.json",
-          "src/vs/platform/terminal/test/common/requestStore.test.ts",
-          "src/vs/platform/terminal/test/common/terminalEnvironment.test.ts",
-          "src/vs/platform/terminal/test/common/terminalProfiles.test.ts",
-          "src/vs/platform/terminal/test/common/terminalRecorder.test.ts",
-          "src/vs/platform/terminal/test/node/terminalEnvironment.test.ts",
-          "src/vs/workbench/contrib/debug/test/node/terminals.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/capabilities/commandDetectionCapability.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/capabilities/partialCommandDetectionCapability.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/capabilities/terminalCapabilityStore.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/quickFixAddon.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalActions.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalConfigHelper.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalInstance.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalInstanceService.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalProcessManager.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalProfileService.integrationTest.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalService.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalStatusList.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalTypeahead.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalUri.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/xterm/decorationAddon.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/xterm/lineDataEventAddon.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/xterm/shellIntegrationAddon.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/xterm/xtermTerminal.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/environmentVariableCollection.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/environmentVariableService.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/environmentVariableShared.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/history.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/terminalColorRegistry.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/terminalDataBuffering.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/terminalEnvironment.test.ts",
-          "src/vs/workbench/contrib/terminal/test/node/terminalProfiles.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/links.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminal.links.contribution.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalExternalLinkDetector.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLink.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkDetectorAdapter.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkHelpers.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkManager.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkOpeners.ts",
           "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkProviderService.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkQuickpick.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts",
           "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalUriLinkDetector.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalWordLinkDetector.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/linkTestUtils.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkHelpers.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkManager.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkOpeners.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLocalLinkDetector.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalUriLinkDetector.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalWordLinkDetector.test.ts",
-          "test/unit/browser/index.js",
-          "test/unit/browser/renderer.html",
-          "test/unit/electron/index.js",
-          "test/unit/electron/renderer.js"
+          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts"
         ],
         "predSpans": {
-          "src/vs/workbench/contrib/terminalContrib/links/browser/links.ts": [
-            {
-              "start": 34,
-              "end": 34
-            }
-          ],
           "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts": [
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 45,
-              "end": 45
-            },
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 66,
-              "end": 66
-            },
-            {
-              "start": 69,
-              "end": 69
-            },
-            {
-              "start": 72,
-              "end": 72
-            },
-            {
-              "start": 73,
-              "end": 73
-            },
-            {
-              "start": 115,
-              "end": 115
-            },
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 121,
-              "end": 121
-            },
-            {
-              "start": 124,
-              "end": 124
-            },
-            {
-              "start": 125,
-              "end": 125
-            },
-            {
-              "start": 147,
-              "end": 147
-            },
-            {
-              "start": 159,
-              "end": 159
-            },
-            {
-              "start": 178,
-              "end": 178
-            },
-            {
-              "start": 271,
-              "end": 271
-            },
-            {
-              "start": 329,
-              "end": 329
-            },
-            {
-              "start": 332,
-              "end": 332
-            },
-            {
-              "start": 335,
-              "end": 335
-            },
-            {
-              "start": 341,
-              "end": 341
-            },
-            {
-              "start": 344,
-              "end": 344
-            },
-            {
-              "start": 349,
-              "end": 349
-            },
-            {
-              "start": 351,
-              "end": 351
-            },
-            {
-              "start": 356,
-              "end": 356
-            }
-          ],
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkOpeners.ts": [
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 140,
-              "end": 140
-            },
-            {
-              "start": 141,
-              "end": 141
-            },
-            {
-              "start": 143,
-              "end": 143
-            },
-            {
-              "start": 178,
-              "end": 178
-            },
-            {
-              "start": 195,
-              "end": 195
-            },
-            {
-              "start": 199,
-              "end": 199
-            },
-            {
-              "start": 210,
-              "end": 210
-            },
-            {
-              "start": 212,
-              "end": 212
-            },
-            {
-              "start": 216,
-              "end": 216
-            }
-          ],
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkManager.ts": [
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 73,
-              "end": 73
-            },
-            {
-              "start": 76,
-              "end": 76
-            },
-            {
-              "start": 239,
-              "end": 239
-            }
-          ],
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkDetectorAdapter.ts": [
-            {
-              "start": 28,
-              "end": 28
-            }
-          ],
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts": [
-            {
-              "start": 37,
-              "end": 37
-            },
-            {
-              "start": 38,
-              "end": 38
-            },
-            {
-              "start": 40,
-              "end": 40
-            },
-            {
-              "start": 45,
-              "end": 45
-            },
-            {
-              "start": 103,
-              "end": 103
-            },
-            {
-              "start": 247,
-              "end": 247
-            },
-            {
-              "start": 275,
-              "end": 275
-            },
-            {
-              "start": 285,
-              "end": 285
-            }
-          ],
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts": [
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 112,
-              "end": 112
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 122,
-              "end": 122
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 134,
-              "end": 134
-            },
-            {
-              "start": 139,
-              "end": 139
-            },
-            {
-              "start": 143,
-              "end": 143
-            },
-            {
-              "start": 151,
-              "end": 151
-            },
-            {
-              "start": 158,
-              "end": 158
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 247,
-              "end": 247
-            },
-            {
-              "start": 273,
-              "end": 273
-            },
-            {
-              "start": 300,
-              "end": 300
-            },
-            {
-              "start": 335,
-              "end": 335
-            },
-            {
-              "start": 350,
-              "end": 350
-            },
-            {
-              "start": 365,
-              "end": 365
-            },
-            {
-              "start": 395,
-              "end": 395
-            },
-            {
-              "start": 454,
-              "end": 454
-            }
-          ],
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 56,
-              "end": 56
-            },
-            {
-              "start": 131,
-              "end": 131
-            }
-          ],
-          "package.json": [
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 193,
-              "end": 193
-            },
-            {
-              "start": 194,
-              "end": 194
-            },
-            {
-              "start": 195,
-              "end": 195
-            }
-          ],
-          "test/unit/browser/renderer.html": [
-            {
-              "start": 117,
-              "end": 117
-            },
-            {
-              "start": 135,
-              "end": 135
-            },
-            {
-              "start": 136,
-              "end": 136
-            }
-          ],
-          "test/unit/browser/index.js": [
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 26,
-              "end": 26
-            },
-            {
-              "start": 172,
-              "end": 172
-            }
-          ],
-          "test/unit/electron/index.js": [
-            {
-              "start": 24,
-              "end": 24
-            }
-          ],
-          "test/unit/electron/renderer.js": [
-            {
-              "start": 304,
-              "end": 304
-            },
-            {
-              "start": 305,
-              "end": 305
-            }
-          ],
-          "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts": [
             {
               "start": 207,
               "end": 273
             }
           ],
-          "<worktree>/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts": [
+          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts": [
             {
               "start": 332,
               "end": 355
             }
           ],
-          "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts": [
+          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts": [
             {
               "start": 70,
               "end": 153
@@ -1074,11 +338,11 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts": [
+          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts": [
             "detectLinks",
             "detectLinksViaSuffix"
           ],
-          "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts": [
+          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts": [
             "TerminalLocalLinkDetector"
           ]
         }
@@ -1098,140 +362,140 @@
             "step": 2,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 3,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 4,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 5,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 14,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 15,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           }
         ],
         "aucCoverage": {
           "file": 0.5,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "symbol": 0.9333333333333333,
+          "span": 0.6594647201946472,
+          "line": 0.810062893081761
         },
         "redundancy": {
-          "file": 0.240506329113924,
-          "symbol": 0.13636363636363635,
-          "span": 0.026624405705229837,
-          "line": 0.011627906976744207
+          "file": 0.4666666666666667,
+          "symbol": 0.09876543209876543,
+          "span": 0.05763125763125765,
+          "line": 0.05708092485549132
         }
       },
       "fixOverlap": {
@@ -1446,12 +710,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",
@@ -1576,9 +858,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-11T05:56:24Z",
       "completedAt": "2026-05-11T06:02:41Z",
       "durationMs": 376551,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 2143241,
@@ -1587,6 +884,28 @@
         "total_tokens": 2158999,
         "cache_read_input_tokens": 2051968
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 44,
+        "readToolCalls": 0,
+        "editToolCalls": 2
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts b/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts\nindex 57dcd68c78a..bf7b386e30d 100644\n--- a/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts\n+++ b/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts\n@@ -209,7 +209,7 @@ const linkWithSuffixPathCharacters = /(?<path>[^\\s\\[\\({][^\\s]*)$/;\n \n export function detectLinks(line: string, os: OperatingSystem) {\n \t// 1: Detect all links on line via suffixes first\n-\tconst results = detectLinksViaSuffix(line);\n+\tconst results = detectLinksViaSuffix(line, os);\n \n \t// 2: Detect all links without suffixes and merge non-conflicting ranges into the results\n \tconst noSuffixPaths = detectPathsNoSuffix(line, os);\n@@ -257,17 +257,17 @@ function binaryInsert(list: IParsedLink[], newItem: IParsedLink, low: number, hi\n \t}\n }\n \n-function detectLinksViaSuffix(line: string): IParsedLink[] {\n+function detectLinksViaSuffix(line: string, os: OperatingSystem): IParsedLink[] {\n \tconst results: IParsedLink[] = [];\n \n \t// 1: Detect link suffixes on the line\n \tconst suffixes = detectLinkSuffixes(line);\n \tfor (const suffix of suffixes) {\n \t\tconst beforeSuffix = line.substring(0, suffix.suffix.index);\n-\t\tconst possiblePathMatch = beforeSuffix.match(linkWithSuffixPathCharacters);\n-\t\tif (possiblePathMatch && possiblePathMatch.index !== undefined && possiblePathMatch.groups?.path) {\n-\t\t\tlet linkStartIndex = possiblePathMatch.index;\n-\t\t\tlet path = possiblePathMatch.groups.path;\n+\t\tconst pathMatch = getLinkSuffixPathMatch(beforeSuffix, os);\n+\t\tif (pathMatch) {\n+\t\t\tlet linkStartIndex = pathMatch.index;\n+\t\t\tlet path = pathMatch.text;\n \t\t\t// Extract a path prefix if it exists (not part of the path, but part of the underlined\n \t\t\t// section)\n \t\t\tlet prefix: ILinkPartialRange | undefined = undefined;\n@@ -311,6 +311,26 @@ function detectLinksViaSuffix(line: string): IParsedLink[] {\n \treturn results;\n }\n \n+function getLinkSuffixPathMatch(beforeSuffix: string, os: OperatingSystem): ILinkPartialRange | undefined {\n+\tconst pathMatches = detectPathsNoSuffix(beforeSuffix, os);\n+\tfor (let i = pathMatches.length - 1; i >= 0; i--) {\n+\t\tconst pathMatch = pathMatches[i].path;\n+\t\tif (pathMatch.index + pathMatch.text.length === beforeSuffix.length) {\n+\t\t\treturn pathMatch;\n+\t\t}\n+\t}\n+\n+\tconst possiblePathMatch = beforeSuffix.match(linkWithSuffixPathCharacters);\n+\tif (possiblePathMatch && possiblePathMatch.index !== undefined && possiblePathMatch.groups?.path) {\n+\t\treturn {\n+\t\t\tindex: possiblePathMatch.index,\n+\t\t\ttext: possiblePathMatch.groups.path\n+\t\t};\n+\t}\n+\n+\treturn undefined;\n+}\n+\n enum RegexPathConstants {\n \tPathPrefix = '(?:\\\\.\\\\.?|\\\\~)',\n \tPathSeparatorClause = '\\\\/',\ndiff --git a/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts b/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts\nindex df5db85dd4a..4c500c52f43 100644\n--- a/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts\n+++ b/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts\n@@ -329,6 +329,27 @@ suite('TerminalLinkParsing', () => {\n \t\t\t);\n \t\t});\n \n+\t\ttest('should prefer the trailing Windows path segment before a file:line suffix', () => {\n+\t\t\tdeepStrictEqual(\n+\t\t\t\tdetectLinks('20230310122934.069|ERROR|C:\\\\dist\\\\work\\\\multitenant-fullstack-test\\\\tools\\\\scim.py:495|user with username:15918896373 not found', OperatingSystem.Windows)[0],\n+\t\t\t\t{\n+\t\t\t\t\tpath: {\n+\t\t\t\t\t\tindex: 25,\n+\t\t\t\t\t\ttext: 'C:\\\\dist\\\\work\\\\multitenant-fullstack-test\\\\tools\\\\scim.py'\n+\t\t\t\t\t},\n+\t\t\t\t\tprefix: undefined,\n+\t\t\t\t\tsuffix: {\n+\t\t\t\t\t\trow: 495,\n+\t\t\t\t\t\tcol: undefined,\n+\t\t\t\t\t\tsuffix: {\n+\t\t\t\t\t\t\tindex: 73,\n+\t\t\t\t\t\t\ttext: ':495'\n+\t\t\t\t\t\t}\n+\t\t\t\t\t}\n+\t\t\t\t} as IParsedLink\n+\t\t\t);\n+\t\t});\n+\n \t\tsuite('should detect file names in git diffs', () => {\n \t\t\ttest('--- a/foo/bar', () => {\n \t\t\t\tdeepStrictEqual(\n",
       "finalOutput": {
         "status": "completed",
@@ -1623,893 +942,13 @@
         "predSteps": [
           {
             "files": [
-              "src/vs/editor/browser/editorBrowser.ts",
-              "src/vs/editor/browser/services/editorWorkerService.ts",
-              "src/vs/editor/browser/view/dynamicViewOverlay.ts",
-              "src/vs/editor/browser/view/renderingContext.ts",
-              "src/vs/editor/browser/view/viewController.ts",
-              "src/vs/editor/browser/view/viewLayer.ts",
-              "src/vs/editor/browser/view/viewOverlays.ts",
-              "src/vs/editor/common/editorCommon.ts",
-              "src/vs/editor/common/services/editorSimpleWorker.ts",
-              "src/vs/editor/common/textModelEvents.ts",
-              "src/vs/editor/common/textModelGuides.ts",
-              "src/vs/editor/common/tokenizationTextModelPart.ts",
-              "src/vs/editor/common/tokens/contiguousMultilineTokens.ts",
-              "src/vs/editor/common/tokens/contiguousMultilineTokensBuilder.ts",
-              "src/vs/editor/common/tokens/contiguousTokensStore.ts",
-              "src/vs/editor/common/tokens/sparseMultilineTokens.ts",
-              "src/vs/editor/contrib/gotoSymbol/browser/goToCommands.ts",
-              "src/vs/editor/contrib/gotoSymbol/browser/link/clickLinkGesture.ts",
-              "src/vs/editor/contrib/gotoSymbol/browser/referencesModel.ts",
-              "src/vs/editor/contrib/snippet/browser/snippetSession.ts",
-              "src/vs/editor/contrib/snippet/browser/snippetVariables.ts",
-              "src/vs/editor/contrib/wordHighlighter/browser/wordHighlighter.ts",
-              "src/vs/monaco.d.ts",
-              "src/vscode-dts/vscode.d.ts",
-              "src/vscode-dts/vscode.proposed.contribEditorLineNumberMenu.d.ts",
-              "src/vscode-dts/vscode.proposed.textSearchProvider.d.ts",
-              "test/automation/src/debug.ts",
-              "test/automation/src/editor.ts",
-              "test/smoke/src/areas/preferences/preferences.test.ts"
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts"
             ],
             "spans": {
-              "test/automation/src/editor.ts": [
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts": [
                 {
-                  "start": 78,
-                  "end": 78
-                },
-                {
-                  "start": 80,
-                  "end": 80
-                }
-              ],
-              "test/automation/src/debug.ts": [
-                {
-                  "start": 38,
-                  "end": 38
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 48,
-                  "end": 48
-                },
-                {
-                  "start": 73,
-                  "end": 73
-                },
-                {
-                  "start": 74,
-                  "end": 74
-                },
-                {
-                  "start": 75,
-                  "end": 75
-                }
-              ],
-              "src/vscode-dts/vscode.d.ts": [
-                {
-                  "start": 54,
-                  "end": 54
-                },
-                {
-                  "start": 670,
-                  "end": 670
-                },
-                {
-                  "start": 6829,
-                  "end": 6829
-                },
-                {
-                  "start": 6844,
-                  "end": 6844
-                },
-                {
-                  "start": 6846,
-                  "end": 6846
-                },
-                {
-                  "start": 6851,
-                  "end": 6851
-                },
-                {
-                  "start": 6853,
-                  "end": 6853
-                },
-                {
-                  "start": 6856,
-                  "end": 6856
-                },
-                {
-                  "start": 6859,
-                  "end": 6859
-                },
-                {
-                  "start": 6865,
-                  "end": 6865
-                },
-                {
-                  "start": 6867,
-                  "end": 6867
-                },
-                {
-                  "start": 6872,
-                  "end": 6872
-                },
-                {
-                  "start": 6886,
-                  "end": 6886
-                },
-                {
-                  "start": 6887,
-                  "end": 6887
-                },
-                {
-                  "start": 6888,
-                  "end": 6888
-                },
-                {
-                  "start": 10321,
-                  "end": 10321
-                },
-                {
-                  "start": 10324,
-                  "end": 10324
-                }
-              ],
-              "test/smoke/src/areas/preferences/preferences.test.ts": [
-                {
-                  "start": 21,
-                  "end": 21
-                }
-              ],
-              "src/vscode-dts/vscode.proposed.textSearchProvider.d.ts": [
-                {
-                  "start": 250,
-                  "end": 250
-                }
-              ],
-              "src/vscode-dts/vscode.proposed.contribEditorLineNumberMenu.d.ts": [
-                {
-                  "start": 6,
-                  "end": 6
-                }
-              ],
-              "src/vs/monaco.d.ts": [
-                {
-                  "start": 491,
-                  "end": 491
-                },
-                {
-                  "start": 505,
-                  "end": 505
-                },
-                {
-                  "start": 510,
-                  "end": 510
-                },
-                {
-                  "start": 1073,
-                  "end": 1073
-                },
-                {
-                  "start": 1899,
-                  "end": 1899
-                },
-                {
-                  "start": 1903,
-                  "end": 1903
-                },
-                {
-                  "start": 1918,
-                  "end": 1918
-                },
-                {
-                  "start": 1920,
-                  "end": 1920
-                },
-                {
-                  "start": 1922,
-                  "end": 1922
-                },
-                {
-                  "start": 1924,
-                  "end": 1924
-                },
-                {
-                  "start": 1926,
-                  "end": 1926
-                },
-                {
-                  "start": 1929,
-                  "end": 1929
-                },
-                {
-                  "start": 1931,
-                  "end": 1931
-                },
-                {
-                  "start": 1934,
-                  "end": 1934
-                },
-                {
-                  "start": 2064,
-                  "end": 2064
-                },
-                {
-                  "start": 2065,
-                  "end": 2065
-                },
-                {
-                  "start": 2070,
-                  "end": 2070
-                },
-                {
-                  "start": 2607,
-                  "end": 2607
-                },
-                {
-                  "start": 2611,
-                  "end": 2611
-                },
-                {
-                  "start": 2615,
-                  "end": 2615
-                },
-                {
-                  "start": 2620,
-                  "end": 2620
-                },
-                {
-                  "start": 2684,
-                  "end": 2684
-                },
-                {
-                  "start": 2688,
-                  "end": 2688
-                },
-                {
-                  "start": 2693,
-                  "end": 2693
-                },
-                {
-                  "start": 3062,
-                  "end": 3062
-                },
-                {
-                  "start": 3093,
-                  "end": 3093
-                },
-                {
-                  "start": 3972,
-                  "end": 3972
-                },
-                {
-                  "start": 3976,
-                  "end": 3976
-                },
-                {
-                  "start": 4178,
-                  "end": 4178
-                },
-                {
-                  "start": 4190,
-                  "end": 4190
-                },
-                {
-                  "start": 4659,
-                  "end": 4659
-                },
-                {
-                  "start": 4660,
-                  "end": 4660
-                },
-                {
-                  "start": 4804,
-                  "end": 4804
-                },
-                {
-                  "start": 4805,
-                  "end": 4805
-                },
-                {
-                  "start": 5219,
-                  "end": 5219
-                },
-                {
-                  "start": 5623,
-                  "end": 5623
-                },
-                {
-                  "start": 5650,
-                  "end": 5650
-                },
-                {
-                  "start": 5654,
-                  "end": 5654
-                },
-                {
-                  "start": 5658,
-                  "end": 5658
-                },
-                {
-                  "start": 5703,
-                  "end": 5703
-                },
-                {
-                  "start": 5706,
-                  "end": 5706
-                },
-                {
-                  "start": 5799,
-                  "end": 5799
-                },
-                {
-                  "start": 5804,
-                  "end": 5804
-                }
-              ],
-              "src/vs/editor/browser/editorBrowser.ts": [
-                {
-                  "start": 336,
-                  "end": 336
-                },
-                {
-                  "start": 857,
-                  "end": 857
-                },
-                {
-                  "start": 916,
-                  "end": 916
-                },
-                {
-                  "start": 921,
-                  "end": 921
-                },
-                {
-                  "start": 926,
-                  "end": 926
-                },
-                {
-                  "start": 996,
-                  "end": 996
-                },
-                {
-                  "start": 999,
-                  "end": 999
-                },
-                {
-                  "start": 1074,
-                  "end": 1074
-                },
-                {
-                  "start": 1195,
-                  "end": 1195
-                },
-                {
-                  "start": 1201,
-                  "end": 1201
-                }
-              ],
-              "src/vs/editor/common/editorCommon.ts": [
-                {
-                  "start": 305,
-                  "end": 305
-                },
-                {
-                  "start": 310,
-                  "end": 310
-                },
-                {
-                  "start": 315,
-                  "end": 315
-                },
-                {
-                  "start": 321,
-                  "end": 321
-                },
-                {
-                  "start": 395,
-                  "end": 395
-                },
-                {
-                  "start": 400,
-                  "end": 400
-                },
-                {
-                  "start": 406,
-                  "end": 406
-                }
-              ],
-              "src/vs/editor/browser/view/dynamicViewOverlay.ts": [
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "src/vs/editor/contrib/snippet/browser/snippetVariables.ts": [
-                {
-                  "start": 135,
-                  "end": 135
-                }
-              ],
-              "src/vs/editor/browser/view/viewController.ts": [
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 101,
-                  "end": 101
-                }
-              ],
-              "src/vs/editor/browser/services/editorWorkerService.ts": [
-                {
-                  "start": 223,
-                  "end": 223
-                },
-                {
-                  "start": 224,
-                  "end": 224
-                }
-              ],
-              "src/vs/editor/contrib/snippet/browser/snippetSession.ts": [
-                {
-                  "start": 384,
-                  "end": 384
-                }
-              ],
-              "src/vs/editor/browser/view/viewLayer.ts": [
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 80,
-                  "end": 80
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                },
-                {
-                  "start": 83,
-                  "end": 83
-                },
-                {
-                  "start": 115,
-                  "end": 115
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 235,
-                  "end": 235
-                },
-                {
-                  "start": 236,
-                  "end": 236
-                },
-                {
-                  "start": 342,
-                  "end": 342
-                },
-                {
-                  "start": 343,
-                  "end": 343
-                },
-                {
-                  "start": 465,
-                  "end": 465
-                },
-                {
-                  "start": 466,
-                  "end": 466
-                },
-                {
-                  "start": 473,
-                  "end": 473
-                },
-                {
-                  "start": 492,
-                  "end": 492
-                }
-              ],
-              "src/vs/editor/contrib/wordHighlighter/browser/wordHighlighter.ts": [
-                {
-                  "start": 84,
-                  "end": 84
-                },
-                {
-                  "start": 95,
-                  "end": 95
-                },
-                {
-                  "start": 351,
-                  "end": 351
-                },
-                {
-                  "start": 355,
-                  "end": 355
-                }
-              ],
-              "src/vs/editor/contrib/gotoSymbol/browser/referencesModel.ts": [
-                {
-                  "start": 84,
-                  "end": 84
-                },
-                {
-                  "start": 253,
-                  "end": 253
-                }
-              ],
-              "src/vs/editor/browser/view/viewOverlays.ts": [
-                {
-                  "start": 89,
-                  "end": 89
-                },
-                {
-                  "start": 90,
-                  "end": 90
-                },
-                {
-                  "start": 187,
-                  "end": 187
-                },
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 212,
-                  "end": 212
-                }
-              ],
-              "src/vs/editor/browser/view/renderingContext.ts": [
-                {
-                  "start": 56,
-                  "end": 56
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 61,
-                  "end": 61
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                },
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 107,
-                  "end": 107
-                },
-                {
-                  "start": 115,
-                  "end": 115
-                },
-                {
-                  "start": 124,
-                  "end": 124
-                }
-              ],
-              "src/vs/editor/common/textModelGuides.ts": [
-                {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "src/vs/editor/contrib/gotoSymbol/browser/goToCommands.ts": [
-                {
-                  "start": 879,
-                  "end": 879
-                }
-              ],
-              "src/vs/editor/contrib/gotoSymbol/browser/link/clickLinkGesture.ts": [
-                {
-                  "start": 120,
-                  "end": 120
-                },
-                {
-                  "start": 131,
-                  "end": 131
-                },
-                {
-                  "start": 142,
-                  "end": 142
-                },
-                {
-                  "start": 181,
-                  "end": 181
-                },
-                {
-                  "start": 185,
-                  "end": 185
-                },
-                {
-                  "start": 186,
-                  "end": 186
-                }
-              ],
-              "src/vs/editor/common/tokenizationTextModelPart.ts": [
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 56,
-                  "end": 56
-                },
-                {
-                  "start": 59,
-                  "end": 59
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 66,
-                  "end": 66
-                },
-                {
-                  "start": 70,
-                  "end": 70
-                },
-                {
-                  "start": 73,
-                  "end": 73
-                },
-                {
-                  "start": 77,
-                  "end": 77
-                },
-                {
-                  "start": 84,
-                  "end": 84
-                },
-                {
-                  "start": 97,
-                  "end": 97
-                }
-              ],
-              "src/vs/editor/common/textModelEvents.ts": [
-                {
-                  "start": 178,
-                  "end": 178
-                },
-                {
-                  "start": 184,
-                  "end": 184
-                },
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 198,
-                  "end": 198
-                },
-                {
-                  "start": 211,
-                  "end": 211
-                },
-                {
-                  "start": 221,
-                  "end": 221
-                },
-                {
-                  "start": 222,
-                  "end": 222
-                }
-              ],
-              "src/vs/editor/common/tokens/contiguousTokensStore.ts": [
-                {
-                  "start": 192,
-                  "end": 192
-                },
-                {
-                  "start": 206,
-                  "end": 206
-                }
-              ],
-              "src/vs/editor/common/tokens/contiguousMultilineTokensBuilder.ts": [
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 36,
-                  "end": 36
-                }
-              ],
-              "src/vs/editor/common/services/editorSimpleWorker.ts": [
-                {
-                  "start": 67,
-                  "end": 67
-                },
-                {
-                  "start": 68,
-                  "end": 68
-                },
-                {
-                  "start": 117,
-                  "end": 117
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 131,
-                  "end": 131
-                },
-                {
-                  "start": 147,
-                  "end": 147
-                },
-                {
-                  "start": 159,
-                  "end": 159
-                },
-                {
-                  "start": 172,
-                  "end": 172
-                },
-                {
-                  "start": 173,
-                  "end": 173
-                },
-                {
-                  "start": 176,
-                  "end": 176
-                },
-                {
-                  "start": 186,
-                  "end": 186
-                },
-                {
-                  "start": 187,
-                  "end": 187
-                },
-                {
-                  "start": 240,
+                  "start": 1,
                   "end": 240
-                },
-                {
-                  "start": 253,
-                  "end": 253
-                },
-                {
-                  "start": 260,
-                  "end": 260
-                },
-                {
-                  "start": 261,
-                  "end": 261
-                },
-                {
-                  "start": 263,
-                  "end": 263
-                },
-                {
-                  "start": 265,
-                  "end": 265
-                },
-                {
-                  "start": 269,
-                  "end": 269
-                },
-                {
-                  "start": 271,
-                  "end": 271
-                },
-                {
-                  "start": 283,
-                  "end": 283
-                },
-                {
-                  "start": 286,
-                  "end": 286
-                },
-                {
-                  "start": 287,
-                  "end": 287
-                },
-                {
-                  "start": 291,
-                  "end": 291
-                },
-                {
-                  "start": 292,
-                  "end": 292
-                },
-                {
-                  "start": 293,
-                  "end": 293
-                },
-                {
-                  "start": 297,
-                  "end": 297
-                },
-                {
-                  "start": 311,
-                  "end": 311
-                },
-                {
-                  "start": 517,
-                  "end": 517
-                },
-                {
-                  "start": 629,
-                  "end": 629
-                }
-              ],
-              "src/vs/editor/common/tokens/sparseMultilineTokens.ts": [
-                {
-                  "start": 56,
-                  "end": 56
-                },
-                {
-                  "start": 57,
-                  "end": 57
-                },
-                {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 148,
-                  "end": 148
-                }
-              ],
-              "src/vs/editor/common/tokens/contiguousMultilineTokens.ts": [
-                {
-                  "start": 74,
-                  "end": 74
-                },
-                {
-                  "start": 75,
-                  "end": 75
-                },
-                {
-                  "start": 194,
-                  "end": 194
-                },
-                {
-                  "start": 216,
-                  "end": 216
                 }
               ]
             },
@@ -2517,343 +956,97 @@
           },
           {
             "files": [
-              "src/vs/base/node/terminalEncoding.ts",
-              "src/vs/platform/audioCues/browser/media/terminalBell.mp3",
-              "src/vs/platform/externalTerminal/common/externalTerminal.ts",
-              "src/vs/platform/externalTerminal/electron-main/externalTerminalService.test.ts",
-              "src/vs/platform/externalTerminal/electron-sandbox/externalTerminalMainService.ts",
-              "src/vs/platform/externalTerminal/node/externalTerminalService.ts",
-              "src/vs/platform/terminal/common/capabilities/cwdDetectionCapability.ts",
-              "src/vs/platform/terminal/common/capabilities/naiveCwdDetectionCapability.ts",
-              "src/vs/platform/terminal/common/capabilities/partialCommandDetectionCapability.ts",
-              "src/vs/platform/terminal/common/environmentVariable.ts",
-              "src/vs/platform/terminal/common/environmentVariableCollection.ts",
-              "src/vs/platform/terminal/common/environmentVariableShared.ts",
-              "src/vs/platform/terminal/common/requestStore.ts",
-              "src/vs/platform/terminal/common/terminal.ts",
-              "src/vs/platform/terminal/common/terminalAutoResponder.ts",
-              "src/vs/platform/terminal/common/terminalDataBuffering.ts",
-              "src/vs/platform/terminal/common/terminalEnvironment.ts",
-              "src/vs/platform/terminal/common/terminalPlatformConfiguration.ts",
-              "src/vs/platform/terminal/common/terminalProcess.ts",
-              "src/vs/platform/terminal/common/terminalProfiles.ts",
-              "src/vs/platform/terminal/common/terminalRecorder.ts",
-              "src/vs/platform/terminal/common/terminalStrings.ts",
-              "src/vs/platform/terminal/common/xterm/shellIntegrationAddon.ts",
-              "src/vs/platform/terminal/common/xterm/terminalQuickFix.ts",
-              "src/vs/platform/terminal/electron-sandbox/terminal.ts",
-              "src/vs/platform/terminal/node/childProcessMonitor.ts",
-              "src/vs/platform/terminal/node/heartbeatService.ts",
-              "src/vs/platform/terminal/node/ptyHostMain.ts",
-              "src/vs/platform/terminal/node/ptyHostService.ts",
-              "src/vs/platform/terminal/node/ptyService.ts",
-              "src/vs/platform/terminal/node/terminalEnvironment.ts",
-              "src/vs/platform/terminal/node/terminalProcess.ts",
-              "src/vs/platform/terminal/node/terminalProfiles.ts",
-              "src/vs/platform/terminal/node/windowsShellHelper.ts",
-              "src/vs/platform/terminal/test/common/requestStore.test.ts",
-              "src/vs/platform/terminal/test/common/terminalEnvironment.test.ts",
-              "src/vs/platform/terminal/test/common/terminalProfiles.test.ts",
-              "src/vs/platform/terminal/test/common/terminalRecorder.test.ts",
-              "src/vs/platform/terminal/test/node/terminalEnvironment.test.ts",
-              "src/vs/server/node/remoteTerminalChannel.ts",
-              "src/vs/workbench/api/browser/mainThreadTerminalService.ts",
-              "src/vs/workbench/api/common/extHostTerminalService.ts",
-              "src/vs/workbench/api/node/extHostTerminalService.ts",
-              "src/vs/workbench/contrib/debug/node/terminals.ts",
-              "src/vs/workbench/contrib/debug/test/node/terminals.test.ts",
-              "src/vs/workbench/contrib/externalTerminal/browser/externalTerminal.contribution.ts",
-              "src/vs/workbench/contrib/externalTerminal/electron-sandbox/externalTerminal.contribution.ts",
-              "src/vs/workbench/contrib/externalTerminal/node/TerminalHelper.scpt",
-              "src/vs/workbench/contrib/externalTerminal/node/iTermHelper.scpt",
-              "src/vs/workbench/contrib/tasks/browser/taskTerminalStatus.ts",
-              "src/vs/workbench/contrib/tasks/browser/terminalTaskSystem.ts",
-              "src/vs/workbench/contrib/tasks/test/browser/taskTerminalStatus.test.ts",
-              "src/vs/workbench/contrib/terminal/browser/baseTerminalBackend.ts",
-              "src/vs/workbench/contrib/terminal/browser/environmentVariableInfo.ts",
-              "src/vs/workbench/contrib/terminal/browser/media/scrollbar.css",
-              "src/vs/workbench/contrib/terminal/browser/media/shellIntegration-bash.sh",
-              "src/vs/workbench/contrib/terminal/browser/media/shellIntegration-env.zsh",
-              "src/vs/workbench/contrib/terminal/browser/media/shellIntegration-login.zsh",
-              "src/vs/workbench/contrib/terminal/browser/media/shellIntegration-profile.zsh",
-              "src/vs/workbench/contrib/terminal/browser/media/shellIntegration-rc.zsh",
-              "src/vs/workbench/contrib/terminal/browser/media/shellIntegration.fish",
-              "src/vs/workbench/contrib/terminal/browser/media/shellIntegration.ps1",
-              "src/vs/workbench/contrib/terminal/browser/media/terminal.css",
-              "src/vs/workbench/contrib/terminal/browser/media/widgets.css",
-              "src/vs/workbench/contrib/terminal/browser/media/xterm.css",
-              "src/vs/workbench/contrib/terminal/browser/remotePty.ts",
-              "src/vs/workbench/contrib/terminal/browser/remoteTerminalBackend.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminal.contribution.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminal.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminal.web.contribution.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalActions.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalCommands.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalConfigHelper.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalContextMenu.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalEditor.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalEditorInput.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalEditorSerializer.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalEditorService.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalEscapeSequences.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalExtensions.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalGroup.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalGroupService.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalIcon.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalIcons.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalInstance.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalInstanceService.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalMainContribution.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalMenus.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalProcessExtHostProxy.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalProcessManager.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalProfileQuickpick.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalProfileResolverService.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalProfileService.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalQuickAccess.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalQuickFixBuiltinActions.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalQuickFixService.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalRunRecentQuickPick.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalService.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalStatusList.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalTabbedView.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalTabsList.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalTooltip.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalUri.ts",
-              "src/vs/workbench/contrib/terminal/browser/terminalView.ts",
-              "src/vs/workbench/contrib/terminal/browser/widgets/environmentVariableInfoWidget.ts",
-              "src/vs/workbench/contrib/terminal/browser/widgets/terminalHoverWidget.ts",
-              "src/vs/workbench/contrib/terminal/browser/widgets/terminalQuickFixMenuItems.ts",
-              "src/vs/workbench/contrib/terminal/browser/widgets/widgetManager.ts",
-              "src/vs/workbench/contrib/terminal/browser/widgets/widgets.ts",
-              "src/vs/workbench/contrib/terminal/browser/xterm-private.d.ts",
-              "src/vs/workbench/contrib/terminal/browser/xterm/decorationAddon.ts",
-              "src/vs/workbench/contrib/terminal/browser/xterm/decorationStyles.ts",
-              "src/vs/workbench/contrib/terminal/browser/xterm/lineDataEventAddon.ts",
-              "src/vs/workbench/contrib/terminal/browser/xterm/markNavigationAddon.ts",
-              "src/vs/workbench/contrib/terminal/browser/xterm/quickFixAddon.ts",
-              "src/vs/workbench/contrib/terminal/browser/xterm/suggestAddon.ts",
-              "src/vs/workbench/contrib/terminal/browser/xterm/terminalTypeAheadAddon.ts",
-              "src/vs/workbench/contrib/terminal/browser/xterm/xtermTerminal.ts",
-              "src/vs/workbench/contrib/terminal/common/environmentVariable.contribution.ts",
-              "src/vs/workbench/contrib/terminal/common/environmentVariable.ts",
-              "src/vs/workbench/contrib/terminal/common/environmentVariableService.ts",
-              "src/vs/workbench/contrib/terminal/common/history.ts",
-              "src/vs/workbench/contrib/terminal/common/remoteTerminalChannel.ts",
-              "src/vs/workbench/contrib/terminal/common/terminal.ts",
-              "src/vs/workbench/contrib/terminal/common/terminalColorRegistry.ts",
-              "src/vs/workbench/contrib/terminal/common/terminalConfiguration.ts",
-              "src/vs/workbench/contrib/terminal/common/terminalContextKey.ts",
-              "src/vs/workbench/contrib/terminal/common/terminalEnvironment.ts",
-              "src/vs/workbench/contrib/terminal/common/terminalExtensionPoints.contribution.ts",
-              "src/vs/workbench/contrib/terminal/common/terminalExtensionPoints.ts",
-              "src/vs/workbench/contrib/terminal/common/terminalStorageKeys.ts",
-              "src/vs/workbench/contrib/terminal/common/terminalStrings.ts",
-              "src/vs/workbench/contrib/terminal/electron-sandbox/localPty.ts",
-              "src/vs/workbench/contrib/terminal/electron-sandbox/localTerminalBackend.ts",
-              "src/vs/workbench/contrib/terminal/electron-sandbox/terminal.contribution.ts",
-              "src/vs/workbench/contrib/terminal/electron-sandbox/terminalNativeContribution.ts",
-              "src/vs/workbench/contrib/terminal/electron-sandbox/terminalProfileResolverService.ts",
-              "src/vs/workbench/contrib/terminal/electron-sandbox/terminalRemote.ts",
-              "src/vs/workbench/contrib/terminal/terminal.all.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/capabilities/commandDetectionCapability.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/capabilities/partialCommandDetectionCapability.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/capabilities/terminalCapabilityStore.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/quickFixAddon.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalActions.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalConfigHelper.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalInstance.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalInstanceService.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalProcessManager.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalProfileService.integrationTest.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalService.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalStatusList.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalTypeahead.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/terminalUri.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/xterm/decorationAddon.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/xterm/lineDataEventAddon.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/xterm/shellIntegrationAddon.test.ts",
-              "src/vs/workbench/contrib/terminal/test/browser/xterm/xtermTerminal.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/environmentVariableCollection.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/environmentVariableService.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/environmentVariableShared.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/history.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/terminalColorRegistry.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/terminalDataBuffering.test.ts",
-              "src/vs/workbench/contrib/terminal/test/common/terminalEnvironment.test.ts",
-              "src/vs/workbench/contrib/terminal/test/node/terminalProfiles.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/accessibility/browser/terminal.accessibility.contribution.ts",
-              "src/vs/workbench/contrib/terminalContrib/accessibility/browser/terminalAccessibilityHelp.ts",
-              "src/vs/workbench/contrib/terminalContrib/accessibility/browser/terminalAccessibleBuffer.ts",
-              "src/vs/workbench/contrib/terminalContrib/developer/browser/terminal.developer.contribution.ts",
-              "src/vs/workbench/contrib/terminalContrib/find/browser/terminal.find.contribution.ts",
-              "src/vs/workbench/contrib/terminalContrib/find/browser/terminalFindWidget.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/links.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminal.links.contribution.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalExternalLinkDetector.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLink.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkDetectorAdapter.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkHelpers.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkManager.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkOpeners.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkProviderService.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkQuickpick.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalUriLinkDetector.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalWordLinkDetector.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/linkTestUtils.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkHelpers.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkManager.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkOpeners.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLocalLinkDetector.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalUriLinkDetector.test.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalWordLinkDetector.test.ts",
-              "src/vs/workbench/contrib/testing/browser/testingOutputTerminalService.ts",
-              "src/vs/workbench/contrib/welcomeGettingStarted/common/media/terminal.svg",
-              "src/vscode-dts/vscode.proposed.terminalDataWriteEvent.d.ts",
-              "src/vscode-dts/vscode.proposed.terminalDimensions.d.ts",
-              "src/vscode-dts/vscode.proposed.terminalQuickFixProvider.d.ts",
-              "test/automation/src/terminal.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLocalLinkDetector.test.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLocalLinkDetector.test.ts": [
+                {
+                  "start": 1,
+                  "end": 280
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts"
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLocalLinkDetector.test.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLocalLinkDetector.test.ts": [
+                {
+                  "start": 280,
+                  "end": 520
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkOpeners.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts",
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts"
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts"
             ],
             "spans": {
               "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts": [
                 {
-                  "start": 150,
-                  "end": 150
-                },
-                {
-                  "start": 151,
-                  "end": 151
-                },
-                {
-                  "start": 162,
-                  "end": 162
-                },
-                {
-                  "start": 177,
-                  "end": 177
-                },
-                {
-                  "start": 210,
-                  "end": 210
-                },
-                {
-                  "start": 264,
-                  "end": 264
+                  "start": 260,
+                  "end": 520
                 }
-              ],
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts": [
-                {
-                  "start": 77,
-                  "end": 77
-                }
-              ],
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts": [
-                {
-                  "start": 56,
-                  "end": 56
-                }
-              ],
-              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkOpeners.ts": [
-                {
-                  "start": 37,
-                  "end": 37
-                }
-              ],
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts"
+            ],
+            "spans": {
               "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts": [
                 {
-                  "start": 116,
-                  "end": 116
-                },
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts"
+            ],
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts": [
                 {
-                  "start": 126,
-                  "end": 126
-                },
+                  "start": 240,
+                  "end": 520
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts"
+            ],
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts": [
                 {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 158,
-                  "end": 158
-                },
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 247,
-                  "end": 247
-                },
-                {
-                  "start": 273,
-                  "end": 273
-                },
-                {
-                  "start": 300,
-                  "end": 300
-                },
-                {
-                  "start": 335,
-                  "end": 335
-                },
-                {
-                  "start": 350,
-                  "end": 350
-                },
-                {
-                  "start": 365,
-                  "end": 365
-                },
-                {
-                  "start": 395,
-                  "end": 395
-                },
-                {
-                  "start": 454,
-                  "end": 454
+                  "start": 520,
+                  "end": 760
                 }
               ]
             },
@@ -2863,7 +1056,42 @@
             "files": [
               "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts"
             ],
-            "spans": {},
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts"
+            ],
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts": [
+                {
+                  "start": 240,
+                  "end": 420
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "package.json"
+            ],
+            "spans": {
+              "package.json": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -2875,111 +1103,13 @@
           },
           {
             "files": [
-              "build/azure-pipelines/darwin/product-build-darwin-test.yml",
-              "build/azure-pipelines/linux/product-build-linux-client-test.yml",
-              "build/azure-pipelines/win32/product-build-win32-test.yml"
+              "test/unit/node/index.js"
             ],
             "spans": {
-              "build/azure-pipelines/linux/product-build-linux-client-test.yml": [
+              "test/unit/node/index.js": [
                 {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 71,
-                  "end": 71
-                },
-                {
-                  "start": 77,
-                  "end": 77
-                },
-                {
-                  "start": 98,
-                  "end": 98
-                },
-                {
-                  "start": 99,
-                  "end": 99
-                },
-                {
-                  "start": 100,
-                  "end": 100
-                },
-                {
-                  "start": 193,
-                  "end": 193
-                },
-                {
-                  "start": 215,
-                  "end": 215
-                }
-              ],
-              "build/azure-pipelines/win32/product-build-win32-test.yml": [
-                {
-                  "start": 32,
-                  "end": 32
-                },
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 62,
-                  "end": 62
-                },
-                {
-                  "start": 84,
-                  "end": 84
-                },
-                {
-                  "start": 85,
-                  "end": 85
-                },
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 192,
-                  "end": 192
-                }
-              ],
-              "build/azure-pipelines/darwin/product-build-darwin-test.yml": [
-                {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 74,
-                  "end": 74
-                },
-                {
-                  "start": 75,
-                  "end": 75
-                },
-                {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 159,
-                  "end": 159
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -2987,1337 +1117,76 @@
           },
           {
             "files": [
-              "test/unit/node/index.js"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/vs/workbench/contrib/terminalContrib/links/test/browser"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "src/tsconfig.json"
             ],
-            "spans": {},
+            "spans": {
+              "src/tsconfig.json": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/tsconfig.base.json"
             ],
-            "spans": {},
+            "spans": {
+              "src/tsconfig.base.json": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts"
+            ],
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts": [
+                {
+                  "start": 206,
+                  "end": 340
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts"
+            ],
+            "spans": {
+              "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts": [
+                {
+                  "start": 320,
+                  "end": 365
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "build/azure-pipelines/darwin/product-build-darwin-test.yml",
-          "build/azure-pipelines/linux/product-build-linux-client-test.yml",
-          "build/azure-pipelines/win32/product-build-win32-test.yml",
-          "package.json",
-          "src/tsconfig.base.json",
-          "src/tsconfig.json",
-          "src/vs/base/node/terminalEncoding.ts",
-          "src/vs/editor/browser/editorBrowser.ts",
-          "src/vs/editor/browser/services/editorWorkerService.ts",
-          "src/vs/editor/browser/view/dynamicViewOverlay.ts",
-          "src/vs/editor/browser/view/renderingContext.ts",
-          "src/vs/editor/browser/view/viewController.ts",
-          "src/vs/editor/browser/view/viewLayer.ts",
-          "src/vs/editor/browser/view/viewOverlays.ts",
-          "src/vs/editor/common/editorCommon.ts",
-          "src/vs/editor/common/services/editorSimpleWorker.ts",
-          "src/vs/editor/common/textModelEvents.ts",
-          "src/vs/editor/common/textModelGuides.ts",
-          "src/vs/editor/common/tokenizationTextModelPart.ts",
-          "src/vs/editor/common/tokens/contiguousMultilineTokens.ts",
-          "src/vs/editor/common/tokens/contiguousMultilineTokensBuilder.ts",
-          "src/vs/editor/common/tokens/contiguousTokensStore.ts",
-          "src/vs/editor/common/tokens/sparseMultilineTokens.ts",
-          "src/vs/editor/contrib/gotoSymbol/browser/goToCommands.ts",
-          "src/vs/editor/contrib/gotoSymbol/browser/link/clickLinkGesture.ts",
-          "src/vs/editor/contrib/gotoSymbol/browser/referencesModel.ts",
-          "src/vs/editor/contrib/snippet/browser/snippetSession.ts",
-          "src/vs/editor/contrib/snippet/browser/snippetVariables.ts",
-          "src/vs/editor/contrib/wordHighlighter/browser/wordHighlighter.ts",
-          "src/vs/monaco.d.ts",
-          "src/vs/platform/audioCues/browser/media/terminalBell.mp3",
-          "src/vs/platform/externalTerminal/common/externalTerminal.ts",
-          "src/vs/platform/externalTerminal/electron-main/externalTerminalService.test.ts",
-          "src/vs/platform/externalTerminal/electron-sandbox/externalTerminalMainService.ts",
-          "src/vs/platform/externalTerminal/node/externalTerminalService.ts",
-          "src/vs/platform/terminal/common/capabilities/cwdDetectionCapability.ts",
-          "src/vs/platform/terminal/common/capabilities/naiveCwdDetectionCapability.ts",
-          "src/vs/platform/terminal/common/capabilities/partialCommandDetectionCapability.ts",
-          "src/vs/platform/terminal/common/environmentVariable.ts",
-          "src/vs/platform/terminal/common/environmentVariableCollection.ts",
-          "src/vs/platform/terminal/common/environmentVariableShared.ts",
-          "src/vs/platform/terminal/common/requestStore.ts",
-          "src/vs/platform/terminal/common/terminal.ts",
-          "src/vs/platform/terminal/common/terminalAutoResponder.ts",
-          "src/vs/platform/terminal/common/terminalDataBuffering.ts",
-          "src/vs/platform/terminal/common/terminalEnvironment.ts",
-          "src/vs/platform/terminal/common/terminalPlatformConfiguration.ts",
-          "src/vs/platform/terminal/common/terminalProcess.ts",
-          "src/vs/platform/terminal/common/terminalProfiles.ts",
-          "src/vs/platform/terminal/common/terminalRecorder.ts",
-          "src/vs/platform/terminal/common/terminalStrings.ts",
-          "src/vs/platform/terminal/common/xterm/shellIntegrationAddon.ts",
-          "src/vs/platform/terminal/common/xterm/terminalQuickFix.ts",
-          "src/vs/platform/terminal/electron-sandbox/terminal.ts",
-          "src/vs/platform/terminal/node/childProcessMonitor.ts",
-          "src/vs/platform/terminal/node/heartbeatService.ts",
-          "src/vs/platform/terminal/node/ptyHostMain.ts",
-          "src/vs/platform/terminal/node/ptyHostService.ts",
-          "src/vs/platform/terminal/node/ptyService.ts",
-          "src/vs/platform/terminal/node/terminalEnvironment.ts",
-          "src/vs/platform/terminal/node/terminalProcess.ts",
-          "src/vs/platform/terminal/node/terminalProfiles.ts",
-          "src/vs/platform/terminal/node/windowsShellHelper.ts",
-          "src/vs/platform/terminal/test/common/requestStore.test.ts",
-          "src/vs/platform/terminal/test/common/terminalEnvironment.test.ts",
-          "src/vs/platform/terminal/test/common/terminalProfiles.test.ts",
-          "src/vs/platform/terminal/test/common/terminalRecorder.test.ts",
-          "src/vs/platform/terminal/test/node/terminalEnvironment.test.ts",
-          "src/vs/server/node/remoteTerminalChannel.ts",
-          "src/vs/workbench/api/browser/mainThreadTerminalService.ts",
-          "src/vs/workbench/api/common/extHostTerminalService.ts",
-          "src/vs/workbench/api/node/extHostTerminalService.ts",
-          "src/vs/workbench/contrib/debug/node/terminals.ts",
-          "src/vs/workbench/contrib/debug/test/node/terminals.test.ts",
-          "src/vs/workbench/contrib/externalTerminal/browser/externalTerminal.contribution.ts",
-          "src/vs/workbench/contrib/externalTerminal/electron-sandbox/externalTerminal.contribution.ts",
-          "src/vs/workbench/contrib/externalTerminal/node/TerminalHelper.scpt",
-          "src/vs/workbench/contrib/externalTerminal/node/iTermHelper.scpt",
-          "src/vs/workbench/contrib/tasks/browser/taskTerminalStatus.ts",
-          "src/vs/workbench/contrib/tasks/browser/terminalTaskSystem.ts",
-          "src/vs/workbench/contrib/tasks/test/browser/taskTerminalStatus.test.ts",
-          "src/vs/workbench/contrib/terminal/browser/baseTerminalBackend.ts",
-          "src/vs/workbench/contrib/terminal/browser/environmentVariableInfo.ts",
-          "src/vs/workbench/contrib/terminal/browser/media/scrollbar.css",
-          "src/vs/workbench/contrib/terminal/browser/media/shellIntegration-bash.sh",
-          "src/vs/workbench/contrib/terminal/browser/media/shellIntegration-env.zsh",
-          "src/vs/workbench/contrib/terminal/browser/media/shellIntegration-login.zsh",
-          "src/vs/workbench/contrib/terminal/browser/media/shellIntegration-profile.zsh",
-          "src/vs/workbench/contrib/terminal/browser/media/shellIntegration-rc.zsh",
-          "src/vs/workbench/contrib/terminal/browser/media/shellIntegration.fish",
-          "src/vs/workbench/contrib/terminal/browser/media/shellIntegration.ps1",
-          "src/vs/workbench/contrib/terminal/browser/media/terminal.css",
-          "src/vs/workbench/contrib/terminal/browser/media/widgets.css",
-          "src/vs/workbench/contrib/terminal/browser/media/xterm.css",
-          "src/vs/workbench/contrib/terminal/browser/remotePty.ts",
-          "src/vs/workbench/contrib/terminal/browser/remoteTerminalBackend.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminal.contribution.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminal.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminal.web.contribution.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalActions.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalCommands.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalConfigHelper.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalContextMenu.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalEditor.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalEditorInput.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalEditorSerializer.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalEditorService.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalEscapeSequences.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalExtensions.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalGroup.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalGroupService.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalIcon.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalIcons.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalInstance.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalInstanceService.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalMainContribution.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalMenus.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalProcessExtHostProxy.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalProcessManager.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalProfileQuickpick.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalProfileResolverService.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalProfileService.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalQuickAccess.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalQuickFixBuiltinActions.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalQuickFixService.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalRunRecentQuickPick.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalService.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalStatusList.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalTabbedView.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalTabsList.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalTooltip.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalUri.ts",
-          "src/vs/workbench/contrib/terminal/browser/terminalView.ts",
-          "src/vs/workbench/contrib/terminal/browser/widgets/environmentVariableInfoWidget.ts",
-          "src/vs/workbench/contrib/terminal/browser/widgets/terminalHoverWidget.ts",
-          "src/vs/workbench/contrib/terminal/browser/widgets/terminalQuickFixMenuItems.ts",
-          "src/vs/workbench/contrib/terminal/browser/widgets/widgetManager.ts",
-          "src/vs/workbench/contrib/terminal/browser/widgets/widgets.ts",
-          "src/vs/workbench/contrib/terminal/browser/xterm-private.d.ts",
-          "src/vs/workbench/contrib/terminal/browser/xterm/decorationAddon.ts",
-          "src/vs/workbench/contrib/terminal/browser/xterm/decorationStyles.ts",
-          "src/vs/workbench/contrib/terminal/browser/xterm/lineDataEventAddon.ts",
-          "src/vs/workbench/contrib/terminal/browser/xterm/markNavigationAddon.ts",
-          "src/vs/workbench/contrib/terminal/browser/xterm/quickFixAddon.ts",
-          "src/vs/workbench/contrib/terminal/browser/xterm/suggestAddon.ts",
-          "src/vs/workbench/contrib/terminal/browser/xterm/terminalTypeAheadAddon.ts",
-          "src/vs/workbench/contrib/terminal/browser/xterm/xtermTerminal.ts",
-          "src/vs/workbench/contrib/terminal/common/environmentVariable.contribution.ts",
-          "src/vs/workbench/contrib/terminal/common/environmentVariable.ts",
-          "src/vs/workbench/contrib/terminal/common/environmentVariableService.ts",
-          "src/vs/workbench/contrib/terminal/common/history.ts",
-          "src/vs/workbench/contrib/terminal/common/remoteTerminalChannel.ts",
-          "src/vs/workbench/contrib/terminal/common/terminal.ts",
-          "src/vs/workbench/contrib/terminal/common/terminalColorRegistry.ts",
-          "src/vs/workbench/contrib/terminal/common/terminalConfiguration.ts",
-          "src/vs/workbench/contrib/terminal/common/terminalContextKey.ts",
-          "src/vs/workbench/contrib/terminal/common/terminalEnvironment.ts",
-          "src/vs/workbench/contrib/terminal/common/terminalExtensionPoints.contribution.ts",
-          "src/vs/workbench/contrib/terminal/common/terminalExtensionPoints.ts",
-          "src/vs/workbench/contrib/terminal/common/terminalStorageKeys.ts",
-          "src/vs/workbench/contrib/terminal/common/terminalStrings.ts",
-          "src/vs/workbench/contrib/terminal/electron-sandbox/localPty.ts",
-          "src/vs/workbench/contrib/terminal/electron-sandbox/localTerminalBackend.ts",
-          "src/vs/workbench/contrib/terminal/electron-sandbox/terminal.contribution.ts",
-          "src/vs/workbench/contrib/terminal/electron-sandbox/terminalNativeContribution.ts",
-          "src/vs/workbench/contrib/terminal/electron-sandbox/terminalProfileResolverService.ts",
-          "src/vs/workbench/contrib/terminal/electron-sandbox/terminalRemote.ts",
-          "src/vs/workbench/contrib/terminal/terminal.all.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/capabilities/commandDetectionCapability.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/capabilities/partialCommandDetectionCapability.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/capabilities/terminalCapabilityStore.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/quickFixAddon.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalActions.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalConfigHelper.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalInstance.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalInstanceService.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalProcessManager.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalProfileService.integrationTest.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalService.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalStatusList.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalTypeahead.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/terminalUri.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/xterm/decorationAddon.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/xterm/lineDataEventAddon.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/xterm/shellIntegrationAddon.test.ts",
-          "src/vs/workbench/contrib/terminal/test/browser/xterm/xtermTerminal.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/environmentVariableCollection.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/environmentVariableService.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/environmentVariableShared.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/history.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/terminalColorRegistry.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/terminalDataBuffering.test.ts",
-          "src/vs/workbench/contrib/terminal/test/common/terminalEnvironment.test.ts",
-          "src/vs/workbench/contrib/terminal/test/node/terminalProfiles.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/accessibility/browser/terminal.accessibility.contribution.ts",
-          "src/vs/workbench/contrib/terminalContrib/accessibility/browser/terminalAccessibilityHelp.ts",
-          "src/vs/workbench/contrib/terminalContrib/accessibility/browser/terminalAccessibleBuffer.ts",
-          "src/vs/workbench/contrib/terminalContrib/developer/browser/terminal.developer.contribution.ts",
-          "src/vs/workbench/contrib/terminalContrib/find/browser/terminal.find.contribution.ts",
-          "src/vs/workbench/contrib/terminalContrib/find/browser/terminalFindWidget.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/links.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminal.links.contribution.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalExternalLinkDetector.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLink.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkDetectorAdapter.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkHelpers.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkManager.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkOpeners.ts",
           "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkProviderService.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkQuickpick.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalUriLinkDetector.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalWordLinkDetector.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/linkTestUtils.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkHelpers.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkManager.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkOpeners.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLocalLinkDetector.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalUriLinkDetector.test.ts",
-          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalWordLinkDetector.test.ts",
-          "src/vs/workbench/contrib/testing/browser/testingOutputTerminalService.ts",
-          "src/vs/workbench/contrib/welcomeGettingStarted/common/media/terminal.svg",
-          "src/vscode-dts/vscode.d.ts",
-          "src/vscode-dts/vscode.proposed.contribEditorLineNumberMenu.d.ts",
-          "src/vscode-dts/vscode.proposed.terminalDataWriteEvent.d.ts",
-          "src/vscode-dts/vscode.proposed.terminalDimensions.d.ts",
-          "src/vscode-dts/vscode.proposed.terminalQuickFixProvider.d.ts",
-          "src/vscode-dts/vscode.proposed.textSearchProvider.d.ts",
-          "test/automation/src/debug.ts",
-          "test/automation/src/editor.ts",
-          "test/automation/src/terminal.ts",
-          "test/smoke/src/areas/preferences/preferences.test.ts",
-          "test/unit/node/index.js"
+          "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts"
         ],
         "predSpans": {
-          "test/automation/src/editor.ts": [
-            {
-              "start": 78,
-              "end": 78
-            },
-            {
-              "start": 80,
-              "end": 80
-            }
-          ],
-          "test/automation/src/debug.ts": [
-            {
-              "start": 38,
-              "end": 38
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 48,
-              "end": 48
-            },
-            {
-              "start": 73,
-              "end": 73
-            },
-            {
-              "start": 74,
-              "end": 74
-            },
-            {
-              "start": 75,
-              "end": 75
-            }
-          ],
-          "src/vscode-dts/vscode.d.ts": [
-            {
-              "start": 54,
-              "end": 54
-            },
-            {
-              "start": 670,
-              "end": 670
-            },
-            {
-              "start": 6829,
-              "end": 6829
-            },
-            {
-              "start": 6844,
-              "end": 6844
-            },
-            {
-              "start": 6846,
-              "end": 6846
-            },
-            {
-              "start": 6851,
-              "end": 6851
-            },
-            {
-              "start": 6853,
-              "end": 6853
-            },
-            {
-              "start": 6856,
-              "end": 6856
-            },
-            {
-              "start": 6859,
-              "end": 6859
-            },
-            {
-              "start": 6865,
-              "end": 6865
-            },
-            {
-              "start": 6867,
-              "end": 6867
-            },
-            {
-              "start": 6872,
-              "end": 6872
-            },
-            {
-              "start": 6886,
-              "end": 6886
-            },
-            {
-              "start": 6887,
-              "end": 6887
-            },
-            {
-              "start": 6888,
-              "end": 6888
-            },
-            {
-              "start": 10321,
-              "end": 10321
-            },
-            {
-              "start": 10324,
-              "end": 10324
-            }
-          ],
-          "test/smoke/src/areas/preferences/preferences.test.ts": [
-            {
-              "start": 21,
-              "end": 21
-            }
-          ],
-          "src/vscode-dts/vscode.proposed.textSearchProvider.d.ts": [
-            {
-              "start": 250,
-              "end": 250
-            }
-          ],
-          "src/vscode-dts/vscode.proposed.contribEditorLineNumberMenu.d.ts": [
-            {
-              "start": 6,
-              "end": 6
-            }
-          ],
-          "src/vs/monaco.d.ts": [
-            {
-              "start": 491,
-              "end": 491
-            },
-            {
-              "start": 505,
-              "end": 505
-            },
-            {
-              "start": 510,
-              "end": 510
-            },
-            {
-              "start": 1073,
-              "end": 1073
-            },
-            {
-              "start": 1899,
-              "end": 1899
-            },
-            {
-              "start": 1903,
-              "end": 1903
-            },
-            {
-              "start": 1918,
-              "end": 1918
-            },
-            {
-              "start": 1920,
-              "end": 1920
-            },
-            {
-              "start": 1922,
-              "end": 1922
-            },
-            {
-              "start": 1924,
-              "end": 1924
-            },
-            {
-              "start": 1926,
-              "end": 1926
-            },
-            {
-              "start": 1929,
-              "end": 1929
-            },
-            {
-              "start": 1931,
-              "end": 1931
-            },
-            {
-              "start": 1934,
-              "end": 1934
-            },
-            {
-              "start": 2064,
-              "end": 2064
-            },
-            {
-              "start": 2065,
-              "end": 2065
-            },
-            {
-              "start": 2070,
-              "end": 2070
-            },
-            {
-              "start": 2607,
-              "end": 2607
-            },
-            {
-              "start": 2611,
-              "end": 2611
-            },
-            {
-              "start": 2615,
-              "end": 2615
-            },
-            {
-              "start": 2620,
-              "end": 2620
-            },
-            {
-              "start": 2684,
-              "end": 2684
-            },
-            {
-              "start": 2688,
-              "end": 2688
-            },
-            {
-              "start": 2693,
-              "end": 2693
-            },
-            {
-              "start": 3062,
-              "end": 3062
-            },
-            {
-              "start": 3093,
-              "end": 3093
-            },
-            {
-              "start": 3972,
-              "end": 3972
-            },
-            {
-              "start": 3976,
-              "end": 3976
-            },
-            {
-              "start": 4178,
-              "end": 4178
-            },
-            {
-              "start": 4190,
-              "end": 4190
-            },
-            {
-              "start": 4659,
-              "end": 4659
-            },
-            {
-              "start": 4660,
-              "end": 4660
-            },
-            {
-              "start": 4804,
-              "end": 4804
-            },
-            {
-              "start": 4805,
-              "end": 4805
-            },
-            {
-              "start": 5219,
-              "end": 5219
-            },
-            {
-              "start": 5623,
-              "end": 5623
-            },
-            {
-              "start": 5650,
-              "end": 5650
-            },
-            {
-              "start": 5654,
-              "end": 5654
-            },
-            {
-              "start": 5658,
-              "end": 5658
-            },
-            {
-              "start": 5703,
-              "end": 5703
-            },
-            {
-              "start": 5706,
-              "end": 5706
-            },
-            {
-              "start": 5799,
-              "end": 5799
-            },
-            {
-              "start": 5804,
-              "end": 5804
-            }
-          ],
-          "src/vs/editor/browser/editorBrowser.ts": [
-            {
-              "start": 336,
-              "end": 336
-            },
-            {
-              "start": 857,
-              "end": 857
-            },
-            {
-              "start": 916,
-              "end": 916
-            },
-            {
-              "start": 921,
-              "end": 921
-            },
-            {
-              "start": 926,
-              "end": 926
-            },
-            {
-              "start": 996,
-              "end": 996
-            },
-            {
-              "start": 999,
-              "end": 999
-            },
-            {
-              "start": 1074,
-              "end": 1074
-            },
-            {
-              "start": 1195,
-              "end": 1195
-            },
-            {
-              "start": 1201,
-              "end": 1201
-            }
-          ],
-          "src/vs/editor/common/editorCommon.ts": [
-            {
-              "start": 305,
-              "end": 305
-            },
-            {
-              "start": 310,
-              "end": 310
-            },
-            {
-              "start": 315,
-              "end": 315
-            },
-            {
-              "start": 321,
-              "end": 321
-            },
-            {
-              "start": 395,
-              "end": 395
-            },
-            {
-              "start": 400,
-              "end": 400
-            },
-            {
-              "start": 406,
-              "end": 406
-            }
-          ],
-          "src/vs/editor/browser/view/dynamicViewOverlay.ts": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "src/vs/editor/contrib/snippet/browser/snippetVariables.ts": [
-            {
-              "start": 135,
-              "end": 135
-            }
-          ],
-          "src/vs/editor/browser/view/viewController.ts": [
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 101,
-              "end": 101
-            }
-          ],
-          "src/vs/editor/browser/services/editorWorkerService.ts": [
-            {
-              "start": 223,
-              "end": 223
-            },
-            {
-              "start": 224,
-              "end": 224
-            }
-          ],
-          "src/vs/editor/contrib/snippet/browser/snippetSession.ts": [
-            {
-              "start": 384,
-              "end": 384
-            }
-          ],
-          "src/vs/editor/browser/view/viewLayer.ts": [
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 80,
-              "end": 80
-            },
-            {
-              "start": 81,
-              "end": 81
-            },
-            {
-              "start": 83,
-              "end": 83
-            },
-            {
-              "start": 115,
-              "end": 115
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 235,
-              "end": 235
-            },
-            {
-              "start": 236,
-              "end": 236
-            },
-            {
-              "start": 342,
-              "end": 342
-            },
-            {
-              "start": 343,
-              "end": 343
-            },
-            {
-              "start": 465,
-              "end": 465
-            },
-            {
-              "start": 466,
-              "end": 466
-            },
-            {
-              "start": 473,
-              "end": 473
-            },
-            {
-              "start": 492,
-              "end": 492
-            }
-          ],
-          "src/vs/editor/contrib/wordHighlighter/browser/wordHighlighter.ts": [
-            {
-              "start": 84,
-              "end": 84
-            },
-            {
-              "start": 95,
-              "end": 95
-            },
-            {
-              "start": 351,
-              "end": 351
-            },
-            {
-              "start": 355,
-              "end": 355
-            }
-          ],
-          "src/vs/editor/contrib/gotoSymbol/browser/referencesModel.ts": [
-            {
-              "start": 84,
-              "end": 84
-            },
-            {
-              "start": 253,
-              "end": 253
-            }
-          ],
-          "src/vs/editor/browser/view/viewOverlays.ts": [
-            {
-              "start": 89,
-              "end": 89
-            },
-            {
-              "start": 90,
-              "end": 90
-            },
-            {
-              "start": 187,
-              "end": 187
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 212,
-              "end": 212
-            }
-          ],
-          "src/vs/editor/browser/view/renderingContext.ts": [
-            {
-              "start": 56,
-              "end": 56
-            },
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 60,
-              "end": 60
-            },
-            {
-              "start": 61,
-              "end": 61
-            },
-            {
-              "start": 91,
-              "end": 91
-            },
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 107,
-              "end": 107
-            },
-            {
-              "start": 115,
-              "end": 115
-            },
-            {
-              "start": 124,
-              "end": 124
-            }
-          ],
-          "src/vs/editor/common/textModelGuides.ts": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "src/vs/editor/contrib/gotoSymbol/browser/goToCommands.ts": [
-            {
-              "start": 879,
-              "end": 879
-            }
-          ],
-          "src/vs/editor/contrib/gotoSymbol/browser/link/clickLinkGesture.ts": [
-            {
-              "start": 120,
-              "end": 120
-            },
-            {
-              "start": 131,
-              "end": 131
-            },
-            {
-              "start": 142,
-              "end": 142
-            },
-            {
-              "start": 181,
-              "end": 181
-            },
-            {
-              "start": 185,
-              "end": 185
-            },
-            {
-              "start": 186,
-              "end": 186
-            }
-          ],
-          "src/vs/editor/common/tokenizationTextModelPart.ts": [
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 56,
-              "end": 56
-            },
-            {
-              "start": 59,
-              "end": 59
-            },
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 66,
-              "end": 66
-            },
-            {
-              "start": 70,
-              "end": 70
-            },
-            {
-              "start": 73,
-              "end": 73
-            },
-            {
-              "start": 77,
-              "end": 77
-            },
-            {
-              "start": 84,
-              "end": 84
-            },
-            {
-              "start": 97,
-              "end": 97
-            }
-          ],
-          "src/vs/editor/common/textModelEvents.ts": [
-            {
-              "start": 178,
-              "end": 178
-            },
-            {
-              "start": 184,
-              "end": 184
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 198,
-              "end": 198
-            },
-            {
-              "start": 211,
-              "end": 211
-            },
-            {
-              "start": 221,
-              "end": 221
-            },
-            {
-              "start": 222,
-              "end": 222
-            }
-          ],
-          "src/vs/editor/common/tokens/contiguousTokensStore.ts": [
-            {
-              "start": 192,
-              "end": 192
-            },
-            {
-              "start": 206,
-              "end": 206
-            }
-          ],
-          "src/vs/editor/common/tokens/contiguousMultilineTokensBuilder.ts": [
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 36,
-              "end": 36
-            }
-          ],
-          "src/vs/editor/common/services/editorSimpleWorker.ts": [
-            {
-              "start": 67,
-              "end": 67
-            },
-            {
-              "start": 68,
-              "end": 68
-            },
-            {
-              "start": 117,
-              "end": 117
-            },
-            {
-              "start": 118,
-              "end": 118
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 131,
-              "end": 131
-            },
-            {
-              "start": 147,
-              "end": 147
-            },
-            {
-              "start": 159,
-              "end": 159
-            },
-            {
-              "start": 172,
-              "end": 172
-            },
-            {
-              "start": 173,
-              "end": 173
-            },
-            {
-              "start": 176,
-              "end": 176
-            },
-            {
-              "start": 186,
-              "end": 186
-            },
-            {
-              "start": 187,
-              "end": 187
-            },
-            {
-              "start": 240,
-              "end": 240
-            },
-            {
-              "start": 253,
-              "end": 253
-            },
-            {
-              "start": 260,
-              "end": 260
-            },
-            {
-              "start": 261,
-              "end": 261
-            },
-            {
-              "start": 263,
-              "end": 263
-            },
-            {
-              "start": 265,
-              "end": 265
-            },
-            {
-              "start": 269,
-              "end": 269
-            },
-            {
-              "start": 271,
-              "end": 271
-            },
-            {
-              "start": 283,
-              "end": 283
-            },
-            {
-              "start": 286,
-              "end": 286
-            },
-            {
-              "start": 287,
-              "end": 287
-            },
-            {
-              "start": 291,
-              "end": 291
-            },
-            {
-              "start": 292,
-              "end": 292
-            },
-            {
-              "start": 293,
-              "end": 293
-            },
-            {
-              "start": 297,
-              "end": 297
-            },
-            {
-              "start": 311,
-              "end": 311
-            },
-            {
-              "start": 517,
-              "end": 517
-            },
-            {
-              "start": 629,
-              "end": 629
-            }
-          ],
-          "src/vs/editor/common/tokens/sparseMultilineTokens.ts": [
-            {
-              "start": 56,
-              "end": 56
-            },
-            {
-              "start": 57,
-              "end": 57
-            },
-            {
-              "start": 58,
-              "end": 58
-            },
-            {
-              "start": 148,
-              "end": 148
-            }
-          ],
-          "src/vs/editor/common/tokens/contiguousMultilineTokens.ts": [
-            {
-              "start": 74,
-              "end": 74
-            },
-            {
-              "start": 75,
-              "end": 75
-            },
-            {
-              "start": 194,
-              "end": 194
-            },
-            {
-              "start": 216,
-              "end": 216
-            }
-          ],
           "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts": [
-            {
-              "start": 150,
-              "end": 150
-            },
-            {
-              "start": 151,
-              "end": 151
-            },
-            {
-              "start": 162,
-              "end": 162
-            },
-            {
-              "start": 177,
-              "end": 177
-            },
-            {
-              "start": 210,
-              "end": 210
-            },
             {
               "start": 210,
               "end": 332
-            },
-            {
-              "start": 264,
-              "end": 264
-            }
-          ],
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLocalLinkDetector.ts": [
-            {
-              "start": 77,
-              "end": 77
-            }
-          ],
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkResolver.ts": [
-            {
-              "start": 56,
-              "end": 56
-            }
-          ],
-          "src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkOpeners.ts": [
-            {
-              "start": 37,
-              "end": 37
             }
           ],
           "src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts": [
             {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 143,
-              "end": 143
-            },
-            {
-              "start": 158,
-              "end": 158
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 247,
-              "end": 247
-            },
-            {
-              "start": 273,
-              "end": 273
-            },
-            {
-              "start": 300,
-              "end": 300
-            },
-            {
               "start": 332,
               "end": 351
-            },
-            {
-              "start": 335,
-              "end": 335
-            },
-            {
-              "start": 350,
-              "end": 350
-            },
-            {
-              "start": 365,
-              "end": 365
-            },
-            {
-              "start": 395,
-              "end": 395
-            },
-            {
-              "start": 454,
-              "end": 454
-            }
-          ],
-          "build/azure-pipelines/linux/product-build-linux-client-test.yml": [
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 58,
-              "end": 58
-            },
-            {
-              "start": 71,
-              "end": 71
-            },
-            {
-              "start": 77,
-              "end": 77
-            },
-            {
-              "start": 98,
-              "end": 98
-            },
-            {
-              "start": 99,
-              "end": 99
-            },
-            {
-              "start": 100,
-              "end": 100
-            },
-            {
-              "start": 193,
-              "end": 193
-            },
-            {
-              "start": 215,
-              "end": 215
-            }
-          ],
-          "build/azure-pipelines/win32/product-build-win32-test.yml": [
-            {
-              "start": 32,
-              "end": 32
-            },
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 62,
-              "end": 62
-            },
-            {
-              "start": 84,
-              "end": 84
-            },
-            {
-              "start": 85,
-              "end": 85
-            },
-            {
-              "start": 86,
-              "end": 86
-            },
-            {
-              "start": 192,
-              "end": 192
-            }
-          ],
-          "build/azure-pipelines/darwin/product-build-darwin-test.yml": [
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 74,
-              "end": 74
-            },
-            {
-              "start": 75,
-              "end": 75
-            },
-            {
-              "start": 76,
-              "end": 76
-            },
-            {
-              "start": 159,
-              "end": 159
             }
           ]
         },
@@ -4351,132 +1220,150 @@
           {
             "step": 3,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 8,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.2,
-              "span": 0.031630170316301706,
-              "line": 0.018867924528301886
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 9,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.2,
-              "span": 0.031630170316301706,
-              "line": 0.018867924528301886
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 10,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.2,
-              "span": 0.031630170316301706,
-              "line": 0.018867924528301886
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 11,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.2,
-              "span": 0.031630170316301706,
-              "line": 0.018867924528301886
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 12,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.2,
-              "span": 0.031630170316301706,
-              "line": 0.018867924528301886
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 13,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.2,
-              "span": 0.031630170316301706,
-              "line": 0.018867924528301886
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 14,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.2,
-              "span": 0.031630170316301706,
-              "line": 0.018867924528301886
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           },
           {
             "step": 15,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.2,
-              "span": 0.031630170316301706,
-              "line": 0.018867924528301886
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
+            }
+          },
+          {
+            "step": 16,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
+            }
+          },
+          {
+            "step": 17,
+            "coverage": {
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.7065693430656934,
+              "line": 0.8679245283018868
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.8666666666666667,
-          "symbol": 0.10666666666666666,
-          "span": 0.016869424168694247,
-          "line": 0.010062893081761006
+          "file": 0.4411764705882353,
+          "symbol": 0.8823529411764706,
+          "span": 0.6234435379991412,
+          "line": 0.7658157602663708
         },
         "redundancy": {
-          "file": 0.04065040650406504,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.47058823529411764,
+          "symbol": 0.12727272727272732,
+          "span": 0.07308020680168859,
+          "line": 0.05842314237095858
         }
       },
       "fixOverlap": {
@@ -4495,7 +1382,7 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/e28cee0730a16f641435/home/.agents/skills/superpowers/using-superpowers/SKILL.md && printf '\\\\n---SKILL---\\\\n' && sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/e28cee0730a16f641435/home/.agents/skills/superpowers/brainstorming/SKILL.md && printf '\\\\n---SKILL---\\\\n' && sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/e28cee0730a16f641435/home/.agents/skills/superpowers/systematic-debugging/SKILL.md && printf '\\\\n---SKILL---\\\\n' && sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/e28cee0730a16f641435/home/.agents/skills/superpowers/test-driven-development/SKILL.md && printf '\\\\n---SKILL---\\\\n' && sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/e28cee0730a16f641435/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime> && printf '\\\\n---SKILL---\\\\n' && sed -n '1,220p' <agent-runtime> && printf '\\\\n---SKILL---\\\\n' && sed -n '1,240p' <agent-runtime> && printf '\\\\n---SKILL---\\\\n' && sed -n '1,240p' <agent-runtime> && printf '\\\\n---SKILL---\\\\n' && sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
@@ -4711,7 +1598,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/test/browser/terminalLinkParsing.test.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -4758,7 +1654,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/vs/workbench/contrib/terminalContrib/links/browser/terminalLinkParsing.ts",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

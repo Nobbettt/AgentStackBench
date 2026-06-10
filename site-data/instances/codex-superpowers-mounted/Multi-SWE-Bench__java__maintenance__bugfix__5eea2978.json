@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "resolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-19T04:36:18Z",
       "completedAt": "2026-05-19T04:42:22Z",
       "durationMs": 363592,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1541219,
@@ -25,6 +40,28 @@
         "total_tokens": 1557509,
         "cache_read_input_tokens": 1449984
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 47,
+        "readToolCalls": 0,
+        "editToolCalls": 1
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/main/java/com/fasterxml/jackson/core/JsonFactory.java b/src/main/java/com/fasterxml/jackson/core/JsonFactory.java\nindex bff4efba..1427ba50 100644\n--- a/src/main/java/com/fasterxml/jackson/core/JsonFactory.java\n+++ b/src/main/java/com/fasterxml/jackson/core/JsonFactory.java\n@@ -1299,7 +1299,7 @@ public class JsonFactory\n         //   for non-JSON input:\n         _requireJSONFactory(\"Non-blocking source not (yet?) supported for this format (%s)\");\n         IOContext ctxt = _createNonBlockingContext(null);\n-        ByteQuadsCanonicalizer can = _byteSymbolCanonicalizer.makeChild(_factoryFeatures);\n+        ByteQuadsCanonicalizer can = _byteSymbolCanonicalizer.makeChildOrPlaceholder(_factoryFeatures);\n         return new NonBlockingJsonParser(ctxt, _parserFeatures, can);\n     }\n \n@@ -1326,7 +1326,7 @@ public class JsonFactory\n         //   for non-JSON input:\n         _requireJSONFactory(\"Non-blocking source not (yet?) supported for this format (%s)\");\n         IOContext ctxt = _createNonBlockingContext(null);\n-        ByteQuadsCanonicalizer can = _byteSymbolCanonicalizer.makeChild(_factoryFeatures);\n+        ByteQuadsCanonicalizer can = _byteSymbolCanonicalizer.makeChildOrPlaceholder(_factoryFeatures);\n         return new NonBlockingByteBufferJsonParser(ctxt, _parserFeatures, can);\n     }\n \n@@ -1849,7 +1849,7 @@ public class JsonFactory\n         // Also: while we can't do full bootstrapping (due to read-ahead limitations), should\n         // at least handle possible UTF-8 BOM\n         int firstByte = ByteSourceJsonBootstrapper.skipUTF8BOM(input);\n-        ByteQuadsCanonicalizer can = _byteSymbolCanonicalizer.makeChild(_factoryFeatures);\n+        ByteQuadsCanonicalizer can = _byteSymbolCanonicalizer.makeChildOrPlaceholder(_factoryFeatures);\n         return new UTF8DataInputJsonParser(ctxt, _parserFeatures, input,\n                 _objectCodec, can, firstByte);\n     }\ndiff --git a/src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java b/src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java\nindex 24ba3101..8f1f07f0 100644\n--- a/src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java\n+++ b/src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java\n@@ -1937,6 +1937,9 @@ public class UTF8DataInputJsonParser\n         if (lastQuadBytes < 4) {\n             quads[qlen-1] = lastQuad;\n         }\n+        if (!_symbols.isCanonicalizing()) {\n+            return baseName;\n+        }\n         return _symbols.addName(baseName, quads, qlen);\n     }\n \ndiff --git a/src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java b/src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java\nindex 05adcf5c..dc0a99fc 100644\n--- a/src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java\n+++ b/src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java\n@@ -794,6 +794,9 @@ public abstract class NonBlockingJsonParserBase\n         if (lastQuadBytes < 4) {\n             quads[qlen-1] = lastQuad;\n         }\n+        if (!_symbols.isCanonicalizing()) {\n+            return baseName;\n+        }\n         return _symbols.addName(baseName, quads, qlen);\n     }\n \ndiff --git a/src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java b/src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java\nindex d9b2a994..c8f4cc2a 100644\n--- a/src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java\n+++ b/src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java\n@@ -108,6 +108,16 @@ public class AsyncParserNamesTest extends AsyncTestBase\n         p.close();\n     }\n \n+    public void testCanonicalizeFieldNamesDisabledByteArray() throws Exception\n+    {\n+        _testCanonicalizeFieldNamesDisabled(false);\n+    }\n+\n+    public void testCanonicalizeFieldNamesDisabledByteBuffer() throws Exception\n+    {\n+        _testCanonicalizeFieldNamesDisabled(true);\n+    }\n+\n     /*\n     /**********************************************************\n     /* Helper methods\n@@ -130,4 +140,31 @@ public class AsyncParserNamesTest extends AsyncTestBase\n         }\n         return sb.toString();\n     }\n+\n+    private void _testCanonicalizeFieldNamesDisabled(boolean useByteBuffer) throws Exception\n+    {\n+        final String name = \"a\";\n+        JsonFactory f = JsonFactory.builder()\n+                .disable(JsonFactory.Feature.CANONICALIZE_FIELD_NAMES)\n+                .build();\n+        byte[] doc = _jsonDoc(\"{\\\"a\\\":1}\");\n+        AsyncReaderWrapper p = useByteBuffer\n+                ? asyncForByteBuffer(f, 5, doc, 0)\n+                : asyncForBytes(f, 5, doc, 0);\n+\n+        ByteQuadsCanonicalizer symbols = ((NonBlockingJsonParserBase) p.parser()).symbolTableForTests();\n+        assertFalse(symbols.isCanonicalizing());\n+\n+        assertToken(JsonToken.START_OBJECT, p.nextToken());\n+        assertToken(JsonToken.FIELD_NAME, p.nextToken());\n+        String parsedName = p.currentName();\n+        assertEquals(name, parsedName);\n+        assertNotSame(name, parsedName);\n+        assertToken(JsonToken.VALUE_NUMBER_INT, p.nextToken());\n+        assertEquals(1, p.getIntValue());\n+        assertToken(JsonToken.END_OBJECT, p.nextToken());\n+        assertNull(p.nextToken());\n+        p.close();\n+        assertEquals(-1, symbols.size());\n+    }\n }\ndiff --git a/src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java b/src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java\nindex 4b908625..83dca27d 100644\n--- a/src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java\n+++ b/src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java\n@@ -39,4 +39,23 @@ public class DataInputTest\n         assertNull(p.nextToken());\n         p.close();\n     }\n+\n+    public void testCanonicalizeFieldNamesDisabled() throws Exception\n+    {\n+        final String name = \"a\";\n+        JsonFactory f = JsonFactory.builder()\n+                .disable(JsonFactory.Feature.CANONICALIZE_FIELD_NAMES)\n+                .build();\n+        JsonParser p = createParser(f, MODE_DATA_INPUT, \"{ \\\"a\\\" : 1 } \");\n+\n+        assertToken(JsonToken.START_OBJECT, p.nextToken());\n+        assertToken(JsonToken.FIELD_NAME, p.nextToken());\n+        String parsedName = p.currentName();\n+        assertEquals(name, parsedName);\n+        assertNotSame(name, parsedName);\n+        assertToken(JsonToken.VALUE_NUMBER_INT, p.nextToken());\n+        assertEquals(1, p.getIntValue());\n+        assertToken(JsonToken.END_OBJECT, p.nextToken());\n+        p.close();\n+    }\n }\n",
       "finalOutput": {
         "status": "completed",
@@ -130,107 +167,11 @@
             "files": [
               "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/test/java/com/fasterxml/jackson/core/read/ParserSymbolHandlingTest.java"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
-              "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java",
-              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java",
-              "src/main/java/com/fasterxml/jackson/core/sym/CharsToNameCanonicalizer.java"
-            ],
             "spans": {
-              "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java": [
-                {
-                  "start": 263,
-                  "end": 263
-                },
-                {
-                  "start": 264,
-                  "end": 264
-                },
-                {
-                  "start": 270,
-                  "end": 270
-                }
-              ],
               "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
                 {
-                  "start": 78,
-                  "end": 78
-                },
-                {
-                  "start": 93,
-                  "end": 93
-                },
-                {
-                  "start": 1302,
-                  "end": 1302
-                },
-                {
-                  "start": 1329,
-                  "end": 1329
-                },
-                {
-                  "start": 1780,
-                  "end": 1780
-                },
-                {
-                  "start": 1802,
-                  "end": 1802
-                },
-                {
-                  "start": 1852,
-                  "end": 1852
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/sym/CharsToNameCanonicalizer.java": [
-                {
-                  "start": 259,
-                  "end": 259
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java": [
-                {
-                  "start": 371,
-                  "end": 371
-                },
-                {
-                  "start": 381,
-                  "end": 381
-                },
-                {
-                  "start": 382,
-                  "end": 382
+                  "start": 1820,
+                  "end": 1885
                 }
               ]
             },
@@ -238,47 +179,97 @@
           },
           {
             "files": [
-              "src/test/java/com/fasterxml/jackson/core/async/AsyncTestBase.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncLocationTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncTokenFilterTest.java"
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
             ],
             "spans": {
-              "src/test/java/com/fasterxml/jackson/core/async/AsyncTestBase.java": [
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
                 {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 31,
-                  "end": 31
+                  "start": 1240,
+                  "end": 1365
                 }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncLocationTest.java": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java": [
                 {
-                  "start": 17,
-                  "end": 17
-                },
-                {
-                  "start": 44,
-                  "end": 44
+                  "start": 240,
+                  "end": 285
                 }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncTokenFilterTest.java": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/test/java/com/fasterxml/jackson/core/read/ParserSymbolHandlingTest.java"
+            ],
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/read/ParserSymbolHandlingTest.java": [
                 {
-                  "start": 36,
-                  "end": 36
-                },
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java": [
                 {
-                  "start": 59,
-                  "end": 59
-                },
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java": [
                 {
-                  "start": 81,
-                  "end": 81
-                },
+                  "start": 350,
+                  "end": 410
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
                 {
-                  "start": 102,
-                  "end": 102
+                  "start": 1280,
+                  "end": 1345
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
+                {
+                  "start": 1760,
+                  "end": 1865
                 }
               ]
             },
@@ -288,510 +279,11 @@
             "files": [
               "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java",
-              "src/main/java/com/fasterxml/jackson/core/json/UTF8StreamJsonParser.java",
-              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java",
-              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingUtf8JsonParserBase.java",
-              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java"
-            ],
             "spans": {
-              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java": [
-                {
-                  "start": 381,
-                  "end": 381
-                },
-                {
-                  "start": 472,
-                  "end": 472
-                },
-                {
-                  "start": 569,
-                  "end": 569
-                },
-                {
-                  "start": 601,
-                  "end": 601
-                },
-                {
-                  "start": 631,
-                  "end": 631
-                },
-                {
-                  "start": 659,
-                  "end": 659
-                },
-                {
-                  "start": 668,
-                  "end": 668
-                },
-                {
-                  "start": 670,
-                  "end": 670
-                },
-                {
-                  "start": 672,
-                  "end": 672
-                },
-                {
-                  "start": 873,
-                  "end": 873
-                },
-                {
-                  "start": 893,
-                  "end": 893
-                },
-                {
-                  "start": 921,
-                  "end": 921
-                },
-                {
-                  "start": 943,
-                  "end": 943
-                },
-                {
-                  "start": 1289,
-                  "end": 1289
-                },
-                {
-                  "start": 1294,
-                  "end": 1294
-                },
-                {
-                  "start": 1300,
-                  "end": 1300
-                },
-                {
-                  "start": 1309,
-                  "end": 1309
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java": [
-                {
-                  "start": 185,
-                  "end": 185
-                },
-                {
-                  "start": 1323,
-                  "end": 1323
-                },
-                {
-                  "start": 1328,
-                  "end": 1328
-                },
-                {
-                  "start": 1333,
-                  "end": 1333
-                },
-                {
-                  "start": 1338,
-                  "end": 1338
-                },
-                {
-                  "start": 1356,
-                  "end": 1356
-                },
-                {
-                  "start": 1364,
-                  "end": 1364
-                },
-                {
-                  "start": 1372,
-                  "end": 1372
-                },
-                {
-                  "start": 1380,
-                  "end": 1380
-                },
-                {
-                  "start": 1395,
-                  "end": 1395
-                },
-                {
-                  "start": 1403,
-                  "end": 1403
-                },
-                {
-                  "start": 1411,
-                  "end": 1411
-                },
-                {
-                  "start": 1419,
-                  "end": 1419
-                },
-                {
-                  "start": 1440,
-                  "end": 1440
-                },
-                {
-                  "start": 1449,
-                  "end": 1449
-                },
-                {
-                  "start": 1458,
-                  "end": 1458
-                },
-                {
-                  "start": 1467,
-                  "end": 1467
-                },
-                {
-                  "start": 1583,
-                  "end": 1583
-                },
-                {
-                  "start": 1585,
-                  "end": 1585
-                },
-                {
-                  "start": 1657,
-                  "end": 1657
-                },
-                {
-                  "start": 1659,
-                  "end": 1659
-                },
-                {
-                  "start": 1757,
-                  "end": 1757
-                },
-                {
-                  "start": 1759,
-                  "end": 1759
-                },
-                {
-                  "start": 1770,
-                  "end": 1770
-                },
-                {
-                  "start": 1775,
-                  "end": 1775
-                },
-                {
-                  "start": 1781,
-                  "end": 1781
-                },
-                {
-                  "start": 1784,
-                  "end": 1784
-                },
-                {
-                  "start": 1789,
-                  "end": 1789
-                },
-                {
-                  "start": 1796,
-                  "end": 1796
-                },
-                {
-                  "start": 1799,
-                  "end": 1799
-                },
-                {
-                  "start": 1803,
-                  "end": 1803
-                },
-                {
-                  "start": 1811,
-                  "end": 1811
-                },
-                {
-                  "start": 1814,
-                  "end": 1814
-                },
-                {
-                  "start": 1821,
-                  "end": 1821
-                },
-                {
-                  "start": 1823,
-                  "end": 1823
-                },
-                {
-                  "start": 1834,
-                  "end": 1834
-                },
-                {
-                  "start": 1940,
-                  "end": 1940
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/json/UTF8StreamJsonParser.java": [
-                {
-                  "start": 309,
-                  "end": 309
-                },
-                {
-                  "start": 1828,
-                  "end": 1828
-                },
-                {
-                  "start": 1833,
-                  "end": 1833
-                },
-                {
-                  "start": 1838,
-                  "end": 1838
-                },
-                {
-                  "start": 1843,
-                  "end": 1843
-                },
-                {
-                  "start": 1862,
-                  "end": 1862
-                },
-                {
-                  "start": 1870,
-                  "end": 1870
-                },
-                {
-                  "start": 1878,
-                  "end": 1878
-                },
-                {
-                  "start": 1886,
-                  "end": 1886
-                },
-                {
-                  "start": 1903,
-                  "end": 1903
-                },
-                {
-                  "start": 1911,
-                  "end": 1911
-                },
-                {
-                  "start": 1919,
-                  "end": 1919
-                },
-                {
-                  "start": 1927,
-                  "end": 1927
-                },
-                {
-                  "start": 1949,
-                  "end": 1949
-                },
-                {
-                  "start": 1958,
-                  "end": 1958
-                },
-                {
-                  "start": 1967,
-                  "end": 1967
-                },
-                {
-                  "start": 1976,
-                  "end": 1976
-                },
-                {
-                  "start": 2115,
-                  "end": 2115
-                },
-                {
-                  "start": 2117,
-                  "end": 2117
-                },
-                {
-                  "start": 2195,
-                  "end": 2195
-                },
-                {
-                  "start": 2197,
-                  "end": 2197
-                },
-                {
-                  "start": 2300,
-                  "end": 2300
-                },
-                {
-                  "start": 2302,
-                  "end": 2302
-                },
-                {
-                  "start": 2313,
-                  "end": 2313
-                },
-                {
-                  "start": 2318,
-                  "end": 2318
-                },
-                {
-                  "start": 2324,
-                  "end": 2324
-                },
-                {
-                  "start": 2327,
-                  "end": 2327
-                },
-                {
-                  "start": 2332,
-                  "end": 2332
-                },
-                {
-                  "start": 2339,
-                  "end": 2339
-                },
-                {
-                  "start": 2342,
-                  "end": 2342
-                },
-                {
-                  "start": 2346,
-                  "end": 2346
-                },
-                {
-                  "start": 2354,
-                  "end": 2354
-                },
-                {
-                  "start": 2357,
-                  "end": 2357
-                },
-                {
-                  "start": 2364,
-                  "end": 2364
-                },
-                {
-                  "start": 2366,
-                  "end": 2366
-                },
-                {
-                  "start": 2376,
-                  "end": 2376
-                },
-                {
-                  "start": 2482,
-                  "end": 2482
-                }
-              ],
               "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java": [
                 {
-                  "start": 307,
-                  "end": 307
-                },
-                {
-                  "start": 643,
-                  "end": 643
-                },
-                {
-                  "start": 648,
-                  "end": 648
-                },
-                {
-                  "start": 654,
-                  "end": 654
-                },
-                {
-                  "start": 657,
-                  "end": 657
-                },
-                {
-                  "start": 662,
-                  "end": 662
-                },
-                {
-                  "start": 669,
-                  "end": 669
-                },
-                {
-                  "start": 672,
-                  "end": 672
-                },
-                {
-                  "start": 676,
-                  "end": 676
-                },
-                {
-                  "start": 684,
-                  "end": 684
-                },
-                {
-                  "start": 691,
-                  "end": 691
-                },
-                {
-                  "start": 797,
-                  "end": 797
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingUtf8JsonParserBase.java": [
-                {
-                  "start": 1954,
-                  "end": 1954
-                },
-                {
-                  "start": 1960,
-                  "end": 1960
-                },
-                {
-                  "start": 1966,
-                  "end": 1966
-                },
-                {
-                  "start": 1972,
-                  "end": 1972
-                },
-                {
-                  "start": 2003,
-                  "end": 2003
-                },
-                {
-                  "start": 2009,
-                  "end": 2009
-                },
-                {
-                  "start": 2015,
-                  "end": 2015
-                },
-                {
-                  "start": 2021,
-                  "end": 2021
-                },
-                {
-                  "start": 2035,
-                  "end": 2035
-                },
-                {
-                  "start": 2044,
-                  "end": 2044
-                },
-                {
-                  "start": 2053,
-                  "end": 2053
-                },
-                {
-                  "start": 2061,
-                  "end": 2061
-                },
-                {
-                  "start": 2178,
-                  "end": 2178
-                },
-                {
-                  "start": 2180,
-                  "end": 2180
-                },
-                {
-                  "start": 2276,
-                  "end": 2276
-                },
-                {
-                  "start": 2278,
-                  "end": 2278
-                },
-                {
-                  "start": 2373,
-                  "end": 2373
-                },
-                {
-                  "start": 2375,
-                  "end": 2375
+                  "start": 240,
+                  "end": 340
                 }
               ]
             },
@@ -801,63 +293,11 @@
             "files": [
               "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingUtf8JsonParserBase.java"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncTokenFilterTest.java"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/sym/PlaceholderSymbolTableTest.java",
-              "src/test/java/com/fasterxml/jackson/core/sym/TestSymbolTables.java"
-            ],
             "spans": {
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java": [
+              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingUtf8JsonParserBase.java": [
                 {
-                  "start": 59,
-                  "end": 59
-                },
-                {
-                  "start": 83,
-                  "end": 83
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/sym/TestSymbolTables.java": [
-                {
-                  "start": 52,
-                  "end": 52
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/sym/PlaceholderSymbolTableTest.java": [
-                {
-                  "start": 12,
-                  "end": 12
-                },
-                {
-                  "start": 14,
-                  "end": 14
-                },
-                {
-                  "start": 17,
-                  "end": 17
-                },
-                {
-                  "start": 32,
-                  "end": 32
-                },
-                {
-                  "start": 68,
-                  "end": 68
-                },
-                {
-                  "start": 75,
-                  "end": 75
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -865,317 +305,27 @@
           },
           {
             "files": [
-              "src/test/java/com/fasterxml/jackson/core/BaseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/base64/Base64BinaryParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/base64/Base64Padding912Test.java",
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/JsonParserClosedCaseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/TestRootValues.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNumberDeferredReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncScopeMatchingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/FloatParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/LocationOffsetsTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NextNameParserTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NonStandardNumberParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NonStandardParserFeaturesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberDeferredReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserDupHandlingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserErrorHandlingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserScopeMatchingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/TrailingCommas616Test.java",
-              "src/test/java/com/fasterxml/jackson/core/read/TrailingCommasTest.java",
-              "src/test/java/com/fasterxml/jackson/core/testsupport/MockDataInput.java"
+              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java"
             ],
             "spans": {
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java": [
+              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java": [
                 {
-                  "start": 62,
-                  "end": 62
-                },
-                {
-                  "start": 72,
-                  "end": 72
+                  "start": 452,
+                  "end": 490
                 }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NonStandardNumberParsingTest.java": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncTokenFilterTest.java"
+            ],
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncTokenFilterTest.java": [
                 {
-                  "start": 144,
-                  "end": 144
-                },
-                {
-                  "start": 158,
-                  "end": 158
-                },
-                {
-                  "start": 172,
-                  "end": 172
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java": [
-                {
-                  "start": 64,
-                  "end": 64
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/FloatParsingTest.java": [
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 37,
-                  "end": 37
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 8,
-                  "end": 8
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/ParserScopeMatchingTest.java": [
-                {
-                  "start": 78,
-                  "end": 78
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/ParserDupHandlingTest.java": [
-                {
-                  "start": 52,
-                  "end": 52
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 125,
-                  "end": 125
-                },
-                {
-                  "start": 472,
-                  "end": 472
-                },
-                {
-                  "start": 474,
-                  "end": 474
-                },
-                {
-                  "start": 504,
-                  "end": 504
-                },
-                {
-                  "start": 654,
-                  "end": 654
-                },
-                {
-                  "start": 752,
-                  "end": 752
-                },
-                {
-                  "start": 753,
-                  "end": 753
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/ParserErrorHandlingTest.java": [
-                {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 87,
-                  "end": 87
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NonStandardParserFeaturesTest.java": [
-                {
-                  "start": 36,
-                  "end": 36
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java": [
-                {
-                  "start": 112,
-                  "end": 112
-                },
-                {
-                  "start": 264,
-                  "end": 264
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NumberDeferredReadTest.java": [
-                {
-                  "start": 35,
-                  "end": 35
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NextNameParserTest.java": [
-                {
-                  "start": 20,
-                  "end": 20
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/TrailingCommas616Test.java": [
-                {
-                  "start": 24,
-                  "end": 24
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/TrailingCommasTest.java": [
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 362,
-                  "end": 362
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/LocationOffsetsTest.java": [
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/base64/Base64Padding912Test.java": [
-                {
-                  "start": 21,
-                  "end": 21
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/base64/Base64BinaryParsingTest.java": [
-                {
-                  "start": 251,
-                  "end": 251
-                },
-                {
-                  "start": 315,
-                  "end": 315
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/TestRootValues.java": [
-                {
-                  "start": 80,
-                  "end": 80
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                },
-                {
-                  "start": 122,
-                  "end": 122
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/JsonParserClosedCaseTest.java": [
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 42,
-                  "end": 42
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 90,
-                  "end": 90
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                },
-                {
-                  "start": 134,
-                  "end": 134
-                },
-                {
-                  "start": 135,
-                  "end": 135
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncScopeMatchingTest.java": [
-                {
-                  "start": 59,
-                  "end": 59
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNumberDeferredReadTest.java": [
-                {
-                  "start": 26,
-                  "end": 26
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/BaseTest.java": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 339,
-                  "end": 339
-                },
-                {
-                  "start": 357,
-                  "end": 357
-                },
-                {
-                  "start": 400,
-                  "end": 400
-                },
-                {
-                  "start": 401,
-                  "end": 401
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/testsupport/MockDataInput.java": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 17,
-                  "end": 17
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -1185,67 +335,67 @@
             "files": [
               "src/test/java/com/fasterxml/jackson/core/sym/PlaceholderSymbolTableTest.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/sym/PlaceholderSymbolTableTest.java": [
+                {
+                  "start": 1,
+                  "end": 180
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java": [
+                {
+                  "start": 1,
+                  "end": 150
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/main/java/com/fasterxml/jackson/core/io/DataOutputAsStream.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/io/DataOutputAsStream.java": [
+                {
+                  "start": 1,
+                  "end": 160
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/main/java/com/fasterxml/jackson/core/io/MergedStream.java",
-              "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java",
-              "src/test/java/com/fasterxml/jackson/core/json/InputStreamInitTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/JsonParserClosedCaseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/TestRootValues.java",
-              "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java"
+              "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java"
             ],
             "spans": {
-              "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java": [
+              "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java": [
                 {
-                  "start": 680,
-                  "end": 680
+                  "start": 1760,
+                  "end": 1955
                 }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/TestRootValues.java": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java": [
                 {
-                  "start": 10,
-                  "end": 10
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/InputStreamInitTest.java": [
-                {
-                  "start": 14,
-                  "end": 14
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/JsonParserClosedCaseTest.java": [
-                {
-                  "start": 40,
-                  "end": 40
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java": [
-                {
-                  "start": 242,
-                  "end": 242
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/io/MergedStream.java": [
-                {
-                  "start": 13,
-                  "end": 13
+                  "start": 640,
+                  "end": 815
                 }
               ]
             },
@@ -1255,133 +405,39 @@
             "files": [
               "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/test/java/com/fasterxml/jackson/core/read/ParserFeaturesTest.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/read/ParserFeaturesTest.java": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/test/java/com/fasterxml/jackson/core/async/AsyncTestBase.java"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/test/java/com/fasterxml/jackson/core/TestJDKSerializability.java",
-              "src/test/java/com/fasterxml/jackson/core/format/DataFormatMatcherTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java",
-              "src/test/java/com/fasterxml/jackson/core/util/DefaultIndenterTest.java",
-              "src/test/java/com/fasterxml/jackson/core/util/SeparatorsTest.java"
-            ],
             "spans": {
-              "src/test/java/com/fasterxml/jackson/core/TestJDKSerializability.java": [
+              "src/test/java/com/fasterxml/jackson/core/async/AsyncTestBase.java": [
                 {
-                  "start": 58,
-                  "end": 58
-                },
-                {
-                  "start": 66,
-                  "end": 66
-                },
-                {
-                  "start": 162,
-                  "end": 162
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java": [
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 65,
-                  "end": 65
-                },
-                {
-                  "start": 78,
-                  "end": 78
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
-                {
-                  "start": 134,
-                  "end": 134
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 245,
-                  "end": 245
-                },
-                {
-                  "start": 251,
-                  "end": 251
-                },
-                {
-                  "start": 258,
-                  "end": 258
-                },
-                {
-                  "start": 264,
-                  "end": 264
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/format/DataFormatMatcherTest.java": [
-                {
-                  "start": 59,
-                  "end": 59
-                },
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 61,
-                  "end": 61
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java": [
-                {
-                  "start": 85,
-                  "end": 85
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerTest.java": [
-                {
-                  "start": 124,
-                  "end": 124
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/util/DefaultIndenterTest.java": [
-                {
-                  "start": 22,
-                  "end": 22
-                },
-                {
-                  "start": 33,
-                  "end": 33
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/util/SeparatorsTest.java": [
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 63,
-                  "end": 63
+                  "start": 1,
+                  "end": 160
                 }
               ]
             },
@@ -1391,40 +447,137 @@
             "files": [
               "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java": [
+                {
+                  "start": 40,
+                  "end": 95
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapper.java",
-              "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapperForByteArray.java",
-              "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapperForByteBuffer.java"
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
             ],
             "spans": {
-              "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapper.java": [
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
                 {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 54,
-                  "end": 54
+                  "start": 65,
+                  "end": 110
                 }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapperForByteArray.java": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java"
+            ],
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java": [
                 {
-                  "start": 12,
-                  "end": 12
+                  "start": 1,
+                  "end": 40
                 }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapperForByteBuffer.java": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java"
+            ],
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java": [
                 {
-                  "start": 13,
-                  "end": 13
+                  "start": 1,
+                  "end": 40
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java": [
+                {
+                  "start": 791,
+                  "end": 801
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java": [
+                {
+                  "start": 1934,
+                  "end": 1944
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java"
+            ],
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java": [
+                {
+                  "start": 108,
+                  "end": 170
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
+                {
+                  "start": 1296,
+                  "end": 1334
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
+                {
+                  "start": 1846,
+                  "end": 1856
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java"
+            ],
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java": [
+                {
+                  "start": 40,
+                  "end": 65
                 }
               ]
             },
@@ -1433,1158 +586,58 @@
         ],
         "predFiles": [
           "src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
-          "src/main/java/com/fasterxml/jackson/core/io/DataOutputAsStream.java",
-          "src/main/java/com/fasterxml/jackson/core/io/MergedStream.java",
           "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java",
           "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java",
-          "src/main/java/com/fasterxml/jackson/core/json/UTF8StreamJsonParser.java",
           "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java",
-          "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingUtf8JsonParserBase.java",
           "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java",
-          "src/main/java/com/fasterxml/jackson/core/sym/CharsToNameCanonicalizer.java",
-          "src/test/java/com/fasterxml/jackson/core/BaseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/TestJDKSerializability.java",
-          "src/test/java/com/fasterxml/jackson/core/async/AsyncTestBase.java",
-          "src/test/java/com/fasterxml/jackson/core/base64/Base64BinaryParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/base64/Base64Padding912Test.java",
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java",
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java",
-          "src/test/java/com/fasterxml/jackson/core/format/DataFormatMatcherTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/InputStreamInitTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/JsonParserClosedCaseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/TestRootValues.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncLocationTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNumberDeferredReadTest.java",
           "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncScopeMatchingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncTokenFilterTest.java",
-          "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/FloatParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/LocationOffsetsTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NextNameParserTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NonStandardNumberParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NonStandardParserFeaturesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NumberDeferredReadTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserDupHandlingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserErrorHandlingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserFeaturesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserScopeMatchingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserSymbolHandlingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/TrailingCommas616Test.java",
-          "src/test/java/com/fasterxml/jackson/core/read/TrailingCommasTest.java",
-          "src/test/java/com/fasterxml/jackson/core/sym/PlaceholderSymbolTableTest.java",
-          "src/test/java/com/fasterxml/jackson/core/sym/TestSymbolTables.java",
-          "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapper.java",
-          "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapperForByteArray.java",
-          "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapperForByteBuffer.java",
-          "src/test/java/com/fasterxml/jackson/core/testsupport/MockDataInput.java",
-          "src/test/java/com/fasterxml/jackson/core/util/DefaultIndenterTest.java",
-          "src/test/java/com/fasterxml/jackson/core/util/SeparatorsTest.java"
+          "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java"
         ],
         "predSpans": {
-          "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java": [
-            {
-              "start": 242,
-              "end": 242
-            },
-            {
-              "start": 256,
-              "end": 270
-            },
-            {
-              "start": 263,
-              "end": 263
-            },
-            {
-              "start": 264,
-              "end": 264
-            },
-            {
-              "start": 270,
-              "end": 270
-            }
-          ],
           "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
-            {
-              "start": 78,
-              "end": 78
-            },
-            {
-              "start": 93,
-              "end": 93
-            },
             {
               "start": 1296,
               "end": 1330
             },
             {
-              "start": 1302,
-              "end": 1302
-            },
-            {
-              "start": 1329,
-              "end": 1329
-            },
-            {
-              "start": 1780,
-              "end": 1780
-            },
-            {
-              "start": 1802,
-              "end": 1802
-            },
-            {
               "start": 1846,
               "end": 1854
-            },
-            {
-              "start": 1852,
-              "end": 1852
             }
           ],
-          "src/main/java/com/fasterxml/jackson/core/sym/CharsToNameCanonicalizer.java": [
+          "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java": [
             {
-              "start": 259,
-              "end": 259
+              "start": 256,
+              "end": 270
+            }
+          ],
+          "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java": [
+            {
+              "start": 1770,
+              "end": 1943
+            }
+          ],
+          "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java": [
+            {
+              "start": 643,
+              "end": 800
             }
           ],
           "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java": [
             {
               "start": 362,
               "end": 389
-            },
-            {
-              "start": 371,
-              "end": 371
-            },
-            {
-              "start": 381,
-              "end": 381
-            },
-            {
-              "start": 382,
-              "end": 382
-            },
-            {
-              "start": 472,
-              "end": 472
-            },
-            {
-              "start": 569,
-              "end": 569
-            },
-            {
-              "start": 601,
-              "end": 601
-            },
-            {
-              "start": 631,
-              "end": 631
-            },
-            {
-              "start": 659,
-              "end": 659
-            },
-            {
-              "start": 668,
-              "end": 668
-            },
-            {
-              "start": 670,
-              "end": 670
-            },
-            {
-              "start": 672,
-              "end": 672
-            },
-            {
-              "start": 873,
-              "end": 873
-            },
-            {
-              "start": 893,
-              "end": 893
-            },
-            {
-              "start": 921,
-              "end": 921
-            },
-            {
-              "start": 943,
-              "end": 943
-            },
-            {
-              "start": 1289,
-              "end": 1289
-            },
-            {
-              "start": 1294,
-              "end": 1294
-            },
-            {
-              "start": 1300,
-              "end": 1300
-            },
-            {
-              "start": 1309,
-              "end": 1309
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/async/AsyncTestBase.java": [
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 31,
-              "end": 31
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncLocationTest.java": [
-            {
-              "start": 17,
-              "end": 17
-            },
-            {
-              "start": 44,
-              "end": 44
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncTokenFilterTest.java": [
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 59,
-              "end": 59
-            },
-            {
-              "start": 81,
-              "end": 81
-            },
-            {
-              "start": 102,
-              "end": 102
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java": [
-            {
-              "start": 185,
-              "end": 185
-            },
-            {
-              "start": 1323,
-              "end": 1323
-            },
-            {
-              "start": 1328,
-              "end": 1328
-            },
-            {
-              "start": 1333,
-              "end": 1333
-            },
-            {
-              "start": 1338,
-              "end": 1338
-            },
-            {
-              "start": 1356,
-              "end": 1356
-            },
-            {
-              "start": 1364,
-              "end": 1364
-            },
-            {
-              "start": 1372,
-              "end": 1372
-            },
-            {
-              "start": 1380,
-              "end": 1380
-            },
-            {
-              "start": 1395,
-              "end": 1395
-            },
-            {
-              "start": 1403,
-              "end": 1403
-            },
-            {
-              "start": 1411,
-              "end": 1411
-            },
-            {
-              "start": 1419,
-              "end": 1419
-            },
-            {
-              "start": 1440,
-              "end": 1440
-            },
-            {
-              "start": 1449,
-              "end": 1449
-            },
-            {
-              "start": 1458,
-              "end": 1458
-            },
-            {
-              "start": 1467,
-              "end": 1467
-            },
-            {
-              "start": 1583,
-              "end": 1583
-            },
-            {
-              "start": 1585,
-              "end": 1585
-            },
-            {
-              "start": 1657,
-              "end": 1657
-            },
-            {
-              "start": 1659,
-              "end": 1659
-            },
-            {
-              "start": 1757,
-              "end": 1757
-            },
-            {
-              "start": 1759,
-              "end": 1759
-            },
-            {
-              "start": 1770,
-              "end": 1770
-            },
-            {
-              "start": 1770,
-              "end": 1943
-            },
-            {
-              "start": 1775,
-              "end": 1775
-            },
-            {
-              "start": 1781,
-              "end": 1781
-            },
-            {
-              "start": 1784,
-              "end": 1784
-            },
-            {
-              "start": 1789,
-              "end": 1789
-            },
-            {
-              "start": 1796,
-              "end": 1796
-            },
-            {
-              "start": 1799,
-              "end": 1799
-            },
-            {
-              "start": 1803,
-              "end": 1803
-            },
-            {
-              "start": 1811,
-              "end": 1811
-            },
-            {
-              "start": 1814,
-              "end": 1814
-            },
-            {
-              "start": 1821,
-              "end": 1821
-            },
-            {
-              "start": 1823,
-              "end": 1823
-            },
-            {
-              "start": 1834,
-              "end": 1834
-            },
-            {
-              "start": 1940,
-              "end": 1940
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/json/UTF8StreamJsonParser.java": [
-            {
-              "start": 309,
-              "end": 309
-            },
-            {
-              "start": 1828,
-              "end": 1828
-            },
-            {
-              "start": 1833,
-              "end": 1833
-            },
-            {
-              "start": 1838,
-              "end": 1838
-            },
-            {
-              "start": 1843,
-              "end": 1843
-            },
-            {
-              "start": 1862,
-              "end": 1862
-            },
-            {
-              "start": 1870,
-              "end": 1870
-            },
-            {
-              "start": 1878,
-              "end": 1878
-            },
-            {
-              "start": 1886,
-              "end": 1886
-            },
-            {
-              "start": 1903,
-              "end": 1903
-            },
-            {
-              "start": 1911,
-              "end": 1911
-            },
-            {
-              "start": 1919,
-              "end": 1919
-            },
-            {
-              "start": 1927,
-              "end": 1927
-            },
-            {
-              "start": 1949,
-              "end": 1949
-            },
-            {
-              "start": 1958,
-              "end": 1958
-            },
-            {
-              "start": 1967,
-              "end": 1967
-            },
-            {
-              "start": 1976,
-              "end": 1976
-            },
-            {
-              "start": 2115,
-              "end": 2115
-            },
-            {
-              "start": 2117,
-              "end": 2117
-            },
-            {
-              "start": 2195,
-              "end": 2195
-            },
-            {
-              "start": 2197,
-              "end": 2197
-            },
-            {
-              "start": 2300,
-              "end": 2300
-            },
-            {
-              "start": 2302,
-              "end": 2302
-            },
-            {
-              "start": 2313,
-              "end": 2313
-            },
-            {
-              "start": 2318,
-              "end": 2318
-            },
-            {
-              "start": 2324,
-              "end": 2324
-            },
-            {
-              "start": 2327,
-              "end": 2327
-            },
-            {
-              "start": 2332,
-              "end": 2332
-            },
-            {
-              "start": 2339,
-              "end": 2339
-            },
-            {
-              "start": 2342,
-              "end": 2342
-            },
-            {
-              "start": 2346,
-              "end": 2346
-            },
-            {
-              "start": 2354,
-              "end": 2354
-            },
-            {
-              "start": 2357,
-              "end": 2357
-            },
-            {
-              "start": 2364,
-              "end": 2364
-            },
-            {
-              "start": 2366,
-              "end": 2366
-            },
-            {
-              "start": 2376,
-              "end": 2376
-            },
-            {
-              "start": 2482,
-              "end": 2482
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java": [
-            {
-              "start": 307,
-              "end": 307
-            },
-            {
-              "start": 643,
-              "end": 643
-            },
-            {
-              "start": 643,
-              "end": 800
-            },
-            {
-              "start": 648,
-              "end": 648
-            },
-            {
-              "start": 654,
-              "end": 654
-            },
-            {
-              "start": 657,
-              "end": 657
-            },
-            {
-              "start": 662,
-              "end": 662
-            },
-            {
-              "start": 669,
-              "end": 669
-            },
-            {
-              "start": 672,
-              "end": 672
-            },
-            {
-              "start": 676,
-              "end": 676
-            },
-            {
-              "start": 684,
-              "end": 684
-            },
-            {
-              "start": 691,
-              "end": 691
-            },
-            {
-              "start": 797,
-              "end": 797
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingUtf8JsonParserBase.java": [
-            {
-              "start": 1954,
-              "end": 1954
-            },
-            {
-              "start": 1960,
-              "end": 1960
-            },
-            {
-              "start": 1966,
-              "end": 1966
-            },
-            {
-              "start": 1972,
-              "end": 1972
-            },
-            {
-              "start": 2003,
-              "end": 2003
-            },
-            {
-              "start": 2009,
-              "end": 2009
-            },
-            {
-              "start": 2015,
-              "end": 2015
-            },
-            {
-              "start": 2021,
-              "end": 2021
-            },
-            {
-              "start": 2035,
-              "end": 2035
-            },
-            {
-              "start": 2044,
-              "end": 2044
-            },
-            {
-              "start": 2053,
-              "end": 2053
-            },
-            {
-              "start": 2061,
-              "end": 2061
-            },
-            {
-              "start": 2178,
-              "end": 2178
-            },
-            {
-              "start": 2180,
-              "end": 2180
-            },
-            {
-              "start": 2276,
-              "end": 2276
-            },
-            {
-              "start": 2278,
-              "end": 2278
-            },
-            {
-              "start": 2373,
-              "end": 2373
-            },
-            {
-              "start": 2375,
-              "end": 2375
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java": [
-            {
-              "start": 59,
-              "end": 59
-            },
-            {
-              "start": 83,
-              "end": 83
-            },
-            {
-              "start": 85,
-              "end": 85
-            },
-            {
-              "start": 111,
-              "end": 169
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/sym/TestSymbolTables.java": [
-            {
-              "start": 52,
-              "end": 52
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/sym/PlaceholderSymbolTableTest.java": [
-            {
-              "start": 12,
-              "end": 12
-            },
-            {
-              "start": 14,
-              "end": 14
-            },
-            {
-              "start": 17,
-              "end": 17
-            },
-            {
-              "start": 32,
-              "end": 32
-            },
-            {
-              "start": 68,
-              "end": 68
-            },
-            {
-              "start": 75,
-              "end": 75
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java": [
-            {
-              "start": 62,
-              "end": 62
-            },
-            {
-              "start": 72,
-              "end": 72
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NonStandardNumberParsingTest.java": [
-            {
-              "start": 144,
-              "end": 144
-            },
-            {
-              "start": 158,
-              "end": 158
-            },
-            {
-              "start": 172,
-              "end": 172
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java": [
-            {
-              "start": 64,
-              "end": 64
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/FloatParsingTest.java": [
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 37,
-              "end": 37
             }
           ],
           "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 8,
-              "end": 8
-            },
             {
               "start": 43,
               "end": 60
             }
           ],
-          "src/test/java/com/fasterxml/jackson/core/read/ParserScopeMatchingTest.java": [
+          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java": [
             {
-              "start": 78,
-              "end": 78
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/ParserDupHandlingTest.java": [
-            {
-              "start": 52,
-              "end": 52
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 65,
-              "end": 65
-            },
-            {
-              "start": 78,
-              "end": 78
-            },
-            {
-              "start": 125,
-              "end": 125
-            },
-            {
-              "start": 472,
-              "end": 472
-            },
-            {
-              "start": 474,
-              "end": 474
-            },
-            {
-              "start": 504,
-              "end": 504
-            },
-            {
-              "start": 654,
-              "end": 654
-            },
-            {
-              "start": 680,
-              "end": 680
-            },
-            {
-              "start": 752,
-              "end": 752
-            },
-            {
-              "start": 753,
-              "end": 753
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/ParserErrorHandlingTest.java": [
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 87,
-              "end": 87
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NonStandardParserFeaturesTest.java": [
-            {
-              "start": 36,
-              "end": 36
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java": [
-            {
-              "start": 112,
-              "end": 112
-            },
-            {
-              "start": 264,
-              "end": 264
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NumberDeferredReadTest.java": [
-            {
-              "start": 35,
-              "end": 35
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NextNameParserTest.java": [
-            {
-              "start": 20,
-              "end": 20
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/TrailingCommas616Test.java": [
-            {
-              "start": 24,
-              "end": 24
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/TrailingCommasTest.java": [
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 362,
-              "end": 362
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/LocationOffsetsTest.java": [
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 118,
-              "end": 118
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/base64/Base64Padding912Test.java": [
-            {
-              "start": 21,
-              "end": 21
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/base64/Base64BinaryParsingTest.java": [
-            {
-              "start": 251,
-              "end": 251
-            },
-            {
-              "start": 315,
-              "end": 315
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/TestRootValues.java": [
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 80,
-              "end": 80
-            },
-            {
-              "start": 103,
-              "end": 103
-            },
-            {
-              "start": 122,
-              "end": 122
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/JsonParserClosedCaseTest.java": [
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 40,
-              "end": 40
-            },
-            {
-              "start": 42,
-              "end": 42
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 90,
-              "end": 90
-            },
-            {
-              "start": 91,
-              "end": 91
-            },
-            {
-              "start": 134,
-              "end": 134
-            },
-            {
-              "start": 135,
-              "end": 135
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncScopeMatchingTest.java": [
-            {
-              "start": 59,
-              "end": 59
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNumberDeferredReadTest.java": [
-            {
-              "start": 26,
-              "end": 26
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/BaseTest.java": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 339,
-              "end": 339
-            },
-            {
-              "start": 357,
-              "end": 357
-            },
-            {
-              "start": 400,
-              "end": 400
-            },
-            {
-              "start": 401,
-              "end": 401
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/testsupport/MockDataInput.java": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 17,
-              "end": 17
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/InputStreamInitTest.java": [
-            {
-              "start": 14,
-              "end": 14
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/io/MergedStream.java": [
-            {
-              "start": 13,
-              "end": 13
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/TestJDKSerializability.java": [
-            {
-              "start": 58,
-              "end": 58
-            },
-            {
-              "start": 66,
-              "end": 66
-            },
-            {
-              "start": 162,
-              "end": 162
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
-            {
-              "start": 134,
-              "end": 134
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 245,
-              "end": 245
-            },
-            {
-              "start": 251,
-              "end": 251
-            },
-            {
-              "start": 258,
-              "end": 258
-            },
-            {
-              "start": 264,
-              "end": 264
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/format/DataFormatMatcherTest.java": [
-            {
-              "start": 59,
-              "end": 59
-            },
-            {
-              "start": 60,
-              "end": 60
-            },
-            {
-              "start": 61,
-              "end": 61
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/jsonptr/JsonPointerTest.java": [
-            {
-              "start": 124,
-              "end": 124
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/util/DefaultIndenterTest.java": [
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 33,
-              "end": 33
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/util/SeparatorsTest.java": [
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 63,
-              "end": 63
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapper.java": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 54,
-              "end": 54
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapperForByteArray.java": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/testsupport/AsyncReaderWrapperForByteBuffer.java": [
-            {
-              "start": 13,
-              "end": 13
+              "start": 111,
+              "end": 169
             }
           ]
         },
@@ -2619,135 +672,135 @@
             "step": 1,
             "coverage": {
               "file": 0.25,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.18181818181818182,
+              "span": 0.12666469369635988,
+              "line": 0.09210526315789473
             }
           },
           {
             "step": 2,
             "coverage": {
               "file": 0.25,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.36363636363636365,
+              "span": 0.3950873039360758,
+              "line": 0.34210526315789475
             }
           },
           {
             "step": 3,
             "coverage": {
               "file": 0.25,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.36363636363636365,
+              "span": 0.3950873039360758,
+              "line": 0.34210526315789475
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.25,
+              "symbol": 0.36363636363636365,
+              "span": 0.3950873039360758,
+              "line": 0.34210526315789475
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.75,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.45454545454545453,
+              "span": 0.3950873039360758,
+              "line": 0.34210526315789475
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 0.75,
-              "symbol": 0.5454545454545454,
-              "span": 0.15448357502219592,
-              "line": 0.07894736842105263
+              "symbol": 0.7272727272727273,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 0.75,
-              "symbol": 0.5454545454545454,
-              "span": 0.15448357502219592,
-              "line": 0.07894736842105263
+              "symbol": 0.7272727272727273,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 8,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.5454545454545454,
-              "span": 0.15448357502219592,
-              "line": 0.07894736842105263
+              "file": 0.75,
+              "symbol": 0.7272727272727273,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 0.8181818181818182,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 0.8181818181818182,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 0.8181818181818182,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 0.8181818181818182,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 0.8181818181818182,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 14,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 0.8181818181818182,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 15,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 0.8181818181818182,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
@@ -2755,85 +808,148 @@
             "coverage": {
               "file": 1.0,
               "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "span": 0.9052974252737497,
+              "line": 0.868421052631579
             }
           },
           {
             "step": 17,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 18,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 19,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 20,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 21,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 22,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 23,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9090909090909091,
-              "span": 0.18762947617638354,
-              "line": 0.10526315789473684
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 24,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 25,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 26,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 27,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 28,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 29,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 30,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.8478260869565217,
-          "symbol": 0.6640316205533594,
-          "span": 0.14251708120488435,
-          "line": 0.0789473684210526
+          "file": 0.8583333333333333,
+          "symbol": 0.8181818181818182,
+          "span": 0.8239419946729801,
+          "line": 0.7899122807017543
         },
         "redundancy": {
-          "file": 0.26388888888888884,
-          "symbol": 0.053763440860215006,
-          "span": 0.004736129905277386,
-          "line": 0.004115226337448541
+          "file": 0.5,
+          "symbol": 0.21250000000000002,
+          "span": 0.12610670064360152,
+          "line": 0.10042219541616404
         }
       },
       "fixOverlap": {
@@ -3090,7 +1206,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/test/java/com/fasterxml/jackson/core/json/async/AsyncParserNamesTest.java",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "todo_list",
@@ -3269,9 +1408,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-19T04:36:19Z",
       "completedAt": "2026-05-19T04:41:27Z",
       "durationMs": 307582,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 2023296,
@@ -3280,6 +1434,28 @@
         "total_tokens": 2036995,
         "cache_read_input_tokens": 1895040
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 40,
+        "readToolCalls": 0,
+        "editToolCalls": 4
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/main/java/com/fasterxml/jackson/core/JsonFactory.java b/src/main/java/com/fasterxml/jackson/core/JsonFactory.java\nindex bff4efba..1427ba50 100644\n--- a/src/main/java/com/fasterxml/jackson/core/JsonFactory.java\n+++ b/src/main/java/com/fasterxml/jackson/core/JsonFactory.java\n@@ -1299,7 +1299,7 @@ public class JsonFactory\n         //   for non-JSON input:\n         _requireJSONFactory(\"Non-blocking source not (yet?) supported for this format (%s)\");\n         IOContext ctxt = _createNonBlockingContext(null);\n-        ByteQuadsCanonicalizer can = _byteSymbolCanonicalizer.makeChild(_factoryFeatures);\n+        ByteQuadsCanonicalizer can = _byteSymbolCanonicalizer.makeChildOrPlaceholder(_factoryFeatures);\n         return new NonBlockingJsonParser(ctxt, _parserFeatures, can);\n     }\n \n@@ -1326,7 +1326,7 @@ public class JsonFactory\n         //   for non-JSON input:\n         _requireJSONFactory(\"Non-blocking source not (yet?) supported for this format (%s)\");\n         IOContext ctxt = _createNonBlockingContext(null);\n-        ByteQuadsCanonicalizer can = _byteSymbolCanonicalizer.makeChild(_factoryFeatures);\n+        ByteQuadsCanonicalizer can = _byteSymbolCanonicalizer.makeChildOrPlaceholder(_factoryFeatures);\n         return new NonBlockingByteBufferJsonParser(ctxt, _parserFeatures, can);\n     }\n \n@@ -1849,7 +1849,7 @@ public class JsonFactory\n         // Also: while we can't do full bootstrapping (due to read-ahead limitations), should\n         // at least handle possible UTF-8 BOM\n         int firstByte = ByteSourceJsonBootstrapper.skipUTF8BOM(input);\n-        ByteQuadsCanonicalizer can = _byteSymbolCanonicalizer.makeChild(_factoryFeatures);\n+        ByteQuadsCanonicalizer can = _byteSymbolCanonicalizer.makeChildOrPlaceholder(_factoryFeatures);\n         return new UTF8DataInputJsonParser(ctxt, _parserFeatures, input,\n                 _objectCodec, can, firstByte);\n     }\ndiff --git a/src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java b/src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java\nindex 24ba3101..c207529b 100644\n--- a/src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java\n+++ b/src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java\n@@ -1933,6 +1933,9 @@ public class UTF8DataInputJsonParser\n \n         // Ok. Now we have the character array, and can construct the String\n         String baseName = new String(cbuf, 0, cix);\n+        if (!_symbols.isCanonicalizing()) {\n+            return baseName;\n+        }\n         // And finally, un-align if necessary\n         if (lastQuadBytes < 4) {\n             quads[qlen-1] = lastQuad;\ndiff --git a/src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java b/src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java\nindex 05adcf5c..d64a923e 100644\n--- a/src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java\n+++ b/src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java\n@@ -790,6 +790,9 @@ public abstract class NonBlockingJsonParserBase\n \n         // Ok. Now we have the character array, and can construct the String\n         String baseName = new String(cbuf, 0, cix);\n+        if (!_symbols.isCanonicalizing()) {\n+            return baseName;\n+        }\n         // And finally, un-align if necessary\n         if (lastQuadBytes < 4) {\n             quads[qlen-1] = lastQuad;\ndiff --git a/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java b/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java\nindex 65a364a2..0ad4f8b7 100644\n--- a/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java\n+++ b/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java\n@@ -1,9 +1,11 @@\n package com.fasterxml.jackson.core.json;\n \n import java.io.*;\n+import java.nio.charset.StandardCharsets;\n import java.util.Iterator;\n \n import com.fasterxml.jackson.core.*;\n+import com.fasterxml.jackson.core.json.async.NonBlockingJsonParser;\n import com.fasterxml.jackson.core.type.ResolvedType;\n import com.fasterxml.jackson.core.type.TypeReference;\n \n@@ -288,4 +290,60 @@ public class JsonFactoryTest\n         g.close();\n         assertEquals(\"1/2/3\", w.toString());\n     }\n+\n+    public void testCanonicalizationEnabled() throws Exception {\n+        _testCanonicalization(true);\n+    }\n+\n+    public void testCanonicalizationDisabled() throws Exception {\n+        _testCanonicalization(false);\n+    }\n+\n+    private void _testCanonicalization(boolean canonicalize) throws Exception\n+    {\n+        final String content = \"{\\\"a\\\":true,\\\"a\\\":true}\";\n+        final byte[] utf8 = content.getBytes(StandardCharsets.UTF_8);\n+        JsonFactory factory = JsonFactory.builder()\n+                .configure(JsonFactory.Feature.CANONICALIZE_FIELD_NAMES, canonicalize)\n+                .build();\n+\n+        try (JsonParser parser = factory.createParser(content)) {\n+            _verifyCanonicalization(parser, canonicalize);\n+        }\n+        try (JsonParser parser = factory.createParser(utf8)) {\n+            _verifyCanonicalization(parser, canonicalize);\n+        }\n+        try (JsonParser parser = factory.createParser(new ByteArrayInputStream(utf8))) {\n+            _verifyCanonicalization(parser, canonicalize);\n+        }\n+        try (JsonParser parser = factory.createParser(new StringReader(content))) {\n+            _verifyCanonicalization(parser, canonicalize);\n+        }\n+        try (JsonParser parser = factory.createParser(\n+                (DataInput) new DataInputStream(new ByteArrayInputStream(utf8)))) {\n+            _verifyCanonicalization(parser, canonicalize);\n+        }\n+        try (NonBlockingJsonParser parser = (NonBlockingJsonParser) factory.createNonBlockingByteArrayParser()) {\n+            parser.feedInput(utf8, 0, utf8.length);\n+            parser.endOfInput();\n+            _verifyCanonicalization(parser, canonicalize);\n+        }\n+    }\n+\n+    private void _verifyCanonicalization(JsonParser parser, boolean canonicalize) throws Exception\n+    {\n+        assertToken(JsonToken.START_OBJECT, parser.nextToken());\n+        String field1 = parser.nextFieldName();\n+        assertEquals(\"a\", field1);\n+        assertToken(JsonToken.VALUE_TRUE, parser.nextToken());\n+        String field2 = parser.nextFieldName();\n+        assertEquals(\"a\", field2);\n+        if (canonicalize) {\n+            assertSame(field1, field2);\n+        } else {\n+            assertNotSame(field1, field2);\n+        }\n+        assertToken(JsonToken.VALUE_TRUE, parser.nextToken());\n+        assertToken(JsonToken.END_OBJECT, parser.nextToken());\n+    }\n }\n",
       "finalOutput": {
         "status": "completed",
@@ -3370,25 +1546,46 @@
             "files": [
               "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
+                {
+                  "start": 1180,
+                  "end": 1560
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java"
             ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java": [
+                {
+                  "start": 220,
+                  "end": 330
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
+            ],
             "spans": {},
             "symbols": {}
           },
           {
             "files": [
-              "src/test/java/com/fasterxml/jackson/core/TestJDKSerializability.java"
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
             ],
             "spans": {
-              "src/test/java/com/fasterxml/jackson/core/TestJDKSerializability.java": [
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
                 {
-                  "start": 187,
-                  "end": 187
+                  "start": 1840,
+                  "end": 2010
                 }
               ]
             },
@@ -3401,24 +1598,50 @@
             "spans": {
               "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
                 {
-                  "start": 1302,
-                  "end": 1302
-                },
+                  "start": 2010,
+                  "end": 2095
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
                 {
-                  "start": 1329,
-                  "end": 1329
-                },
+                  "start": 1728,
+                  "end": 1855
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java": [
                 {
-                  "start": 1780,
-                  "end": 1780
-                },
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java": [
                 {
-                  "start": 1802,
-                  "end": 1802
-                },
-                {
-                  "start": 1852,
-                  "end": 1852
+                  "start": 260,
+                  "end": 420
                 }
               ]
             },
@@ -3435,344 +1658,11 @@
             "files": [
               "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java",
-              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java",
-              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingUtf8JsonParserBase.java"
-            ],
             "spans": {
-              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java": [
-                {
-                  "start": 147,
-                  "end": 147
-                },
-                {
-                  "start": 259,
-                  "end": 259
-                },
-                {
-                  "start": 290,
-                  "end": 290
-                },
-                {
-                  "start": 300,
-                  "end": 300
-                },
-                {
-                  "start": 303,
-                  "end": 303
-                },
-                {
-                  "start": 305,
-                  "end": 305
-                },
-                {
-                  "start": 307,
-                  "end": 307
-                },
-                {
-                  "start": 643,
-                  "end": 643
-                },
-                {
-                  "start": 648,
-                  "end": 648
-                },
-                {
-                  "start": 654,
-                  "end": 654
-                },
-                {
-                  "start": 657,
-                  "end": 657
-                },
-                {
-                  "start": 662,
-                  "end": 662
-                },
-                {
-                  "start": 669,
-                  "end": 669
-                },
-                {
-                  "start": 672,
-                  "end": 672
-                },
-                {
-                  "start": 676,
-                  "end": 676
-                },
-                {
-                  "start": 684,
-                  "end": 684
-                },
-                {
-                  "start": 691,
-                  "end": 691
-                },
-                {
-                  "start": 797,
-                  "end": 797
-                }
-              ],
-              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingUtf8JsonParserBase.java": [
-                {
-                  "start": 1954,
-                  "end": 1954
-                },
-                {
-                  "start": 1960,
-                  "end": 1960
-                },
-                {
-                  "start": 1966,
-                  "end": 1966
-                },
-                {
-                  "start": 1972,
-                  "end": 1972
-                },
-                {
-                  "start": 2003,
-                  "end": 2003
-                },
-                {
-                  "start": 2009,
-                  "end": 2009
-                },
-                {
-                  "start": 2015,
-                  "end": 2015
-                },
-                {
-                  "start": 2021,
-                  "end": 2021
-                },
-                {
-                  "start": 2035,
-                  "end": 2035
-                },
-                {
-                  "start": 2044,
-                  "end": 2044
-                },
-                {
-                  "start": 2053,
-                  "end": 2053
-                },
-                {
-                  "start": 2061,
-                  "end": 2061
-                },
-                {
-                  "start": 2178,
-                  "end": 2178
-                },
-                {
-                  "start": 2180,
-                  "end": 2180
-                },
-                {
-                  "start": 2276,
-                  "end": 2276
-                },
-                {
-                  "start": 2278,
-                  "end": 2278
-                },
-                {
-                  "start": 2373,
-                  "end": 2373
-                },
-                {
-                  "start": 2375,
-                  "end": 2375
-                }
-              ],
               "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java": [
                 {
-                  "start": 78,
-                  "end": 78
-                },
-                {
-                  "start": 129,
-                  "end": 129
-                },
-                {
-                  "start": 156,
-                  "end": 156
-                },
-                {
-                  "start": 175,
-                  "end": 175
-                },
-                {
-                  "start": 181,
-                  "end": 181
-                },
-                {
-                  "start": 183,
-                  "end": 183
-                },
-                {
-                  "start": 185,
-                  "end": 185
-                },
-                {
-                  "start": 451,
-                  "end": 451
-                },
-                {
-                  "start": 606,
-                  "end": 606
-                },
-                {
-                  "start": 1323,
-                  "end": 1323
-                },
-                {
-                  "start": 1328,
-                  "end": 1328
-                },
-                {
-                  "start": 1333,
-                  "end": 1333
-                },
-                {
-                  "start": 1338,
-                  "end": 1338
-                },
-                {
-                  "start": 1356,
-                  "end": 1356
-                },
-                {
-                  "start": 1364,
-                  "end": 1364
-                },
-                {
-                  "start": 1372,
-                  "end": 1372
-                },
-                {
-                  "start": 1380,
-                  "end": 1380
-                },
-                {
-                  "start": 1395,
-                  "end": 1395
-                },
-                {
-                  "start": 1403,
-                  "end": 1403
-                },
-                {
-                  "start": 1411,
-                  "end": 1411
-                },
-                {
-                  "start": 1419,
-                  "end": 1419
-                },
-                {
-                  "start": 1440,
-                  "end": 1440
-                },
-                {
-                  "start": 1449,
-                  "end": 1449
-                },
-                {
-                  "start": 1458,
-                  "end": 1458
-                },
-                {
-                  "start": 1467,
-                  "end": 1467
-                },
-                {
-                  "start": 1583,
-                  "end": 1583
-                },
-                {
-                  "start": 1585,
-                  "end": 1585
-                },
-                {
-                  "start": 1657,
-                  "end": 1657
-                },
-                {
-                  "start": 1659,
-                  "end": 1659
-                },
-                {
-                  "start": 1757,
-                  "end": 1757
-                },
-                {
-                  "start": 1759,
-                  "end": 1759
-                },
-                {
-                  "start": 1770,
-                  "end": 1770
-                },
-                {
-                  "start": 1775,
-                  "end": 1775
-                },
-                {
-                  "start": 1781,
-                  "end": 1781
-                },
-                {
-                  "start": 1784,
-                  "end": 1784
-                },
-                {
-                  "start": 1789,
-                  "end": 1789
-                },
-                {
-                  "start": 1796,
-                  "end": 1796
-                },
-                {
-                  "start": 1799,
-                  "end": 1799
-                },
-                {
-                  "start": 1803,
-                  "end": 1803
-                },
-                {
-                  "start": 1811,
-                  "end": 1811
-                },
-                {
-                  "start": 1814,
-                  "end": 1814
-                },
-                {
-                  "start": 1821,
-                  "end": 1821
-                },
-                {
-                  "start": 1823,
-                  "end": 1823
-                },
-                {
-                  "start": 1834,
-                  "end": 1834
-                },
-                {
-                  "start": 1940,
-                  "end": 1940
+                  "start": 1,
+                  "end": 240
                 }
               ]
             },
@@ -3782,371 +1672,77 @@
             "files": [
               "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java": [
+                {
+                  "start": 1,
+                  "end": 340
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/test/java/com/fasterxml/jackson/core/sym/PlaceholderSymbolTableTest.java"
             ],
-            "spans": {},
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/sym/PlaceholderSymbolTableTest.java": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/test/java/com/fasterxml/jackson/core/BaseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/async/AsyncTestBase.java",
-              "src/test/java/com/fasterxml/jackson/core/base64/Base64BinaryParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/base64/Base64Padding912Test.java",
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/JsonParserClosedCaseTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/TestRootValues.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncLocationTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNumberDeferredReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncScopeMatchingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncTokenFilterTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/FloatParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/LocationOffsetsTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NextNameParserTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NonStandardNumberParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NonStandardParserFeaturesTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberDeferredReadTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserDupHandlingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserErrorHandlingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/ParserScopeMatchingTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java",
-              "src/test/java/com/fasterxml/jackson/core/read/TrailingCommas616Test.java",
-              "src/test/java/com/fasterxml/jackson/core/read/TrailingCommasTest.java",
-              "src/test/java/com/fasterxml/jackson/core/testsupport/MockDataInput.java",
-              "src/test/java/com/fasterxml/jackson/failing/ParserErrorHandling105Test.java",
-              "src/test/java/com/fasterxml/jackson/failing/async/AsyncTokenErrorTest.java"
+              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java"
             ],
             "spans": {
-              "src/test/java/com/fasterxml/jackson/failing/ParserErrorHandling105Test.java": [
+              "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java": [
                 {
-                  "start": 12,
-                  "end": 12
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/failing/async/AsyncTokenErrorTest.java": [
-                {
-                  "start": 52,
-                  "end": 52
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/TestRootValues.java": [
-                {
-                  "start": 80,
-                  "end": 80
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                },
-                {
-                  "start": 122,
-                  "end": 122
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/async/AsyncTestBase.java": [
-                {
-                  "start": 23,
-                  "end": 23
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/base64/Base64Padding912Test.java": [
-                {
-                  "start": 21,
-                  "end": 21
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/base64/Base64BinaryParsingTest.java": [
-                {
-                  "start": 251,
-                  "end": 251
-                },
-                {
-                  "start": 315,
-                  "end": 315
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NonStandardNumberParsingTest.java": [
-                {
-                  "start": 144,
-                  "end": 144
-                },
-                {
-                  "start": 158,
-                  "end": 158
-                },
-                {
-                  "start": 172,
-                  "end": 172
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/FloatParsingTest.java": [
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 37,
-                  "end": 37
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 8,
-                  "end": 8
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/ParserScopeMatchingTest.java": [
-                {
-                  "start": 78,
-                  "end": 78
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/ParserDupHandlingTest.java": [
-                {
-                  "start": 52,
-                  "end": 52
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java": [
-                {
-                  "start": 4,
-                  "end": 4
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 125,
-                  "end": 125
-                },
-                {
-                  "start": 472,
-                  "end": 472
-                },
-                {
-                  "start": 474,
-                  "end": 474
-                },
-                {
-                  "start": 504,
-                  "end": 504
-                },
-                {
-                  "start": 654,
-                  "end": 654
-                },
-                {
-                  "start": 752,
-                  "end": 752
-                },
-                {
-                  "start": 753,
-                  "end": 753
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncLocationTest.java": [
-                {
-                  "start": 17,
-                  "end": 17
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncTokenFilterTest.java": [
-                {
-                  "start": 36,
-                  "end": 36
-                },
-                {
-                  "start": 81,
-                  "end": 81
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncScopeMatchingTest.java": [
-                {
-                  "start": 59,
-                  "end": 59
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNumberDeferredReadTest.java": [
-                {
-                  "start": 26,
-                  "end": 26
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/ParserErrorHandlingTest.java": [
-                {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 87,
-                  "end": 87
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java": [
-                {
-                  "start": 112,
-                  "end": 112
-                },
-                {
-                  "start": 264,
-                  "end": 264
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NonStandardParserFeaturesTest.java": [
-                {
-                  "start": 36,
-                  "end": 36
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NumberDeferredReadTest.java": [
-                {
-                  "start": 35,
-                  "end": 35
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java": [
-                {
-                  "start": 64,
-                  "end": 64
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/NextNameParserTest.java": [
-                {
-                  "start": 20,
-                  "end": 20
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/TrailingCommas616Test.java": [
-                {
-                  "start": 24,
-                  "end": 24
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/TrailingCommasTest.java": [
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 362,
-                  "end": 362
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/read/LocationOffsetsTest.java": [
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 118,
-                  "end": 118
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/json/JsonParserClosedCaseTest.java": [
-                {
-                  "start": 11,
-                  "end": 11
-                },
-                {
-                  "start": 42,
-                  "end": 42
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/BaseTest.java": [
-                {
-                  "start": 7,
-                  "end": 7
-                },
-                {
-                  "start": 44,
-                  "end": 44
-                },
-                {
-                  "start": 339,
-                  "end": 339
-                },
-                {
-                  "start": 357,
-                  "end": 357
-                },
-                {
-                  "start": 400,
-                  "end": 400
-                },
-                {
-                  "start": 401,
-                  "end": 401
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/testsupport/MockDataInput.java": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 9,
-                  "end": 9
-                },
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 17,
-                  "end": 17
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java": [
-                {
-                  "start": 5,
-                  "end": 5
-                },
-                {
-                  "start": 6,
-                  "end": 6
-                },
-                {
-                  "start": 90,
-                  "end": 90
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                },
-                {
-                  "start": 134,
-                  "end": 134
-                },
-                {
-                  "start": 135,
-                  "end": 135
-                }
-              ],
-              "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java": [
-                {
-                  "start": 62,
-                  "end": 62
-                },
-                {
-                  "start": 72,
-                  "end": 72
+                  "start": 640,
+                  "end": 810
                 }
               ]
             },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java": [
+                {
+                  "start": 1760,
+                  "end": 1965
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java"
+            ],
+            "spans": {
+              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
+                {
+                  "start": 1,
+                  "end": 360
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "pom.xml"
+            ],
+            "spans": {},
             "symbols": {}
           },
           {
@@ -4158,27 +1754,41 @@
           },
           {
             "files": [
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java"
+            ],
+            "spans": {
+              "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
+                {
+                  "start": 1294,
+                  "end": 1855
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
               "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java",
               "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java",
-              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java"
+              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java"
             ],
             "spans": {
               "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java": [
                 {
-                  "start": 1936,
-                  "end": 1936
+                  "start": 1932,
+                  "end": 1942
                 }
               ],
               "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java": [
                 {
-                  "start": 793,
-                  "end": 793
+                  "start": 789,
+                  "end": 799
                 }
               ],
-              "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java": [
+              "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
                 {
-                  "start": 472,
-                  "end": 472
+                  "start": 290,
+                  "end": 349
                 }
               ]
             },
@@ -4190,759 +1800,39 @@
           "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java",
           "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java",
           "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java",
-          "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingUtf8JsonParserBase.java",
-          "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java",
-          "src/test/java/com/fasterxml/jackson/core/BaseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/TestJDKSerializability.java",
-          "src/test/java/com/fasterxml/jackson/core/async/AsyncTestBase.java",
-          "src/test/java/com/fasterxml/jackson/core/base64/Base64BinaryParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/base64/Base64Padding912Test.java",
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java",
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/JsonParserClosedCaseTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/TestRootValues.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncLocationTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNumberDeferredReadTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncScopeMatchingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncTokenFilterTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/FloatParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/LocationOffsetsTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NextNameParserTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NonStandardNumberParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NonStandardParserFeaturesTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NumberDeferredReadTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserDupHandlingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserErrorHandlingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/ParserScopeMatchingTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java",
-          "src/test/java/com/fasterxml/jackson/core/read/TrailingCommas616Test.java",
-          "src/test/java/com/fasterxml/jackson/core/read/TrailingCommasTest.java",
-          "src/test/java/com/fasterxml/jackson/core/sym/PlaceholderSymbolTableTest.java",
-          "src/test/java/com/fasterxml/jackson/core/testsupport/MockDataInput.java",
-          "src/test/java/com/fasterxml/jackson/failing/ParserErrorHandling105Test.java",
-          "src/test/java/com/fasterxml/jackson/failing/async/AsyncTokenErrorTest.java"
+          "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java"
         ],
         "predSpans": {
-          "src/test/java/com/fasterxml/jackson/core/TestJDKSerializability.java": [
-            {
-              "start": 187,
-              "end": 187
-            }
-          ],
           "src/main/java/com/fasterxml/jackson/core/JsonFactory.java": [
             {
               "start": 1296,
               "end": 1303
             },
             {
-              "start": 1302,
-              "end": 1302
-            },
-            {
               "start": 1323,
               "end": 1330
             },
             {
-              "start": 1329,
-              "end": 1329
-            },
-            {
-              "start": 1780,
-              "end": 1780
-            },
-            {
-              "start": 1802,
-              "end": 1802
-            },
-            {
               "start": 1844,
               "end": 1854
-            },
-            {
-              "start": 1852,
-              "end": 1852
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java": [
-            {
-              "start": 147,
-              "end": 147
-            },
-            {
-              "start": 259,
-              "end": 259
-            },
-            {
-              "start": 290,
-              "end": 290
-            },
-            {
-              "start": 300,
-              "end": 300
-            },
-            {
-              "start": 303,
-              "end": 303
-            },
-            {
-              "start": 305,
-              "end": 305
-            },
-            {
-              "start": 307,
-              "end": 307
-            },
-            {
-              "start": 643,
-              "end": 643
-            },
-            {
-              "start": 648,
-              "end": 648
-            },
-            {
-              "start": 654,
-              "end": 654
-            },
-            {
-              "start": 657,
-              "end": 657
-            },
-            {
-              "start": 662,
-              "end": 662
-            },
-            {
-              "start": 669,
-              "end": 669
-            },
-            {
-              "start": 672,
-              "end": 672
-            },
-            {
-              "start": 676,
-              "end": 676
-            },
-            {
-              "start": 684,
-              "end": 684
-            },
-            {
-              "start": 691,
-              "end": 691
-            },
-            {
-              "start": 791,
-              "end": 798
-            },
-            {
-              "start": 793,
-              "end": 793
-            },
-            {
-              "start": 797,
-              "end": 797
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingUtf8JsonParserBase.java": [
-            {
-              "start": 1954,
-              "end": 1954
-            },
-            {
-              "start": 1960,
-              "end": 1960
-            },
-            {
-              "start": 1966,
-              "end": 1966
-            },
-            {
-              "start": 1972,
-              "end": 1972
-            },
-            {
-              "start": 2003,
-              "end": 2003
-            },
-            {
-              "start": 2009,
-              "end": 2009
-            },
-            {
-              "start": 2015,
-              "end": 2015
-            },
-            {
-              "start": 2021,
-              "end": 2021
-            },
-            {
-              "start": 2035,
-              "end": 2035
-            },
-            {
-              "start": 2044,
-              "end": 2044
-            },
-            {
-              "start": 2053,
-              "end": 2053
-            },
-            {
-              "start": 2061,
-              "end": 2061
-            },
-            {
-              "start": 2178,
-              "end": 2178
-            },
-            {
-              "start": 2180,
-              "end": 2180
-            },
-            {
-              "start": 2276,
-              "end": 2276
-            },
-            {
-              "start": 2278,
-              "end": 2278
-            },
-            {
-              "start": 2373,
-              "end": 2373
-            },
-            {
-              "start": 2375,
-              "end": 2375
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java": [
-            {
-              "start": 78,
-              "end": 78
-            },
-            {
-              "start": 129,
-              "end": 129
-            },
-            {
-              "start": 156,
-              "end": 156
-            },
-            {
-              "start": 175,
-              "end": 175
-            },
-            {
-              "start": 181,
-              "end": 181
-            },
-            {
-              "start": 183,
-              "end": 183
-            },
-            {
-              "start": 185,
-              "end": 185
-            },
-            {
-              "start": 451,
-              "end": 451
-            },
-            {
-              "start": 606,
-              "end": 606
-            },
-            {
-              "start": 1323,
-              "end": 1323
-            },
-            {
-              "start": 1328,
-              "end": 1328
-            },
-            {
-              "start": 1333,
-              "end": 1333
-            },
-            {
-              "start": 1338,
-              "end": 1338
-            },
-            {
-              "start": 1356,
-              "end": 1356
-            },
-            {
-              "start": 1364,
-              "end": 1364
-            },
-            {
-              "start": 1372,
-              "end": 1372
-            },
-            {
-              "start": 1380,
-              "end": 1380
-            },
-            {
-              "start": 1395,
-              "end": 1395
-            },
-            {
-              "start": 1403,
-              "end": 1403
-            },
-            {
-              "start": 1411,
-              "end": 1411
-            },
-            {
-              "start": 1419,
-              "end": 1419
-            },
-            {
-              "start": 1440,
-              "end": 1440
-            },
-            {
-              "start": 1449,
-              "end": 1449
-            },
-            {
-              "start": 1458,
-              "end": 1458
-            },
-            {
-              "start": 1467,
-              "end": 1467
-            },
-            {
-              "start": 1583,
-              "end": 1583
-            },
-            {
-              "start": 1585,
-              "end": 1585
-            },
-            {
-              "start": 1657,
-              "end": 1657
-            },
-            {
-              "start": 1659,
-              "end": 1659
-            },
-            {
-              "start": 1757,
-              "end": 1757
-            },
-            {
-              "start": 1759,
-              "end": 1759
-            },
-            {
-              "start": 1770,
-              "end": 1770
-            },
-            {
-              "start": 1775,
-              "end": 1775
-            },
-            {
-              "start": 1781,
-              "end": 1781
-            },
-            {
-              "start": 1784,
-              "end": 1784
-            },
-            {
-              "start": 1789,
-              "end": 1789
-            },
-            {
-              "start": 1796,
-              "end": 1796
-            },
-            {
-              "start": 1799,
-              "end": 1799
-            },
-            {
-              "start": 1803,
-              "end": 1803
-            },
-            {
-              "start": 1811,
-              "end": 1811
-            },
-            {
-              "start": 1814,
-              "end": 1814
-            },
-            {
-              "start": 1821,
-              "end": 1821
-            },
-            {
-              "start": 1823,
-              "end": 1823
-            },
-            {
-              "start": 1834,
-              "end": 1834
-            },
-            {
-              "start": 1934,
-              "end": 1941
-            },
-            {
-              "start": 1936,
-              "end": 1936
-            },
-            {
-              "start": 1940,
-              "end": 1940
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/failing/ParserErrorHandling105Test.java": [
-            {
-              "start": 12,
-              "end": 12
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/failing/async/AsyncTokenErrorTest.java": [
-            {
-              "start": 52,
-              "end": 52
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/TestRootValues.java": [
-            {
-              "start": 80,
-              "end": 80
-            },
-            {
-              "start": 103,
-              "end": 103
-            },
-            {
-              "start": 122,
-              "end": 122
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/async/AsyncTestBase.java": [
-            {
-              "start": 23,
-              "end": 23
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/base64/Base64Padding912Test.java": [
-            {
-              "start": 21,
-              "end": 21
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/base64/Base64BinaryParsingTest.java": [
-            {
-              "start": 251,
-              "end": 251
-            },
-            {
-              "start": 315,
-              "end": 315
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NonStandardNumberParsingTest.java": [
-            {
-              "start": 144,
-              "end": 144
-            },
-            {
-              "start": 158,
-              "end": 158
-            },
-            {
-              "start": 172,
-              "end": 172
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/FloatParsingTest.java": [
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 37,
-              "end": 37
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/DataInputTest.java": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 8,
-              "end": 8
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/ParserScopeMatchingTest.java": [
-            {
-              "start": 78,
-              "end": 78
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/ParserDupHandlingTest.java": [
-            {
-              "start": 52,
-              "end": 52
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/SimpleParserTest.java": [
-            {
-              "start": 4,
-              "end": 4
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 125,
-              "end": 125
-            },
-            {
-              "start": 472,
-              "end": 472
-            },
-            {
-              "start": 474,
-              "end": 474
-            },
-            {
-              "start": 504,
-              "end": 504
-            },
-            {
-              "start": 654,
-              "end": 654
-            },
-            {
-              "start": 752,
-              "end": 752
-            },
-            {
-              "start": 753,
-              "end": 753
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncLocationTest.java": [
-            {
-              "start": 17,
-              "end": 17
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncTokenFilterTest.java": [
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 81,
-              "end": 81
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncScopeMatchingTest.java": [
-            {
-              "start": 59,
-              "end": 59
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/async/AsyncNumberDeferredReadTest.java": [
-            {
-              "start": 26,
-              "end": 26
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/ParserErrorHandlingTest.java": [
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 87,
-              "end": 87
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NumberParsingTest.java": [
-            {
-              "start": 112,
-              "end": 112
-            },
-            {
-              "start": 264,
-              "end": 264
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NonStandardParserFeaturesTest.java": [
-            {
-              "start": 36,
-              "end": 36
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NumberDeferredReadTest.java": [
-            {
-              "start": 35,
-              "end": 35
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NumberOverflowTest.java": [
-            {
-              "start": 64,
-              "end": 64
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/NextNameParserTest.java": [
-            {
-              "start": 20,
-              "end": 20
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/TrailingCommas616Test.java": [
-            {
-              "start": 24,
-              "end": 24
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/TrailingCommasTest.java": [
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 362,
-              "end": 362
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/read/LocationOffsetsTest.java": [
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 118,
-              "end": 118
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/json/JsonParserClosedCaseTest.java": [
-            {
-              "start": 11,
-              "end": 11
-            },
-            {
-              "start": 42,
-              "end": 42
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/BaseTest.java": [
-            {
-              "start": 7,
-              "end": 7
-            },
-            {
-              "start": 44,
-              "end": 44
-            },
-            {
-              "start": 339,
-              "end": 339
-            },
-            {
-              "start": 357,
-              "end": 357
-            },
-            {
-              "start": 400,
-              "end": 400
-            },
-            {
-              "start": 401,
-              "end": 401
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/testsupport/MockDataInput.java": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 9,
-              "end": 9
-            },
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 17,
-              "end": 17
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberWriteTest.java": [
-            {
-              "start": 5,
-              "end": 5
-            },
-            {
-              "start": 6,
-              "end": 6
-            },
-            {
-              "start": 90,
-              "end": 90
-            },
-            {
-              "start": 91,
-              "end": 91
-            },
-            {
-              "start": 134,
-              "end": 134
-            },
-            {
-              "start": 135,
-              "end": 135
-            }
-          ],
-          "src/test/java/com/fasterxml/jackson/core/constraints/LargeNumberReadTest.java": [
-            {
-              "start": 62,
-              "end": 62
-            },
-            {
-              "start": 72,
-              "end": 72
-            }
-          ],
-          "src/main/java/com/fasterxml/jackson/core/sym/ByteQuadsCanonicalizer.java": [
-            {
-              "start": 472,
-              "end": 472
             }
           ],
           "src/main/java/com/fasterxml/jackson/core/json/ByteSourceJsonBootstrapper.java": [
             {
               "start": 252,
               "end": 267
+            }
+          ],
+          "src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java": [
+            {
+              "start": 1934,
+              "end": 1941
+            }
+          ],
+          "src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java": [
+            {
+              "start": 791,
+              "end": 798
             }
           ],
           "src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java": [
@@ -4978,159 +1868,186 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.25,
+              "symbol": 0.2727272727272727,
+              "span": 0.2684226102397159,
+              "line": 0.25
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.25,
+              "symbol": 0.2727272727272727,
+              "span": 0.2684226102397159,
+              "line": 0.25
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.25,
+              "symbol": 0.2727272727272727,
+              "span": 0.2684226102397159,
+              "line": 0.25
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.25,
+              "symbol": 0.36363636363636365,
+              "span": 0.3950873039360758,
+              "line": 0.34210526315789475
             }
           },
           {
             "step": 5,
             "coverage": {
               "file": 0.25,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.36363636363636365,
+              "span": 0.3950873039360758,
+              "line": 0.34210526315789475
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 0.25,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.36363636363636365,
+              "span": 0.3950873039360758,
+              "line": 0.34210526315789475
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.45454545454545453,
+              "span": 0.3950873039360758,
+              "line": 0.34210526315789475
             }
           },
           {
             "step": 8,
             "coverage": {
-              "file": 0.25,
-              "symbol": 0.36363636363636365,
-              "span": 0.08079313406333234,
-              "line": 0.039473684210526314
+              "file": 0.5,
+              "symbol": 0.6363636363636364,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 0.5,
-              "symbol": 0.36363636363636365,
-              "span": 0.08079313406333234,
-              "line": 0.039473684210526314
+              "symbol": 0.6363636363636364,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 0.75,
-              "symbol": 0.36363636363636365,
-              "span": 0.08079313406333234,
-              "line": 0.039473684210526314
+              "symbol": 0.7272727272727273,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.7272727272727273,
-              "span": 0.11393903521751998,
-              "line": 0.06578947368421052
+              "symbol": 0.8181818181818182,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.7272727272727273,
-              "span": 0.11393903521751998,
-              "line": 0.06578947368421052
+              "symbol": 0.8181818181818182,
+              "span": 0.8105948505474992,
+              "line": 0.7368421052631579
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.7272727272727273,
-              "span": 0.11393903521751998,
-              "line": 0.06578947368421052
+              "symbol": 0.9090909090909091,
+              "span": 0.9052974252737497,
+              "line": 0.868421052631579
             }
           },
           {
             "step": 14,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.7272727272727273,
-              "span": 0.11393903521751998,
-              "line": 0.06578947368421052
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 15,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.7272727272727273,
-              "span": 0.11393903521751998,
-              "line": 0.06578947368421052
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 16,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8181818181818182,
-              "span": 0.14116602545131696,
-              "line": 0.09210526315789473
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 17,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 18,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 19,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.515625,
-          "symbol": 0.3465909090909091,
-          "span": 0.05957753773305712,
-          "line": 0.03371710526315789
+          "file": 0.6710526315789473,
+          "symbol": 0.6794258373205742,
+          "span": 0.7023099328670893,
+          "line": 0.6668975069252078
         },
         "redundancy": {
-          "file": 0.1333333333333333,
-          "symbol": 0.031746031746031744,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.6190476190476191,
+          "symbol": 0.19871794871794868,
+          "span": 0.14812503120786935,
+          "line": 0.14228226501868357
         }
       },
       "fixOverlap": {
@@ -5149,28 +2066,28 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/a8aff981dbfaeba28f4d/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/a8aff981dbfaeba28f4d/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/a8aff981dbfaeba28f4d/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,260p' <contextbench-root>/.cache/agent-runtimes/codex/a8aff981dbfaeba28f4d/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,260p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
@@ -5376,7 +2293,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/test/java/com/fasterxml/jackson/core/json/JsonFactoryTest.java",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -5440,17 +2366,44 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/main/java/com/fasterxml/jackson/core/JsonFactory.java",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/main/java/com/fasterxml/jackson/core/json/UTF8DataInputJsonParser.java",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/main/java/com/fasterxml/jackson/core/json/async/NonBlockingJsonParserBase.java",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

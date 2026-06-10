@@ -1,7 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -24,8 +26,30 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SUITE_DIR = REPO_ROOT / "results" / "run_suites" / "codex-superpowers-mounted"
 DEFAULT_OUTPUT_PATH = REPO_ROOT / "site-data" / "comparison.json"
 DEFAULT_DETAIL_DIR = REPO_ROOT / "site-data" / "instances"
+DEFAULT_INSTANCE_PAYLOAD_DIR = REPO_ROOT / "site-data" / "comparison-data"
 DEFAULT_VARIANT = "with-superpowers-mounted"
 DEFAULT_REPO_CACHE_DIR = REPO_ROOT / ".cache" / "repos"
+
+COMPARISON_INSTANCE_BUNDLES: dict[str, tuple[str, ...]] = {
+    "index": ("instanceId", "originalInstanceId", "bench", "language", "repositorySize"),
+    "metrics": (
+        "instanceId",
+        "originalInstanceId",
+        "bench",
+        "language",
+        "outcome",
+        "artifacts",
+        "quality",
+        "trajectory",
+        "fixOverlap",
+        "resources",
+        "repositorySize",
+        "skills",
+        "tools",
+        "mcp",
+    ),
+    "trajectory": ("instanceId", "bench", "language", "artifacts", "evaluatedTrajectory"),
+}
 
 
 class ComparisonExportError(RuntimeError):
@@ -66,6 +90,41 @@ def _variant_artifact_path(
     suffix = str(artifact_suffix or "").strip().strip(".")
     filename = f"{stem}.{suffix}.jsonl" if suffix else f"{stem}.jsonl"
     return _resolve_path(Path(variant_manifest["output_dir"]) / filename, suite_dir)
+
+
+def _available_artifact_suffixes(
+    variant_manifests: list[dict[str, Any]],
+    *,
+    suite_dir: Path,
+) -> set[str]:
+    suffixes: set[str] = set()
+    for variant_manifest in variant_manifests:
+        output_dir = _resolve_path(Path(variant_manifest["output_dir"]), suite_dir)
+        if not output_dir.exists():
+            continue
+        for path in output_dir.glob("eval.*.jsonl"):
+            parts = path.name.split(".")
+            if len(parts) == 3 and parts[0] == "eval" and parts[2] == "jsonl":
+                suffixes.add(parts[1])
+    return suffixes
+
+
+def _assert_explicit_artifact_suffix_when_needed(
+    variant_manifests: list[dict[str, Any]],
+    *,
+    suite_dir: Path,
+    artifact_suffix: str | None,
+) -> None:
+    if str(artifact_suffix or "").strip():
+        return
+    suffixes = _available_artifact_suffixes(variant_manifests, suite_dir=suite_dir)
+    if "aligned" not in suffixes:
+        return
+    raise ComparisonExportError(
+        "Aligned postprocess artifacts are present. Re-run with "
+        "`--artifact-suffix aligned` to export aligned trajectory metrics, "
+        "or remove the aligned artifacts before exporting unsuffixed metrics."
+    )
 
 
 def _titleize(value: str | None) -> str:
@@ -376,6 +435,69 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _duration_resource_payload(record: dict[str, Any], effective_config: dict[str, Any]) -> dict[str, Any]:
+    duration_ms = _positive_int(record.get("duration_ms"))
+    if duration_ms is None:
+        return {
+            "durationMs": None,
+            "durationStatus": "unavailable",
+            "durationUnavailableReason": "missing_duration",
+        }
+
+    if bool(record.get("timeout")):
+        return {
+            "durationMs": None,
+            "durationStatus": "unavailable",
+            "durationUnavailableReason": "timed_out",
+            "rawDurationMs": duration_ms,
+        }
+
+    timeout_seconds = _positive_int(effective_config.get("timeout"))
+    if timeout_seconds is not None:
+        timeout_limit_ms = timeout_seconds * 1000 + 30_000
+        if duration_ms > timeout_limit_ms:
+            return {
+                "durationMs": None,
+                "durationStatus": "unavailable",
+                "durationUnavailableReason": "exceeds_configured_timeout",
+                "rawDurationMs": duration_ms,
+            }
+
+    return {
+        "durationMs": duration_ms,
+        "durationStatus": "available",
+    }
+
+
+def _token_resource_payload(record: dict[str, Any]) -> dict[str, int]:
+    usage = record.get("token_usage") if isinstance(record.get("token_usage"), dict) else {}
+    input_tokens = int(usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or 0)
+    cached_input_tokens = int(
+        usage.get("cached_input_tokens")
+        or usage.get("cache_read_input_tokens")
+        or 0
+    )
+    total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+    return {
+        "totalTokens": total_tokens,
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens,
+        "cachedInputTokens": cached_input_tokens,
+        "nonCachedInputTokens": max(input_tokens - cached_input_tokens, 0),
+    }
+
+
 def _coerce_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -552,6 +674,39 @@ def _filter_predicted_traj_data(
         "pred_spans": filtered_spans,
         "pred_symbols": filtered_symbols,
     }
+
+
+def _is_skill_read_step(step: dict[str, Any]) -> bool:
+    candidates: list[str] = []
+    candidates.extend(str(file_path) for file_path in step.get("files") or [])
+    candidates.extend(str(file_path) for file_path in normalize_span_map(step.get("spans")))
+    candidates.extend(str(file_path) for file_path in normalize_symbol_map(step.get("symbols")))
+    return any("/.agents/skills/" in value and value.endswith("/SKILL.md") for value in candidates)
+
+
+def _evaluated_trajectory_steps_with_skill_flags(
+    eval_row: dict[str, Any] | None,
+    pred_row: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    evaluated_steps = list((((eval_row or {}).get("trajectory") or {}).get("steps") or []))
+    pred_steps = (
+        ((pred_row or {}).get("traj_data") or {}).get("pred_steps") or []
+        if pred_row is not None
+        else []
+    )
+    if not evaluated_steps:
+        return []
+
+    flagged_steps: list[dict[str, Any]] = []
+    for index, step in enumerate(evaluated_steps):
+        if not isinstance(step, dict):
+            continue
+        enriched_step = dict(step)
+        pred_step = pred_steps[index] if index < len(pred_steps) and isinstance(pred_steps[index], dict) else None
+        if pred_step is not None and _is_skill_read_step(pred_step):
+            enriched_step["isSkillRead"] = True
+        flagged_steps.append(enriched_step)
+    return flagged_steps
 
 
 def _merge_line_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -1537,6 +1692,21 @@ def _extract_trace_entries(
     return _extract_codex_trace_entries(raw_response, sanitize_context=sanitize_context)
 
 
+def _trace_entry_counts(entries: list[dict[str, Any]]) -> dict[str, int]:
+    """Count normalized trace rows and concrete agent actions.
+
+    Raw trace events count normalized trace rows exported to the per-instance
+    Trace tab.
+    Raw agent actions intentionally exclude assistant/todo/status rows and
+    orphan tool-result rows so a logical tool call is counted once.
+    """
+    action_kinds = {"command_execution", "tool_use", "file_change"}
+    return {
+        "rawTraceEvents": len(entries),
+        "rawAgentActions": sum(1 for entry in entries if str(entry.get("kind") or "") in action_kinds),
+    }
+
+
 def _extract_codex_trace_entries(
     raw_response: dict[str, Any],
     *,
@@ -1578,14 +1748,7 @@ def _extract_codex_trace_entries(
                 {
                     "kind": "file_change",
                     "status": item.get("status"),
-                    "payload": sanitize_json_value(
-                        {
-                            key: item.get(key)
-                            for key in ("path", "kind", "change_type", "description")
-                            if item.get(key) is not None
-                        },
-                        context=sanitize_context,
-                    ),
+                    "payload": _codex_file_change_payload(item, sanitize_context=sanitize_context),
                 }
             )
         elif _codex_event_is_mcp(event, item if item else None):
@@ -1630,10 +1793,32 @@ def _extract_codex_trace_entries(
                     }
                 )
 
-        if len(entries) >= 120:
-            break
-
     return entries
+
+
+def _codex_file_change_payload(item: dict[str, Any], *, sanitize_context: SanitizationContext) -> dict[str, Any]:
+    payload = {
+        key: item.get(key)
+        for key in ("path", "kind", "change_type", "description")
+        if item.get(key) is not None
+    }
+    raw_changes = item.get("changes")
+    if isinstance(raw_changes, list):
+        changes = [
+            {
+                key: change.get(key)
+                for key in ("path", "kind", "change_type", "description")
+                if isinstance(change, dict) and change.get(key) is not None
+            }
+            for change in raw_changes
+        ]
+        changes = [change for change in changes if change]
+        if changes:
+            payload["changes"] = changes
+            if len(changes) == 1:
+                payload.update({key: value for key, value in changes[0].items() if key not in payload})
+    sanitized = sanitize_json_value(payload, context=sanitize_context)
+    return sanitized if isinstance(sanitized, dict) else {}
 
 
 def _extract_claude_trace_entries(
@@ -1739,10 +1924,7 @@ def _extract_claude_trace_entries(
                 payload["result"] = result_summary
                 entry["payload"] = _trace_payload(payload, sanitize_context=sanitize_context)
 
-        if len(entries) >= 120:
-            break
-
-    return entries[:120]
+    return entries
 
 
 def _aggregate_pattern_metrics_from_instances(instance_rows: list[dict[str, Any]]) -> dict[str, str]:
@@ -1823,6 +2005,7 @@ def _build_instance_payloads(
 
     pred_rows = _read_jsonl(pred_path) if pred_path.exists() else []
     eval_rows = _read_jsonl(eval_path) if eval_path.exists() else []
+    _assert_clean_prediction_artifacts(pred_rows, label=str(pred_path))
 
     pred_by_id: dict[str, dict[str, Any]] = {}
     for row in pred_rows:
@@ -1890,11 +2073,18 @@ def _build_instance_payloads(
             workspace_path=Path(workspace_path) if workspace_path else None,
             task_dir=Path(str(record.get("task_dir"))) if record.get("task_dir") else None,
         )
+        trace_entries = (
+            _extract_trace_entries(raw_response, sanitize_context=sanitize_context)
+            if isinstance(raw_response, dict)
+            else []
+        )
+        trace_entry_counts = _trace_entry_counts(trace_entries)
         traj_data = (
             _filter_predicted_traj_data((pred_row.get("traj_data") or {}), workspace_path=workspace_path)
             if pred_row is not None
             else {}
         )
+        evaluated_trajectory_steps = _evaluated_trajectory_steps_with_skill_flags(eval_row, pred_row)
         retry_payload = _normalize_retry_payload(record.get("retry"), sanitize_context=sanitize_context)
         if steps <= 0:
             steps = len(traj_data.get("pred_steps") or [])
@@ -1941,7 +2131,7 @@ def _build_instance_payloads(
                     final_lines.setdefault(normalized_file, []).append((span["start"], span["end"]))
             final_lines = {file_path: _merge_line_intervals(intervals) for file_path, intervals in final_lines.items()}
 
-            gold_lines = gold.line_spans_init()
+            gold_lines = gold.line_spans()
             seen_gold_lines = _line_intersection_size(seen_lines, gold_lines)
             if seen_gold_lines > 0:
                 kept_gold_lines = _line_intersection_size(final_lines, gold_lines)
@@ -1964,6 +2154,19 @@ def _build_instance_payloads(
             sanitize_context=sanitize_context,
         )
         mcp_summary = {key: value for key, value in mcp_usage.items() if key != "calls"}
+        duration_resource = _duration_resource_payload(record, effective_config)
+        token_resource = _token_resource_payload(record)
+        path_diagnostics = (
+            (eval_row or {}).get("predicted_context_path_diagnostics")
+            if isinstance((eval_row or {}).get("predicted_context_path_diagnostics"), dict)
+            else {}
+        )
+        predicted_context_path_diagnostics = {
+            "missingFinalPaths": list(path_diagnostics.get("missing_final_paths") or []),
+            "missingTrajectoryPaths": list(path_diagnostics.get("missing_trajectory_paths") or []),
+            "missingFinalPathCount": int(path_diagnostics.get("missing_final_path_count") or 0),
+            "missingTrajectoryPathCount": int(path_diagnostics.get("missing_trajectory_path_count") or 0),
+        }
 
         instance_rows.append(
             {
@@ -1979,6 +2182,7 @@ def _build_instance_payloads(
                     "hasPrediction": has_prediction,
                     "evaluationStatus": evaluation_status,
                     "resolutionStatus": resolution_status,
+                    "predictedContextPathDiagnostics": predicted_context_path_diagnostics,
                 },
                 "quality": {
                     granularity: {
@@ -1992,33 +2196,40 @@ def _build_instance_payloads(
                     "efficiency": _safe_mean(
                         [
                             (((eval_row or {}).get("trajectory") or {}).get("auc_coverage") or {}).get("file"),
-                            (((eval_row or {}).get("trajectory") or {}).get("auc_coverage") or {}).get("symbol"),
                             (((eval_row or {}).get("trajectory") or {}).get("auc_coverage") or {}).get("span"),
+                            (((eval_row or {}).get("trajectory") or {}).get("auc_coverage") or {}).get("line"),
+                            (((eval_row or {}).get("trajectory") or {}).get("auc_coverage") or {}).get("symbol"),
                         ],
                     ),
                     "redundancy": _safe_mean(
                         [
                             (((eval_row or {}).get("trajectory") or {}).get("redundancy") or {}).get("file"),
-                            (((eval_row or {}).get("trajectory") or {}).get("redundancy") or {}).get("symbol"),
                             (((eval_row or {}).get("trajectory") or {}).get("redundancy") or {}).get("span"),
+                            (((eval_row or {}).get("trajectory") or {}).get("redundancy") or {}).get("line"),
+                            (((eval_row or {}).get("trajectory") or {}).get("redundancy") or {}).get("symbol"),
                         ],
                     ),
                     "usageDrop": usage_drop,
                     "steps": steps,
                     "linesPerStep": lines_per_step,
                 },
+                "evaluatedTrajectory": {
+                    "steps": evaluated_trajectory_steps,
+                },
                 "fixOverlap": {
                     "vsGold": fix_overlap_vs_gold,
                 },
                 "resources": {
-                    "durationMs": int(record.get("duration_ms") or 0),
-                    "totalTokens": int((record.get("token_usage") or {}).get("total_tokens") or 0),
+                    **duration_resource,
+                    **token_resource,
                     "toolCalls": trace_action_counts["toolCalls"],
                     "mcpToolCalls": trace_action_counts["mcpToolCalls"],
                     "successfulMcpToolCalls": trace_action_counts["successfulMcpToolCalls"],
                     "commandExecutions": trace_action_counts["commandExecutions"],
                     "readToolCalls": trace_action_counts["readToolCalls"],
                     "editToolCalls": trace_action_counts["editToolCalls"],
+                    "rawTraceEvents": trace_entry_counts["rawTraceEvents"],
+                    "rawAgentActions": trace_entry_counts["rawAgentActions"],
                     "costUsd": cost_usd,
                     "retryAttempts": retry_payload["attempts"],
                     "retried": retry_payload["retried"],
@@ -2063,9 +2274,10 @@ def _build_instance_payloads(
                 "status": status,
                 "evaluationStatus": evaluation_status,
                 "resolutionStatus": resolution_status,
+                "predictedContextPathDiagnostics": predicted_context_path_diagnostics,
                 "startedAt": record.get("started_at"),
                 "completedAt": record.get("completed_at"),
-                "durationMs": int(record.get("duration_ms") or 0),
+                **duration_resource,
                 "retry": retry_payload,
                 "tokenUsage": record.get("token_usage"),
                 "traceCounters": trace_action_counts,
@@ -2089,18 +2301,14 @@ def _build_instance_payloads(
                     "predSymbols": sanitize_json_value(traj_data.get("pred_symbols") or {}, context=sanitize_context),
                 },
                 "evaluatedTrajectory": {
-                    "steps": (((eval_row or {}).get("trajectory") or {}).get("steps") or []),
+                    "steps": evaluated_trajectory_steps,
                     "aucCoverage": (((eval_row or {}).get("trajectory") or {}).get("auc_coverage") or {}),
                     "redundancy": (((eval_row or {}).get("trajectory") or {}).get("redundancy") or {}),
                 },
                 "fixOverlap": {
                     "vsGold": fix_overlap_vs_gold,
                 },
-                "traceEntries": (
-                    _extract_trace_entries(raw_response, sanitize_context=sanitize_context)
-                    if isinstance(raw_response, dict)
-                    else []
-                ),
+                "traceEntries": trace_entries,
             },
         }
 
@@ -2193,7 +2401,7 @@ def _aggregate_pattern_metrics(
                 final_lines.setdefault(normalized_file, []).append((span["start"], span["end"]))
         final_lines = {file_path: _merge_line_intervals(intervals) for file_path, intervals in final_lines.items()}
 
-        gold_lines = gold.line_spans_init()
+        gold_lines = gold.line_spans()
         seen_gold_lines = _line_intersection_size(seen_lines, gold_lines)
         if seen_gold_lines <= 0:
             continue
@@ -2332,7 +2540,117 @@ def _aggregate_mcp_usage_from_instances(instance_rows: list[dict[str, Any]]) -> 
     }
 
 
-def _aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, str]:
+_FORBIDDEN_CONTEXT_MARKERS = (
+    "trace_inference",
+    ".agents/",
+    "/.agents/",
+    "home/.agents",
+    "<contextbench-root>",
+    "<worktree>",
+    "agent-runtimes",
+)
+
+
+def _assert_clean_prediction_artifacts(rows: list[dict[str, Any]], *, label: str) -> None:
+    for row in rows:
+        instance_id = str(row.get("instance_id") or row.get("original_inst_id") or "<unknown>")
+        traj_data = row.get("traj_data") if isinstance(row.get("traj_data"), dict) else {}
+        for key in ("pred_files_source", "pred_spans_source", "pred_symbols_source"):
+            sources = traj_data.get(key) or []
+            if "trace_inference" in sources:
+                raise ComparisonExportError(f"{label}: {instance_id} has trace_inference in final {key}")
+        for key in ("pred_files", "pred_spans", "pred_symbols"):
+            value = traj_data.get(key)
+            rendered = json.dumps(value, sort_keys=True, ensure_ascii=False)
+            for marker in _FORBIDDEN_CONTEXT_MARKERS:
+                if marker in rendered:
+                    raise ComparisonExportError(f"{label}: {instance_id} has forbidden final context marker {marker!r}")
+
+
+def _assert_context_metric_range(payload: dict[str, Any], *, label: str) -> None:
+    quality = payload.get("results", {}).get("quality", {})
+    candidates: list[Any] = [
+        quality.get("contextF1"),
+        quality.get("contextRecall"),
+        quality.get("contextPrecision"),
+        quality.get("trajectoryGoldFound"),
+        quality.get("fileF1"),
+        quality.get("symbolF1"),
+        quality.get("spanF1"),
+        quality.get("avgLineF1"),
+    ]
+    for level_payload in (quality.get("contextLevels") or {}).values():
+        if isinstance(level_payload, dict):
+            candidates.extend([level_payload.get("recall"), level_payload.get("precision"), level_payload.get("f1")])
+    for level_payload in (quality.get("trajectoryContextLevels") or {}).values():
+        if isinstance(level_payload, dict):
+            candidates.append(level_payload.get("goldFound"))
+    for value in candidates:
+        if value is None:
+            continue
+        numeric = float(str(value))
+        if not 0.0 <= numeric <= 1.0:
+            raise ComparisonExportError(f"{label}: context metric {value!r} is outside [0, 1]")
+
+
+def _terminal_trajectory_coverage_for_instance(row: dict[str, Any], level: str) -> float | None:
+    if (row.get("artifacts") or {}).get("evaluationStatus") not in {None, "valid"}:
+        return None
+    evaluated_trajectory = row.get("evaluatedTrajectory")
+    if not isinstance(evaluated_trajectory, dict):
+        return None
+    steps = [
+        step
+        for step in (evaluated_trajectory.get("steps") or [])
+        if isinstance(step, dict) and not step.get("isSkillRead")
+    ]
+    values = [
+        float((step.get("coverage") or {}).get(level))
+        for step in steps
+        if isinstance((step.get("coverage") or {}).get(level), (int, float))
+    ]
+    if not values:
+        return 0.0
+    return min(max(values[-1], 0.0), 1.0)
+
+
+def _aggregate_trajectory_context_levels(instance_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    levels = {
+        "file": "file",
+        "block": "span",
+        "line": "line",
+        "symbol": "symbol",
+    }
+    by_level: dict[str, dict[str, str]] = {}
+    aggregate_values: list[float] = []
+    for label, coverage_key in levels.items():
+        values = [
+            value
+            for row in instance_rows
+            if (value := _terminal_trajectory_coverage_for_instance(row, coverage_key)) is not None
+        ]
+        if not values:
+            continue
+        average = sum(values) / len(values)
+        aggregate_values.append(average)
+        by_level[label] = {"goldFound": _format_metric(average)}
+
+    aggregate = sum(aggregate_values) / len(aggregate_values) if aggregate_values else None
+    return {
+        "trajectoryGoldFound": _format_metric(aggregate) if aggregate is not None else None,
+        "trajectoryContextLevels": by_level,
+    }
+
+
+def _summary_metric_values(summary: dict[str, Any], keys: tuple[str, ...]) -> list[float]:
+    return [
+        float(value)
+        for key in keys
+        if isinstance((value := summary.get(key)), (int, float)) and not isinstance(value, bool)
+    ]
+
+
+def _aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     valid = [row for row in rows if "error" not in row]
     if not valid:
         raise ComparisonExportError("Evaluation file contained no valid rows")
@@ -2346,22 +2664,24 @@ def _aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, str]:
     span_prec = float(((summary.get("final_span") or {}).get("precision")) or 0.0)
     line_cov = float(((summary.get("final_line") or {}).get("coverage")) or 0.0)
     line_prec = float(((summary.get("final_line") or {}).get("precision")) or 0.0)
-    traj_auc_file = float(summary.get("traj_auc_file") or 0.0)
-    traj_auc_symbol = float(summary.get("traj_auc_symbol") or 0.0)
-    traj_auc_span = float(summary.get("traj_auc_span") or 0.0)
-    traj_redundancy_file = float(summary.get("traj_redundancy_file") or 0.0)
-    traj_redundancy_symbol = float(summary.get("traj_redundancy_symbol") or 0.0)
-    traj_redundancy_span = float(summary.get("traj_redundancy_span") or 0.0)
+    file_f1 = float(((summary.get("final_file") or {}).get("f1")) or _f1(file_cov, file_prec))
+    symbol_f1 = float(((summary.get("final_symbol") or {}).get("f1")) or _f1(symbol_cov, symbol_prec))
+    span_f1 = float(((summary.get("final_span") or {}).get("f1")) or _f1(span_cov, span_prec))
+    line_f1 = float(((summary.get("final_line") or {}).get("f1")) or _f1(line_cov, line_prec))
+    trajectory_auc_values = _summary_metric_values(
+        summary,
+        ("traj_auc_file", "traj_auc_span", "traj_auc_line", "traj_auc_symbol"),
+    )
+    trajectory_redundancy_values = _summary_metric_values(
+        summary,
+        ("traj_redundancy_file", "traj_redundancy_span", "traj_redundancy_line", "traj_redundancy_symbol"),
+    )
 
-    file_f1 = _f1(file_cov, file_prec)
-    symbol_f1 = _f1(symbol_cov, symbol_prec)
-    span_f1 = _f1(span_cov, span_prec)
-    line_f1 = _f1(line_cov, line_prec)
-    context_recall = (file_cov + symbol_cov + span_cov) / 3
-    context_precision = (file_prec + symbol_prec + span_prec) / 3
-    context_f1 = (file_f1 + symbol_f1 + span_f1) / 3
-    efficiency = (traj_auc_file + traj_auc_symbol + traj_auc_span) / 3
-    redundancy = (traj_redundancy_file + traj_redundancy_symbol + traj_redundancy_span) / 3
+    context_recall = (file_cov + span_cov + line_cov + symbol_cov) / 4
+    context_precision = (file_prec + span_prec + line_prec + symbol_prec) / 4
+    context_f1 = (file_f1 + span_f1 + line_f1 + symbol_f1) / 4
+    efficiency = _safe_mean(trajectory_auc_values)
+    redundancy = _safe_mean(trajectory_redundancy_values)
 
     return {
         "contextF1": _format_metric(context_f1),
@@ -2393,8 +2713,24 @@ def _aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, str]:
                 "f1": _format_metric(line_f1),
             },
         },
-        "efficiency": _format_metric(efficiency),
-        "redundancy": _format_metric(redundancy),
+        "pooledContextLevels": {
+            label: {
+                "recall": _format_metric(float(((summary.get(f"pooled_final_{gran}") or {}).get("coverage")) or 0.0)),
+                "precision": _format_metric(float(((summary.get(f"pooled_final_{gran}") or {}).get("precision")) or 0.0)),
+                "f1": _format_metric(float(((summary.get(f"pooled_final_{gran}") or {}).get("f1")) or 0.0)),
+                "intersection": int(((summary.get(f"pooled_final_{gran}") or {}).get("intersection")) or 0),
+                "goldSize": int(((summary.get(f"pooled_final_{gran}") or {}).get("gold_size")) or 0),
+                "predSize": int(((summary.get(f"pooled_final_{gran}") or {}).get("pred_size")) or 0),
+            }
+            for label, gran in (
+                ("file", "file"),
+                ("block", "span"),
+                ("line", "line"),
+                ("symbol", "symbol"),
+            )
+        },
+        "efficiency": _format_metric(efficiency) if efficiency is not None else None,
+        "redundancy": _format_metric(redundancy) if redundancy is not None else None,
     }
 
 
@@ -2505,6 +2841,12 @@ def _load_variant_payload(
     converted_predictions = sum(1 for row in instance_rows if (row.get("artifacts") or {}).get("hasPrediction"))
     valid_evaluations = sum(1 for row in instance_rows if (row.get("artifacts") or {}).get("evaluationStatus") == "valid")
     quality = _aggregate_eval_rows(eval_rows)
+    valid_instance_rows = [
+        row
+        for row in instance_rows
+        if (row.get("artifacts") or {}).get("evaluationStatus") == "valid"
+    ]
+    trajectory_context_quality = _aggregate_trajectory_context_levels(valid_instance_rows)
     skill_usage = _aggregate_skill_usage_from_instances(instance_rows)
     tool_usage = _aggregate_tool_usage_from_instances(instance_rows)
     mcp_usage = _aggregate_mcp_usage_from_instances(instance_rows)
@@ -2513,11 +2855,20 @@ def _load_variant_payload(
         _aggregate_fix_overlap_vs_gold_from_instances(instance_rows)
     )
     duration_values = [
-        int((row.get("resources") or {}).get("durationMs") or 0)
+        duration_ms
         for row in instance_rows
-        if int((row.get("resources") or {}).get("durationMs") or 0) > 0
+        if (duration_ms := _positive_int((row.get("resources") or {}).get("durationMs"))) is not None
     ]
+    invalid_duration_count = sum(
+        1
+        for row in instance_rows
+        if (row.get("resources") or {}).get("durationStatus") == "unavailable"
+    )
     total_tokens = sum(int((row.get("resources") or {}).get("totalTokens") or 0) for row in instance_rows)
+    input_tokens = sum(int((row.get("resources") or {}).get("inputTokens") or 0) for row in instance_rows)
+    output_tokens = sum(int((row.get("resources") or {}).get("outputTokens") or 0) for row in instance_rows)
+    cached_input_tokens = sum(int((row.get("resources") or {}).get("cachedInputTokens") or 0) for row in instance_rows)
+    non_cached_input_tokens = sum(int((row.get("resources") or {}).get("nonCachedInputTokens") or 0) for row in instance_rows)
     tool_calls = sum(int((row.get("resources") or {}).get("toolCalls") or 0) for row in instance_rows)
     mcp_tool_calls = sum(int((row.get("resources") or {}).get("mcpToolCalls") or 0) for row in instance_rows)
     successful_mcp_tool_calls = sum(
@@ -2526,6 +2877,8 @@ def _load_variant_payload(
     command_executions = sum(int((row.get("resources") or {}).get("commandExecutions") or 0) for row in instance_rows)
     read_tool_calls = sum(int((row.get("resources") or {}).get("readToolCalls") or 0) for row in instance_rows)
     edit_tool_calls = sum(int((row.get("resources") or {}).get("editToolCalls") or 0) for row in instance_rows)
+    raw_trace_events = sum(int((row.get("resources") or {}).get("rawTraceEvents") or 0) for row in instance_rows)
+    raw_agent_actions = sum(int((row.get("resources") or {}).get("rawAgentActions") or 0) for row in instance_rows)
     retry_attempts = sum(int((row.get("resources") or {}).get("retryAttempts") or 1) for row in instance_rows)
     retried_runs = sum(1 for row in instance_rows if (row.get("resources") or {}).get("retried"))
     retry_suppressed_runs = sum(1 for row in instance_rows if (row.get("resources") or {}).get("retrySuppressed"))
@@ -2553,6 +2906,11 @@ def _load_variant_payload(
         variant_notes.append(f"{_display_name(str(variant_manifest['name']))}: partial {stage_text} coverage across selected tasks.")
     if warnings_text:
         variant_notes.append(warnings_text)
+    if invalid_duration_count > 0:
+        variant_notes.append(
+            f"{_display_name(str(variant_manifest['name']))}: excluded {invalid_duration_count} scored-task duration value "
+            "because it exceeded the configured agent timeout."
+        )
 
     return {
         "slug": str(variant_manifest["name"]),
@@ -2595,27 +2953,38 @@ def _load_variant_payload(
                 "contextF1": quality["contextF1"],
                 "contextRecall": quality["contextRecall"],
                 "contextPrecision": quality["contextPrecision"],
+                "trajectoryGoldFound": trajectory_context_quality["trajectoryGoldFound"],
                 "fileF1": quality["fileF1"],
                 "symbolF1": quality["symbolF1"],
                 "spanF1": quality["spanF1"],
                 "avgLineF1": quality["avgLineF1"],
                 "contextLevels": quality["contextLevels"],
+                "pooledContextLevels": quality["pooledContextLevels"],
+                "trajectoryContextLevels": trajectory_context_quality["trajectoryContextLevels"],
                 "fixOverlapVsGold": fix_overlap_vs_gold_summary,
             },
             "efficiency": {
                 "efficiency": quality["efficiency"],
                 "redundancy": quality["redundancy"],
                 "usageDrop": pattern_metrics.get("usageDrop"),
-                "averageDuration": _format_duration_ms(_mean(duration_values)),
+                "averageDuration": _format_duration_ms(_mean(duration_values)) if duration_values else None,
+                "excludedDurationValues": invalid_duration_count,
                 "averageSteps": pattern_metrics.get("averageSteps"),
                 "avgLinesPerStep": pattern_metrics.get("avgLinesPerStep"),
                 "totalTokens": _format_tokens(total_tokens),
+                "inputTokens": _format_tokens(input_tokens),
+                "outputTokens": _format_tokens(output_tokens),
+                "cachedInputTokens": _format_tokens(cached_input_tokens),
+                "nonCachedInputTokens": _format_tokens(non_cached_input_tokens),
+                "cachedInputShare": _format_percent(cached_input_tokens / input_tokens) if input_tokens > 0 else None,
                 "toolCalls": str(tool_calls),
                 "mcpToolCalls": str(mcp_tool_calls),
                 "successfulMcpToolCalls": str(successful_mcp_tool_calls),
                 "commandExecutions": str(command_executions),
                 "readToolCalls": str(read_tool_calls),
                 "editToolCalls": str(edit_tool_calls),
+                "rawTraceEvents": str(raw_trace_events),
+                "rawAgentActions": str(raw_agent_actions),
                 "cost": cost_metric,
             },
             "retries": {
@@ -2666,6 +3035,12 @@ def build_comparison_export(
         if not variant_manifests:
             raise ComparisonExportError(f"Variant {variant_name} not found in manifest.json")
 
+    _assert_explicit_artifact_suffix_when_needed(
+        variant_manifests,
+        suite_dir=suite_dir,
+        artifact_suffix=artifact_suffix,
+    )
+
     ordered_variants: list[dict[str, Any]] = []
     detail_payloads: dict[str, dict[str, Any]] = {}
     for label, manifest_variant in zip(("A", "B"), variant_manifests):
@@ -2680,6 +3055,7 @@ def build_comparison_export(
             artifact_suffix=artifact_suffix,
             include_repo_line_counts=include_repo_line_counts,
         )
+        _assert_context_metric_range(variant_payload, label=str(manifest_variant["name"]))
         variant_payload["label"] = label
         ordered_variants.append(variant_payload)
         for instance_id, detail_row in variant_details.items():
@@ -2761,6 +3137,9 @@ def build_comparison_export(
     comparison_card["notes"].append(
         "Pass@1 is computed via the SWE-bench harness on generated patches. Completed Run Rate remains a separate fork-specific execution-status metric."
     )
+    comparison_card["notes"].append(
+        "Context F1 is macro-averaged across valid evaluations and file/block/line/symbol levels; pooled context levels are exported as diagnostics."
+    )
     if artifact_suffix:
         comparison_card["notes"].append(
             f"Context retrieval metrics are exported from {artifact_suffix.strip().strip('.')} postprocess artifacts."
@@ -2826,6 +3205,54 @@ def build_comparison_payload(
     return payload
 
 
+def _project_instance_payload(instance: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    return {field: copy.deepcopy(instance[field]) for field in fields if field in instance}
+
+
+def split_comparison_instance_payloads(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict[str, dict[str, Any]]]]:
+    """Move task-level comparison rows into per-comparison, per-purpose lazy payloads."""
+    summary_payload = copy.deepcopy(payload)
+    instance_payloads: dict[str, dict[str, dict[str, Any]]] = {}
+    original_cards = payload.get("comparisonCards") or []
+    summary_cards = summary_payload.get("comparisonCards") or []
+
+    for original_card, summary_card in zip(original_cards, summary_cards):
+        if not isinstance(original_card, dict) or not isinstance(summary_card, dict):
+            continue
+        comparison_id = str(original_card.get("id") or "").strip()
+        if not comparison_id:
+            continue
+
+        bundle_variants: dict[str, list[dict[str, Any]]] = {bundle: [] for bundle in COMPARISON_INSTANCE_BUNDLES}
+        original_variants = original_card.get("variants") or []
+        summary_variants = summary_card.get("variants") or []
+        for original_variant, summary_variant in zip(original_variants, summary_variants):
+            if not isinstance(original_variant, dict) or not isinstance(summary_variant, dict):
+                continue
+            instances = original_variant.get("instances")
+            summary_variant.pop("instances", None)
+            if isinstance(instances, list):
+                for bundle, fields in COMPARISON_INSTANCE_BUNDLES.items():
+                    bundle_variants[bundle].append(
+                        {
+                            "label": original_variant.get("label"),
+                            "name": original_variant.get("name"),
+                            "instances": [_project_instance_payload(instance, fields) for instance in instances],
+                        }
+                    )
+
+        instance_payloads[comparison_id] = {
+            bundle: {
+                "comparisonId": comparison_id,
+                "bundle": bundle,
+                "variants": variants,
+            }
+            for bundle, variants in bundle_variants.items()
+        }
+
+    return summary_payload, instance_payloads
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export one evaluated run-suite comparison for the frontend.")
     parser.add_argument(
@@ -2851,6 +3278,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_DETAIL_DIR,
         help=f"Directory for per-instance detail JSON files. Default: {DEFAULT_DETAIL_DIR}",
+    )
+    parser.add_argument(
+        "--instance-payload-dir",
+        type=Path,
+        default=DEFAULT_INSTANCE_PAYLOAD_DIR,
+        help=(
+            "Directory for task-level comparison payload bundles loaded lazily by the frontend. "
+            f"Default: {DEFAULT_INSTANCE_PAYLOAD_DIR}"
+        ),
     )
     parser.add_argument(
         "--artifact-suffix",
@@ -2884,6 +3320,20 @@ def _write_instance_detail_files(
         target_path.write_text(json.dumps(detail_payload, indent=2) + "\n", encoding="utf-8")
 
 
+def _write_comparison_instance_files(
+    *,
+    instance_payload_dir: Path,
+    instance_payloads: dict[str, dict[str, dict[str, Any]]],
+) -> None:
+    for comparison_id, bundle_payloads in instance_payloads.items():
+        if not comparison_id:
+            continue
+        for bundle, instance_payload in bundle_payloads.items():
+            target_path = instance_payload_dir / comparison_id / f"{bundle}.json"
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(json.dumps(instance_payload, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     args = parse_args()
     payload, detail_payloads = build_comparison_export(
@@ -2892,8 +3342,13 @@ def main() -> None:
         artifact_suffix=args.artifact_suffix,
         include_repo_line_counts=args.include_repo_line_counts,
     )
+    summary_payload, instance_payloads = split_comparison_instance_payloads(payload)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    args.output.write_text(json.dumps(summary_payload, indent=2) + "\n", encoding="utf-8")
+    _write_comparison_instance_files(
+        instance_payload_dir=args.instance_payload_dir.resolve(),
+        instance_payloads=instance_payloads,
+    )
     _write_instance_detail_files(detail_dir=args.detail_dir.resolve(), detail_payloads=detail_payloads)
 
 

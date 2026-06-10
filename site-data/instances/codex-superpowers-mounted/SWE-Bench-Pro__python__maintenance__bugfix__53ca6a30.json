@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-18T09:01:58Z",
       "completedAt": "2026-05-18T09:06:51Z",
       "durationMs": 292791,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 814428,
@@ -25,6 +40,28 @@
         "total_tokens": 828293,
         "cache_read_input_tokens": 731520
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 27,
+        "readToolCalls": 0,
+        "editToolCalls": 5
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/scripts/monitoring/monitor.py b/scripts/monitoring/monitor.py\nindex fa898853c..95667338f 100644\n--- a/scripts/monitoring/monitor.py\n+++ b/scripts/monitoring/monitor.py\n@@ -3,28 +3,24 @@\n Defines various monitoring jobs, that check the health of the system.\n \"\"\"\n \n-import os\n-\n-from scripts.monitoring.utils import OlBlockingScheduler, bash_run, limit_server\n-\n-HOST = os.getenv(\"HOSTNAME\")  # eg \"ol-www0.us.archive.org\"\n-\n-if not HOST:\n-    raise ValueError(\"HOSTNAME environment variable not set.\")\n+from scripts.monitoring.utils import (\n+    OlBlockingScheduler,\n+    bash_run,\n+    get_current_hostname,\n+)\n \n+HOST = get_current_hostname()  # eg \"ol-www0.us.archive.org\"\n SERVER = HOST.split(\".\")[0]  # eg \"ol-www0\"\n scheduler = OlBlockingScheduler()\n \n \n-@limit_server([\"ol-web*\", \"ol-covers0\"], scheduler)\n-@scheduler.scheduled_job('interval', seconds=60)\n+@scheduler.scheduled_job('interval', seconds=60, allowed_servers=[\"ol-web*\", \"ol-covers0\"])\n def log_workers_cur_fn():\n     \"\"\"Logs the state of the gunicorn workers.\"\"\"\n     bash_run(f\"log_workers_cur_fn stats.{SERVER}.workers.cur_fn\", sources=[\"utils.sh\"])\n \n \n-@limit_server([\"ol-www0\", \"ol-covers0\"], scheduler)\n-@scheduler.scheduled_job('interval', seconds=60)\n+@scheduler.scheduled_job('interval', seconds=60, allowed_servers=[\"ol-www0\", \"ol-covers0\"])\n def log_recent_bot_traffic():\n     \"\"\"Logs the state of the gunicorn workers.\"\"\"\n     match SERVER:\n@@ -43,8 +39,7 @@ def log_recent_bot_traffic():\n     )\n \n \n-@limit_server([\"ol-www0\", \"ol-covers0\"], scheduler)\n-@scheduler.scheduled_job('interval', seconds=60)\n+@scheduler.scheduled_job('interval', seconds=60, allowed_servers=[\"ol-www0\", \"ol-covers0\"])\n def log_recent_http_statuses():\n     \"\"\"Logs the recent HTTP statuses.\"\"\"\n     match SERVER:\n@@ -63,8 +58,7 @@ def log_recent_http_statuses():\n     )\n \n \n-@limit_server([\"ol-www0\", \"ol-covers0\"], scheduler)\n-@scheduler.scheduled_job('interval', seconds=60)\n+@scheduler.scheduled_job('interval', seconds=60, allowed_servers=[\"ol-www0\", \"ol-covers0\"])\n def log_top_ip_counts():\n     \"\"\"Logs the recent HTTP statuses.\"\"\"\n     match SERVER:\ndiff --git a/scripts/monitoring/tests/test_utils_py.py b/scripts/monitoring/tests/test_utils_py.py\nindex 246ed5440..8895a943a 100644\n--- a/scripts/monitoring/tests/test_utils_py.py\n+++ b/scripts/monitoring/tests/test_utils_py.py\n@@ -23,47 +23,63 @@ def test_bash_run():\n         ]\n \n \n-def test_limit_server():\n+def test_host_scoped_scheduled_job_registers_on_exact_match():\n     with patch(\"os.environ.get\", return_value=\"allowed-server\"):\n         scheduler = OlBlockingScheduler()\n \n-        @limit_server([\"allowed-server\"], scheduler)\n-        @scheduler.scheduled_job(\"interval\", seconds=60)\n+        @scheduler.scheduled_job(\n+            \"interval\", seconds=60, allowed_servers=[\"allowed-server\"]\n+        )\n         def sample_job():\n             pass\n \n-        sample_job()\n         assert scheduler.get_job(\"sample_job\") is not None\n \n+\n+def test_host_scoped_scheduled_job_skips_non_matching_host():\n     with patch(\"os.environ.get\", return_value=\"other-server\"):\n         scheduler = OlBlockingScheduler()\n \n-        @limit_server([\"allowed-server\"], scheduler)\n-        @scheduler.scheduled_job(\"interval\", seconds=60)\n+        @scheduler.scheduled_job(\n+            \"interval\", seconds=60, allowed_servers=[\"allowed-server\"]\n+        )\n         def sample_job():\n             pass\n \n-        sample_job()\n         assert scheduler.get_job(\"sample_job\") is None\n \n+\n+def test_host_scoped_scheduled_job_supports_prefix_wildcards():\n     with patch(\"os.environ.get\", return_value=\"allowed-server0\"):\n         scheduler = OlBlockingScheduler()\n \n-        @limit_server([\"allowed-server*\"], scheduler)\n-        @scheduler.scheduled_job(\"interval\", seconds=60)\n+        @scheduler.scheduled_job(\n+            \"interval\", seconds=60, allowed_servers=[\"allowed-server*\"]\n+        )\n         def sample_job():\n             pass\n \n-        sample_job()\n         assert scheduler.get_job(\"sample_job\") is not None\n \n+\n+def test_host_scoped_scheduled_job_matches_fqdn_against_short_hostname():\n     with patch(\"os.environ.get\", return_value=\"ol-web0.us.archive.org\"):\n         scheduler = OlBlockingScheduler()\n \n-        @limit_server([\"ol-web0\"], scheduler)\n-        @scheduler.scheduled_job(\"interval\", seconds=60)\n+        @scheduler.scheduled_job(\"interval\", seconds=60, allowed_servers=[\"ol-web0\"])\n         def sample_job():\n             pass\n \n-        sample_job()\n         assert scheduler.get_job(\"sample_job\") is not None\n+\n+\n+def test_limit_server_is_backward_compatible():\n+    with patch(\"os.environ.get\", return_value=\"other-server\"):\n+        scheduler = OlBlockingScheduler()\n+\n+        @limit_server([\"allowed-server\"], scheduler)\n+        @scheduler.scheduled_job(\"interval\", seconds=60)\n+        def sample_job():\n+            pass\n+\n+        assert scheduler.get_job(\"sample_job\") is None\ndiff --git a/scripts/monitoring/utils.py b/scripts/monitoring/utils.py\nindex 1bc45c456..e0501700c 100644\n--- a/scripts/monitoring/utils.py\n+++ b/scripts/monitoring/utils.py\n@@ -1,4 +1,3 @@\n-import fnmatch\n import os\n import subprocess\n import typing\n@@ -36,8 +35,12 @@ class OlBlockingScheduler(BlockingScheduler):\n         jobstore=\"default\",\n         executor=\"default\",\n         replace_existing=False,\n+        allowed_servers: list[str] | None = None,\n         **trigger_args,\n     ):\n+        if allowed_servers is not None and not current_host_matches(allowed_servers):\n+            return None\n+\n         return super().add_job(\n             func,\n             trigger,\n@@ -66,6 +69,35 @@ def job_listener(event: JobEvent):\n         print(f\"Job {event.job_id} failed.\", flush=True)\n \n \n+def get_current_hostname() -> str:\n+    hostname = os.environ.get(\"HOSTNAME\")\n+    if not hostname:\n+        raise ValueError(\"HOSTNAME environment variable not set.\")\n+    return hostname\n+\n+\n+def get_current_host_aliases() -> tuple[str, ...]:\n+    hostname = get_current_hostname()\n+    short_hostname = hostname.split(\".\", 1)[0]\n+    if short_hostname == hostname:\n+        return (hostname,)\n+    return (hostname, short_hostname)\n+\n+\n+def current_host_matches(allowed_servers: list[str]) -> bool:\n+    return any(\n+        host_matches_pattern(hostname, pattern)\n+        for hostname in get_current_host_aliases()\n+        for pattern in allowed_servers\n+    )\n+\n+\n+def host_matches_pattern(hostname: str, pattern: str) -> bool:\n+    if pattern.endswith(\"*\"):\n+        return hostname.startswith(pattern[:-1])\n+    return hostname == pattern\n+\n+\n def bash_run(cmd: str, sources: list[str] | None = None, capture_output=False):\n     if not sources:\n         sources = []\n@@ -101,19 +133,14 @@ def bash_run(cmd: str, sources: list[str] | None = None, capture_output=False):\n \n def limit_server(allowed_servers: list[str], scheduler: BlockingScheduler):\n     \"\"\"\n-    Decorate that un-registers a job if the server does not match any of the allowed servers.\n+    Backward-compatible decorator that un-registers a job after registration.\n \n-    :param allowed_servers: List of allowed servers. Can include `*` for globbing, eg \"ol-web*\"\n+    :param allowed_servers: List of allowed servers. Supports exact names and\n+        prefix wildcards such as \"ol-web*\"\n     \"\"\"\n \n     def decorator(func):\n-        hostname = os.environ.get(\"HOSTNAME\")\n-        assert hostname\n-        server = hostname\n-        if hostname.endswith(\".us.archive.org\"):\n-            server = hostname.split(\".\")[0]\n-\n-        if not any(fnmatch.fnmatch(server, pattern) for pattern in allowed_servers):\n+        if not current_host_matches(allowed_servers):\n             scheduler.remove_job(func.__name__)\n         return func\n \n",
       "finalOutput": {
         "status": "completed",
@@ -79,210 +116,13 @@
         "predSteps": [
           {
             "files": [
-              "docker/ol-cron-start.sh",
-              "requirements_scripts.txt",
-              "scripts/Readme.txt",
-              "scripts/__init__.py",
-              "scripts/_init_path.py",
-              "scripts/affiliate_server.py",
-              "scripts/bulk_load_ia_query.py",
-              "scripts/copydocs.py",
-              "scripts/cron_wrapper.py",
-              "scripts/decode_ip.sh",
-              "scripts/delete_import_items.py",
-              "scripts/deployment/are_servers_in_sync.sh",
-              "scripts/deployment/deploy.sh",
-              "scripts/deployment/patch_test_new_memcache_server.sh",
-              "scripts/deployment/patchdeploy.sh",
-              "scripts/deployment/pre_deploy.sh",
-              "scripts/deployment/restart_servers.sh",
-              "scripts/detect_missing_i18n.py",
-              "scripts/dev-instance/create-dev-db-pgdump.sh",
-              "scripts/dev-instance/dev_db.pg_dump",
-              "scripts/dev-instance/load-patron-data.sh",
-              "scripts/dev-instance/patron_data.sql",
-              "scripts/dump-covers-metadata.sql",
-              "scripts/dump-ratings.sql",
-              "scripts/dump-reading-log.sql",
-              "scripts/dump-wikidata.sql",
-              "scripts/expire_accounts.py",
-              "scripts/fake_loan_server.py",
-              "scripts/generate-api-docs.py",
-              "scripts/get_web_error.py",
-              "scripts/gh_scripts/README.md",
-              "scripts/gh_scripts/issue_comment_bot.py",
-              "scripts/gh_scripts/new_pr_labeler.mjs",
-              "scripts/gh_scripts/requirements.txt",
-              "scripts/gh_scripts/weekly_status_report.mjs",
-              "scripts/import_open_textbook_library.py",
-              "scripts/import_pressbooks.py",
-              "scripts/import_standard_ebooks.py",
-              "scripts/install_nginx.sh",
-              "scripts/install_nodejs.sh",
-              "scripts/lc_marc_update.py",
-              "scripts/mail_bad_author_query.py",
-              "scripts/make-integration-branch-sample.txt",
-              "scripts/make-integration-branch.sh",
-              "scripts/manage-imports.py",
-              "scripts/migrate_db.py",
-              "scripts/monitoring/Dockerfile",
-              "scripts/monitoring/monitor.py",
-              "scripts/monitoring/requirements.txt",
-              "scripts/monitoring/tests/sample_covers_nginx_logs.log",
-              "scripts/monitoring/tests/test_utils_py.py",
-              "scripts/monitoring/tests/test_utils_sh.py",
-              "scripts/monitoring/utils.py",
-              "scripts/monitoring/utils.sh",
-              "scripts/obfi.sh",
-              "scripts/obfi/hide.py",
-              "scripts/obfi/mktable.py",
-              "scripts/obfi/reveal.py",
-              "scripts/obfi/shownames.py",
-              "scripts/oclc_to_marc.py",
-              "scripts/oldump.py",
-              "scripts/oldump.sh",
-              "scripts/open_syllabus_project_parser.py",
-              "scripts/partner_batch_imports.py",
-              "scripts/pr_slack_digest.py",
-              "scripts/promise_batch_imports.py",
-              "scripts/providers/import_wikisource.py",
-              "scripts/providers/isbndb.py",
-              "scripts/pull-templates.py",
-              "scripts/run_doctests.sh",
-              "scripts/run_olserver.sh",
-              "scripts/setup_gitpod.sh",
-              "scripts/setup_olserver.sh",
-              "scripts/sitemaps/sitemap.py",
-              "scripts/solr_builder/Dockerfile",
-              "scripts/solr_builder/Dockerfile.olpython",
-              "scripts/solr_builder/Jenkinsfile",
-              "scripts/solr_builder/README.md",
-              "scripts/solr_builder/__init__.py",
-              "scripts/solr_builder/aliases.sh",
-              "scripts/solr_builder/build-cython.sh",
-              "scripts/solr_builder/compose.yaml",
-              "scripts/solr_builder/deploy-solr-next.sh",
-              "scripts/solr_builder/dump-solr.sh",
-              "scripts/solr_builder/index-type.sh",
-              "scripts/solr_builder/logs/.gitignore",
-              "scripts/solr_builder/postgres.ini",
-              "scripts/solr_builder/progress/.gitignore",
-              "scripts/solr_builder/psql-import-simple.sh",
-              "scripts/solr_builder/restore-solr.sh",
-              "scripts/solr_builder/setup.py",
-              "scripts/solr_builder/solr_builder/__init__.py",
-              "scripts/solr_builder/solr_builder/fn_to_cli.py",
-              "scripts/solr_builder/solr_builder/index_subjects.py",
-              "scripts/solr_builder/solr_builder/solr_builder.py",
-              "scripts/solr_builder/sql/count-all-rows.sql",
-              "scripts/solr_builder/sql/count-orphans.sql",
-              "scripts/solr_builder/sql/create-dump-table.sql",
-              "scripts/solr_builder/sql/create-indices.sql",
-              "scripts/solr_builder/sql/import-partial.sql",
-              "scripts/solr_builder/sql/prod-partial-dump.sql",
-              "scripts/solr_builder/tests/__init__.py",
-              "scripts/solr_builder/tests/test_fn_to_cli.py",
-              "scripts/solr_builder/utils.sh",
-              "scripts/solr_dump_xisbn.py",
-              "scripts/solr_restarter/Dockerfile",
-              "scripts/solr_restarter/index.js",
-              "scripts/solr_updater.py",
-              "scripts/start-solr.sh",
-              "scripts/store_counts.py",
-              "scripts/test_py3.sh",
-              "scripts/tests/__init__.py",
-              "scripts/tests/test_affiliate_server.py",
-              "scripts/tests/test_copydocs.py",
-              "scripts/tests/test_import_open_textbook_library.py",
-              "scripts/tests/test_import_standard_ebooks.py",
-              "scripts/tests/test_isbndb.py",
-              "scripts/tests/test_obfi.py",
-              "scripts/tests/test_partner_batch_imports.py",
-              "scripts/tests/test_promise_batch_imports.py",
-              "scripts/tests/test_solr_updater.py",
-              "scripts/update_stale_ocaid_references.py",
-              "scripts/update_stale_work_references.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "docker/Dockerfile.olbase",
-              "docker/Dockerfile.oldev",
-              "docker/ol-cron-start.sh",
-              "docker/ol-nginx-start.sh",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/0descriptionofta1682unit_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/0descriptionofta1682unit.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/0descriptionofta1682unit_marc.xml",
-              "openlibrary/plugins/upstream/utils.py",
-              "requirements.txt"
+              "scripts/monitoring/monitor.py"
             ],
             "spans": {
-              "openlibrary/plugins/upstream/utils.py": [
-                {
-                  "start": 180,
-                  "end": 180
-                }
-              ],
-              "requirements.txt": [
-                {
-                  "start": 3,
-                  "end": 3
-                }
-              ],
-              "docker/ol-cron-start.sh": [
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 4,
-                  "end": 4
-                }
-              ],
-              "docker/Dockerfile.olbase": [
-                {
-                  "start": 61,
-                  "end": 61
-                }
-              ],
-              "docker/Dockerfile.oldev": [
-                {
-                  "start": 17,
-                  "end": 17
-                }
-              ],
-              "docker/ol-nginx-start.sh": [
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 16,
-                  "end": 16
-                }
-              ],
-              "openlibrary/catalog/marc/tests/test_data/bin_input/0descriptionofta1682unit_meta.mrc": [
+              "scripts/monitoring/monitor.py": [
                 {
                   "start": 1,
-                  "end": 1
-                }
-              ],
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/0descriptionofta1682unit.json": [
-                {
-                  "start": 6,
-                  "end": 6
-                }
-              ],
-              "openlibrary/catalog/marc/tests/test_data/xml_input/0descriptionofta1682unit_marc.xml": [
-                {
-                  "start": 27,
-                  "end": 27
+                  "end": 220
                 }
               ]
             },
@@ -290,108 +130,27 @@
           },
           {
             "files": [
-              "scripts/monitoring/monitor.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "scripts/monitoring/tests/test_utils_py.py"
             ],
-            "spans": {},
+            "spans": {
+              "scripts/monitoring/tests/test_utils_py.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "scripts/monitoring/utils.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "scripts/monitoring/monitor.py",
-              "scripts/monitoring/tests/test_utils_py.py",
               "scripts/monitoring/utils.py"
             ],
             "spans": {
               "scripts/monitoring/utils.py": [
                 {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 24,
-                  "end": 24
-                },
-                {
-                  "start": 41,
-                  "end": 41
-                }
-              ],
-              "scripts/monitoring/monitor.py": [
-                {
-                  "start": 8,
-                  "end": 8
-                },
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 67,
-                  "end": 67
-                }
-              ],
-              "scripts/monitoring/tests/test_utils_py.py": [
-                {
-                  "start": 3,
-                  "end": 3
-                },
-                {
-                  "start": 28,
-                  "end": 28
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                },
-                {
-                  "start": 39,
-                  "end": 39
-                },
-                {
-                  "start": 42,
-                  "end": 42
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 61,
-                  "end": 61
-                },
-                {
-                  "start": 64,
-                  "end": 64
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -401,107 +160,11 @@
             "files": [
               "pyproject.toml"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "scripts/deployment/deploy.sh",
-              "scripts/deployment/restart_servers.sh",
-              "scripts/monitoring/monitor.py",
-              "scripts/monitoring/utils.py",
-              "scripts/oldump.sh",
-              "scripts/run_olserver.sh",
-              "scripts/solr_builder/README.md",
-              "scripts/solr_builder/restore-solr.sh"
-            ],
             "spans": {
-              "scripts/monitoring/monitor.py": [
+              "pyproject.toml": [
                 {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 13,
-                  "end": 13
-                },
-                {
-                  "start": 10,
-                  "end": 10
-                },
-                {
-                  "start": 13,
-                  "end": 13
-                }
-              ],
-              "scripts/monitoring/utils.py": [
-                {
-                  "start": 110,
-                  "end": 110
-                },
-                {
-                  "start": 110,
-                  "end": 110
-                }
-              ],
-              "scripts/run_olserver.sh": [
-                {
-                  "start": 22,
-                  "end": 22
-                }
-              ],
-              "scripts/deployment/restart_servers.sh": [
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                },
-                {
-                  "start": 33,
-                  "end": 33
-                }
-              ],
-              "scripts/deployment/deploy.sh": [
-                {
-                  "start": 371,
-                  "end": 371
-                },
-                {
-                  "start": 373,
-                  "end": 373
-                }
-              ],
-              "scripts/solr_builder/README.md": [
-                {
-                  "start": 106,
-                  "end": 106
-                }
-              ],
-              "scripts/solr_builder/restore-solr.sh": [
-                {
-                  "start": 62,
-                  "end": 62
-                },
-                {
-                  "start": 73,
-                  "end": 73
-                },
-                {
-                  "start": 99,
-                  "end": 99
-                }
-              ],
-              "scripts/oldump.sh": [
-                {
-                  "start": 89,
-                  "end": 89
-                },
-                {
-                  "start": 236,
-                  "end": 236
+                  "start": 1,
+                  "end": 220
                 }
               ]
             },
@@ -509,366 +172,27 @@
           }
         ],
         "predFiles": [
-          "docker/Dockerfile.olbase",
-          "docker/Dockerfile.oldev",
-          "docker/ol-cron-start.sh",
-          "docker/ol-nginx-start.sh",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/0descriptionofta1682unit_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/0descriptionofta1682unit.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/0descriptionofta1682unit_marc.xml",
-          "openlibrary/plugins/upstream/utils.py",
-          "pyproject.toml",
-          "requirements.txt",
-          "requirements_scripts.txt",
-          "scripts/Readme.txt",
-          "scripts/__init__.py",
-          "scripts/_init_path.py",
-          "scripts/affiliate_server.py",
-          "scripts/bulk_load_ia_query.py",
-          "scripts/copydocs.py",
-          "scripts/cron_wrapper.py",
-          "scripts/decode_ip.sh",
-          "scripts/delete_import_items.py",
-          "scripts/deployment/are_servers_in_sync.sh",
-          "scripts/deployment/deploy.sh",
-          "scripts/deployment/patch_test_new_memcache_server.sh",
-          "scripts/deployment/patchdeploy.sh",
-          "scripts/deployment/pre_deploy.sh",
-          "scripts/deployment/restart_servers.sh",
-          "scripts/detect_missing_i18n.py",
-          "scripts/dev-instance/create-dev-db-pgdump.sh",
-          "scripts/dev-instance/dev_db.pg_dump",
-          "scripts/dev-instance/load-patron-data.sh",
-          "scripts/dev-instance/patron_data.sql",
-          "scripts/dump-covers-metadata.sql",
-          "scripts/dump-ratings.sql",
-          "scripts/dump-reading-log.sql",
-          "scripts/dump-wikidata.sql",
-          "scripts/expire_accounts.py",
-          "scripts/fake_loan_server.py",
-          "scripts/generate-api-docs.py",
-          "scripts/get_web_error.py",
-          "scripts/gh_scripts/README.md",
-          "scripts/gh_scripts/issue_comment_bot.py",
-          "scripts/gh_scripts/new_pr_labeler.mjs",
-          "scripts/gh_scripts/requirements.txt",
-          "scripts/gh_scripts/weekly_status_report.mjs",
-          "scripts/import_open_textbook_library.py",
-          "scripts/import_pressbooks.py",
-          "scripts/import_standard_ebooks.py",
-          "scripts/install_nginx.sh",
-          "scripts/install_nodejs.sh",
-          "scripts/lc_marc_update.py",
-          "scripts/mail_bad_author_query.py",
-          "scripts/make-integration-branch-sample.txt",
-          "scripts/make-integration-branch.sh",
-          "scripts/manage-imports.py",
-          "scripts/migrate_db.py",
-          "scripts/monitoring/Dockerfile",
           "scripts/monitoring/monitor.py",
-          "scripts/monitoring/requirements.txt",
-          "scripts/monitoring/tests/sample_covers_nginx_logs.log",
           "scripts/monitoring/tests/test_utils_py.py",
-          "scripts/monitoring/tests/test_utils_sh.py",
-          "scripts/monitoring/utils.py",
-          "scripts/monitoring/utils.sh",
-          "scripts/obfi.sh",
-          "scripts/obfi/hide.py",
-          "scripts/obfi/mktable.py",
-          "scripts/obfi/reveal.py",
-          "scripts/obfi/shownames.py",
-          "scripts/oclc_to_marc.py",
-          "scripts/oldump.py",
-          "scripts/oldump.sh",
-          "scripts/open_syllabus_project_parser.py",
-          "scripts/partner_batch_imports.py",
-          "scripts/pr_slack_digest.py",
-          "scripts/promise_batch_imports.py",
-          "scripts/providers/import_wikisource.py",
-          "scripts/providers/isbndb.py",
-          "scripts/pull-templates.py",
-          "scripts/run_doctests.sh",
-          "scripts/run_olserver.sh",
-          "scripts/setup_gitpod.sh",
-          "scripts/setup_olserver.sh",
-          "scripts/sitemaps/sitemap.py",
-          "scripts/solr_builder/Dockerfile",
-          "scripts/solr_builder/Dockerfile.olpython",
-          "scripts/solr_builder/Jenkinsfile",
-          "scripts/solr_builder/README.md",
-          "scripts/solr_builder/__init__.py",
-          "scripts/solr_builder/aliases.sh",
-          "scripts/solr_builder/build-cython.sh",
-          "scripts/solr_builder/compose.yaml",
-          "scripts/solr_builder/deploy-solr-next.sh",
-          "scripts/solr_builder/dump-solr.sh",
-          "scripts/solr_builder/index-type.sh",
-          "scripts/solr_builder/logs/.gitignore",
-          "scripts/solr_builder/postgres.ini",
-          "scripts/solr_builder/progress/.gitignore",
-          "scripts/solr_builder/psql-import-simple.sh",
-          "scripts/solr_builder/restore-solr.sh",
-          "scripts/solr_builder/setup.py",
-          "scripts/solr_builder/solr_builder/__init__.py",
-          "scripts/solr_builder/solr_builder/fn_to_cli.py",
-          "scripts/solr_builder/solr_builder/index_subjects.py",
-          "scripts/solr_builder/solr_builder/solr_builder.py",
-          "scripts/solr_builder/sql/count-all-rows.sql",
-          "scripts/solr_builder/sql/count-orphans.sql",
-          "scripts/solr_builder/sql/create-dump-table.sql",
-          "scripts/solr_builder/sql/create-indices.sql",
-          "scripts/solr_builder/sql/import-partial.sql",
-          "scripts/solr_builder/sql/prod-partial-dump.sql",
-          "scripts/solr_builder/tests/__init__.py",
-          "scripts/solr_builder/tests/test_fn_to_cli.py",
-          "scripts/solr_builder/utils.sh",
-          "scripts/solr_dump_xisbn.py",
-          "scripts/solr_restarter/Dockerfile",
-          "scripts/solr_restarter/index.js",
-          "scripts/solr_updater.py",
-          "scripts/start-solr.sh",
-          "scripts/store_counts.py",
-          "scripts/test_py3.sh",
-          "scripts/tests/__init__.py",
-          "scripts/tests/test_affiliate_server.py",
-          "scripts/tests/test_copydocs.py",
-          "scripts/tests/test_import_open_textbook_library.py",
-          "scripts/tests/test_import_standard_ebooks.py",
-          "scripts/tests/test_isbndb.py",
-          "scripts/tests/test_obfi.py",
-          "scripts/tests/test_partner_batch_imports.py",
-          "scripts/tests/test_promise_batch_imports.py",
-          "scripts/tests/test_solr_updater.py",
-          "scripts/update_stale_ocaid_references.py",
-          "scripts/update_stale_work_references.py"
+          "scripts/monitoring/utils.py"
         ],
         "predSpans": {
-          "openlibrary/plugins/upstream/utils.py": [
-            {
-              "start": 180,
-              "end": 180
-            }
-          ],
-          "requirements.txt": [
-            {
-              "start": 3,
-              "end": 3
-            }
-          ],
-          "docker/ol-cron-start.sh": [
-            {
-              "start": 3,
-              "end": 3
-            },
-            {
-              "start": 4,
-              "end": 4
-            }
-          ],
-          "docker/Dockerfile.olbase": [
-            {
-              "start": 61,
-              "end": 61
-            }
-          ],
-          "docker/Dockerfile.oldev": [
-            {
-              "start": 17,
-              "end": 17
-            }
-          ],
-          "docker/ol-nginx-start.sh": [
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 16,
-              "end": 16
-            }
-          ],
-          "openlibrary/catalog/marc/tests/test_data/bin_input/0descriptionofta1682unit_meta.mrc": [
-            {
-              "start": 1,
-              "end": 1
-            }
-          ],
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/0descriptionofta1682unit.json": [
-            {
-              "start": 6,
-              "end": 6
-            }
-          ],
-          "openlibrary/catalog/marc/tests/test_data/xml_input/0descriptionofta1682unit_marc.xml": [
-            {
-              "start": 27,
-              "end": 27
-            }
-          ],
           "scripts/monitoring/utils.py": [
             {
               "start": 15,
               "end": 147
-            },
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
-              "start": 110,
-              "end": 110
             }
           ],
           "scripts/monitoring/monitor.py": [
             {
               "start": 6,
               "end": 91
-            },
-            {
-              "start": 8,
-              "end": 8
-            },
-            {
-              "start": 10,
-              "end": 10
-            },
-            {
-              "start": 13,
-              "end": 13
-            },
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 67,
-              "end": 67
             }
           ],
           "scripts/monitoring/tests/test_utils_py.py": [
             {
-              "start": 3,
-              "end": 3
-            },
-            {
               "start": 26,
               "end": 85
-            },
-            {
-              "start": 28,
-              "end": 28
-            },
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 39,
-              "end": 39
-            },
-            {
-              "start": 42,
-              "end": 42
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 61,
-              "end": 61
-            },
-            {
-              "start": 64,
-              "end": 64
-            }
-          ],
-          "scripts/run_olserver.sh": [
-            {
-              "start": 22,
-              "end": 22
-            }
-          ],
-          "scripts/deployment/restart_servers.sh": [
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 33,
-              "end": 33
-            }
-          ],
-          "scripts/deployment/deploy.sh": [
-            {
-              "start": 371,
-              "end": 371
-            },
-            {
-              "start": 373,
-              "end": 373
-            }
-          ],
-          "scripts/solr_builder/README.md": [
-            {
-              "start": 106,
-              "end": 106
-            }
-          ],
-          "scripts/solr_builder/restore-solr.sh": [
-            {
-              "start": 62,
-              "end": 62
-            },
-            {
-              "start": 73,
-              "end": 73
-            },
-            {
-              "start": 99,
-              "end": 99
-            }
-          ],
-          "scripts/oldump.sh": [
-            {
-              "start": 89,
-              "end": 89
-            },
-            {
-              "start": 236,
-              "end": 236
             }
           ]
         },
@@ -887,84 +211,48 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.16666666666666666,
+              "symbol": 0.25,
+              "span": 0.26877521801379667,
+              "line": 0.26373626373626374
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.3333333333333333,
+              "symbol": 0.5625,
+              "span": 0.4500846023688663,
+              "line": 0.42857142857142855
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.8630743199271118,
+              "line": 0.8681318681318682
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
-            }
-          },
-          {
-            "step": 5,
-            "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
-            }
-          },
-          {
-            "step": 6,
-            "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.1875,
-              "span": 0.09800859039437719,
-              "line": 0.05860805860805861
-            }
-          },
-          {
-            "step": 7,
-            "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.1875,
-              "span": 0.09800859039437719,
-              "line": 0.05860805860805861
-            }
-          },
-          {
-            "step": 8,
-            "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.3125,
-              "span": 0.12000520629962254,
-              "line": 0.0695970695970696
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.8630743199271118,
+              "line": 0.8681318681318682
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.6666666666666666,
-          "symbol": 0.0859375,
-          "span": 0.03950279838604712,
-          "line": 0.023351648351648352
+          "file": 0.375,
+          "symbol": 0.703125,
+          "span": 0.6112521150592216,
+          "line": 0.6071428571428572
         },
         "redundancy": {
-          "file": 0.10204081632653061,
+          "file": 0.0,
           "symbol": 0.0,
           "span": 0.0,
           "line": 0.0
@@ -1063,12 +351,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/scripts/monitoring/utils.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/scripts/monitoring/utils.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/scripts/monitoring/monitor.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/scripts/monitoring/monitor.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -1094,17 +400,44 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/scripts/monitoring/tests/test_utils_py.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/scripts/monitoring/tests/test_utils_py.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/scripts/monitoring/monitor.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/scripts/monitoring/monitor.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/scripts/monitoring/utils.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/scripts/monitoring/utils.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -1271,9 +604,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-18T09:02:00Z",
       "completedAt": "2026-05-18T09:08:56Z",
       "durationMs": 415914,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1436908,
@@ -1282,6 +630,28 @@
         "total_tokens": 1457458,
         "cache_read_input_tokens": 1282560
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 38,
+        "readToolCalls": 0,
+        "editToolCalls": 4
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/scripts/monitoring/monitor.py b/scripts/monitoring/monitor.py\nindex fa898853c..4726c02ca 100644\n--- a/scripts/monitoring/monitor.py\n+++ b/scripts/monitoring/monitor.py\n@@ -5,7 +5,7 @@ Defines various monitoring jobs, that check the health of the system.\n \n import os\n \n-from scripts.monitoring.utils import OlBlockingScheduler, bash_run, limit_server\n+from scripts.monitoring.utils import OlBlockingScheduler, bash_run\n \n HOST = os.getenv(\"HOSTNAME\")  # eg \"ol-www0.us.archive.org\"\n \n@@ -16,15 +16,13 @@ SERVER = HOST.split(\".\")[0]  # eg \"ol-www0\"\n scheduler = OlBlockingScheduler()\n \n \n-@limit_server([\"ol-web*\", \"ol-covers0\"], scheduler)\n-@scheduler.scheduled_job('interval', seconds=60)\n+@scheduler.scheduled_job('interval', seconds=60, allowed_servers=[\"ol-web*\", \"ol-covers0\"])\n def log_workers_cur_fn():\n     \"\"\"Logs the state of the gunicorn workers.\"\"\"\n     bash_run(f\"log_workers_cur_fn stats.{SERVER}.workers.cur_fn\", sources=[\"utils.sh\"])\n \n \n-@limit_server([\"ol-www0\", \"ol-covers0\"], scheduler)\n-@scheduler.scheduled_job('interval', seconds=60)\n+@scheduler.scheduled_job('interval', seconds=60, allowed_servers=[\"ol-www0\", \"ol-covers0\"])\n def log_recent_bot_traffic():\n     \"\"\"Logs the state of the gunicorn workers.\"\"\"\n     match SERVER:\n@@ -43,8 +41,7 @@ def log_recent_bot_traffic():\n     )\n \n \n-@limit_server([\"ol-www0\", \"ol-covers0\"], scheduler)\n-@scheduler.scheduled_job('interval', seconds=60)\n+@scheduler.scheduled_job('interval', seconds=60, allowed_servers=[\"ol-www0\", \"ol-covers0\"])\n def log_recent_http_statuses():\n     \"\"\"Logs the recent HTTP statuses.\"\"\"\n     match SERVER:\n@@ -63,8 +60,7 @@ def log_recent_http_statuses():\n     )\n \n \n-@limit_server([\"ol-www0\", \"ol-covers0\"], scheduler)\n-@scheduler.scheduled_job('interval', seconds=60)\n+@scheduler.scheduled_job('interval', seconds=60, allowed_servers=[\"ol-www0\", \"ol-covers0\"])\n def log_top_ip_counts():\n     \"\"\"Logs the recent HTTP statuses.\"\"\"\n     match SERVER:\ndiff --git a/scripts/monitoring/tests/test_utils_py.py b/scripts/monitoring/tests/test_utils_py.py\nindex 246ed5440..8ea5a07e3 100644\n--- a/scripts/monitoring/tests/test_utils_py.py\n+++ b/scripts/monitoring/tests/test_utils_py.py\n@@ -23,12 +23,13 @@ def test_bash_run():\n         ]\n \n \n-def test_limit_server():\n+def test_scheduled_job_allowed_servers():\n     with patch(\"os.environ.get\", return_value=\"allowed-server\"):\n         scheduler = OlBlockingScheduler()\n \n-        @limit_server([\"allowed-server\"], scheduler)\n-        @scheduler.scheduled_job(\"interval\", seconds=60)\n+        @scheduler.scheduled_job(\n+            \"interval\", seconds=60, allowed_servers=[\"allowed-server\"]\n+        )\n         def sample_job():\n             pass\n \n@@ -38,8 +39,9 @@ def test_limit_server():\n     with patch(\"os.environ.get\", return_value=\"other-server\"):\n         scheduler = OlBlockingScheduler()\n \n-        @limit_server([\"allowed-server\"], scheduler)\n-        @scheduler.scheduled_job(\"interval\", seconds=60)\n+        @scheduler.scheduled_job(\n+            \"interval\", seconds=60, allowed_servers=[\"allowed-server\"]\n+        )\n         def sample_job():\n             pass\n \n@@ -49,8 +51,9 @@ def test_limit_server():\n     with patch(\"os.environ.get\", return_value=\"allowed-server0\"):\n         scheduler = OlBlockingScheduler()\n \n-        @limit_server([\"allowed-server*\"], scheduler)\n-        @scheduler.scheduled_job(\"interval\", seconds=60)\n+        @scheduler.scheduled_job(\n+            \"interval\", seconds=60, allowed_servers=[\"allowed-server*\"]\n+        )\n         def sample_job():\n             pass\n \n@@ -60,10 +63,34 @@ def test_limit_server():\n     with patch(\"os.environ.get\", return_value=\"ol-web0.us.archive.org\"):\n         scheduler = OlBlockingScheduler()\n \n-        @limit_server([\"ol-web0\"], scheduler)\n-        @scheduler.scheduled_job(\"interval\", seconds=60)\n+        @scheduler.scheduled_job(\"interval\", seconds=60, allowed_servers=[\"ol-web0\"])\n         def sample_job():\n             pass\n \n         sample_job()\n         assert scheduler.get_job(\"sample_job\") is not None\n+\n+\n+def test_scheduled_job_allowed_servers_skips_registration_for_custom_job_id():\n+    with patch(\"os.environ.get\", return_value=\"other-server\"):\n+        scheduler = OlBlockingScheduler()\n+\n+        @scheduler.scheduled_job(\n+            \"interval\", seconds=60, id=\"custom-job\", allowed_servers=[\"allowed-server\"]\n+        )\n+        def sample_job():\n+            pass\n+\n+        sample_job()\n+        assert scheduler.get_job(\"custom-job\") is None\n+\n+\n+def test_limit_server_tags_jobs_for_backwards_compatible_usage():\n+    scheduler = OlBlockingScheduler()\n+\n+    @scheduler.scheduled_job(\"interval\", seconds=60)\n+    @limit_server([\"allowed-server\"], scheduler)\n+    def sample_job():\n+        pass\n+\n+    assert sample_job.__ol_allowed_servers__ == [\"allowed-server\"]\ndiff --git a/scripts/monitoring/utils.py b/scripts/monitoring/utils.py\nindex 1bc45c456..baccdf496 100644\n--- a/scripts/monitoring/utils.py\n+++ b/scripts/monitoring/utils.py\n@@ -1,4 +1,3 @@\n-import fnmatch\n import os\n import subprocess\n import typing\n@@ -13,6 +12,36 @@ from apscheduler.schedulers.blocking import BlockingScheduler\n from apscheduler.util import undefined\n \n \n+def get_current_hostnames(hostname: str | None = None) -> tuple[str, ...]:\n+    hostname = hostname or os.environ.get(\"HOSTNAME\")\n+    if not hostname:\n+        raise ValueError(\"HOSTNAME environment variable not set.\")\n+\n+    short_hostname = hostname.split(\".\", 1)[0]\n+    if short_hostname == hostname:\n+        return (hostname,)\n+    return (hostname, short_hostname)\n+\n+\n+def is_allowed_server(\n+    allowed_servers: list[str] | None, hostname: str | None = None\n+) -> bool:\n+    if allowed_servers is None:\n+        return True\n+    if not allowed_servers:\n+        return False\n+\n+    return any(\n+        current_hostname == allowed_server\n+        or (\n+            allowed_server.endswith(\"*\")\n+            and current_hostname.startswith(allowed_server.removesuffix(\"*\"))\n+        )\n+        for current_hostname in get_current_hostnames(hostname)\n+        for allowed_server in allowed_servers\n+    )\n+\n+\n class OlBlockingScheduler(BlockingScheduler):\n     def __init__(self):\n         super().__init__({'apscheduler.timezone': 'UTC'})\n@@ -36,8 +65,14 @@ class OlBlockingScheduler(BlockingScheduler):\n         jobstore=\"default\",\n         executor=\"default\",\n         replace_existing=False,\n+        allowed_servers: list[str] | None = None,\n         **trigger_args,\n     ):\n+        if allowed_servers is None:\n+            allowed_servers = getattr(func, \"__ol_allowed_servers__\", None)\n+        if not is_allowed_server(allowed_servers):\n+            return None\n+\n         return super().add_job(\n             func,\n             trigger,\n@@ -99,22 +134,20 @@ def bash_run(cmd: str, sources: list[str] | None = None, capture_output=False):\n     )\n \n \n-def limit_server(allowed_servers: list[str], scheduler: BlockingScheduler):\n+def limit_server(\n+    allowed_servers: list[str], scheduler: BlockingScheduler | None = None\n+):\n     \"\"\"\n-    Decorate that un-registers a job if the server does not match any of the allowed servers.\n+    Decorate a job function with host-scoping metadata.\n \n-    :param allowed_servers: List of allowed servers. Can include `*` for globbing, eg \"ol-web*\"\n+    Prefer `allowed_servers=` on scheduler job registration. This decorator is\n+    kept for compatibility with call sites that decorate the function before\n+    registering the job.\n     \"\"\"\n+    del scheduler\n \n     def decorator(func):\n-        hostname = os.environ.get(\"HOSTNAME\")\n-        assert hostname\n-        server = hostname\n-        if hostname.endswith(\".us.archive.org\"):\n-            server = hostname.split(\".\")[0]\n-\n-        if not any(fnmatch.fnmatch(server, pattern) for pattern in allowed_servers):\n-            scheduler.remove_job(func.__name__)\n+        func.__ol_allowed_servers__ = allowed_servers\n         return func\n \n     return decorator\n",
       "finalOutput": {
         "status": "completed",
@@ -1342,441 +712,41 @@
         "predSteps": [
           {
             "files": [
-              "docker/ol-cron-start.sh",
-              "openlibrary/catalog/add_book/tests/__init__.py",
-              "openlibrary/catalog/add_book/tests/conftest.py",
-              "openlibrary/catalog/add_book/tests/test_add_book.py",
-              "openlibrary/catalog/add_book/tests/test_data/coursepuremath00hardrich_meta.mrc",
-              "openlibrary/catalog/add_book/tests/test_data/descendantsofhug00cham_meta.mrc",
-              "openlibrary/catalog/add_book/tests/test_data/flatlandromanceo00abbouoft_meta.mrc",
-              "openlibrary/catalog/add_book/tests/test_data/isbn_9781419594069_meta.mrc",
-              "openlibrary/catalog/add_book/tests/test_data/nurembergwarcrim1997marr_meta.mrc",
-              "openlibrary/catalog/add_book/tests/test_data/roadstogreatness00gall_meta.mrc",
-              "openlibrary/catalog/add_book/tests/test_data/sexuallytransmit00egen_meta.mrc",
-              "openlibrary/catalog/add_book/tests/test_data/treatiseonhistor00dixo_meta.mrc",
-              "openlibrary/catalog/add_book/tests/test_data/v38.i37.records.utf8--16478504-1254",
-              "openlibrary/catalog/add_book/tests/test_data/v39.i28.records.utf8--5362776-1764",
-              "openlibrary/catalog/add_book/tests/test_data/v39.i34.records.utf8--186503-1413",
-              "openlibrary/catalog/add_book/tests/test_data/workshuberthowe00racegoog_meta.mrc",
-              "openlibrary/catalog/add_book/tests/test_load_book.py",
-              "openlibrary/catalog/add_book/tests/test_match.py",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/13dipolarcycload00burk_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/710_org_name_in_direct_order.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/830_series.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/880_Nihon_no_chasho.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/880_alternate_script.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/880_arabic_french_many_linkages.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/880_publisher_unlinked.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/880_table_of_contents.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/bijouorannualofl1828cole_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/bpl_0486266893.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/collingswood_520aa.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/collingswood_bad_008.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/cu31924091184469_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/diebrokeradical400poll_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/engineercorpsofh00sher_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/equalsign_title.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/flatlandromanceo00abbouoft_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/henrywardbeecher00robauoft_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/histoirereligieu05cr_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/ithaca_college_75002321.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/ithaca_two_856u.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/lc_0444897283.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/lc_1416500308.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/lesnoirsetlesrou0000garl_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/memoirsofjosephf00fouc_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/merchantsfromcat00ben_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/ocm00400866.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/onquietcomedyint00brid_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/secretcodeofsucc00stjo_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_245p.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_740.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_856.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_empty_245.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_multi_work_tiles.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_no_title.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_two_authors.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/test-publish-sn-sl-nd.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/test-publish-sn-sl.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/thewilliamsrecord_vol29b_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/uoft_4351105_1626.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/upei_broken_008.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/upei_short_008.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/warofrebellionco1473unit_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/wrapped_lines.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/wwu_51323556.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_expect/zweibchersatir01horauoft_meta.json",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/0descriptionofta1682unit_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/13dipolarcycload00burk_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/1733mmoiresdel00vill_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/710_org_name_in_direct_order.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/830_series.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/880_Nihon_no_chasho.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/880_alternate_script.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/880_arabic_french_many_linkages.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/880_publisher_unlinked.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/880_table_of_contents.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/9999_sd_dates.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/9999_with_correct_date_in_260.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/bijouorannualofl1828cole_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/bpl_0486266893.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/collingswood_520aa.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/collingswood_bad_008.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/cu31924091184469_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/dasrmischepriv00rein_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/diebrokeradical400poll_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/engineercorpsofh00sher_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/equalsign_title.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/flatlandromanceo00abbouoft_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/henrywardbeecher00robauoft_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/histoirereligieu05cr_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/ithaca_college_75002321.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/ithaca_two_856u.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/lc_0444897283.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/lc_1416500308.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/lesabndioeinas00sche_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/lesnoirsetlesrou0000garl_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/lincolncentenary00horn_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/livrodostermosh00bragoog_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/memoirsofjosephf00fouc_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/merchantsfromcat00ben_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/mytwocountries1954asto_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/new_poganucpeoplethe00stowuoft_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/ocm00400866.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/onquietcomedyint00brid_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/poganucpeoplethe00stowuoft_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/reprint_date_wrong_order.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/scrapbooksofmoun03tupp_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/secretcodeofsucc00stjo_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/talis_245p.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/talis_740.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/talis_856.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/talis_empty_245.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/talis_multi_work_tiles.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/talis_no_title.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/talis_no_title2.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/talis_see_also.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/talis_two_authors.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/test-publish-sn-sl-nd.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/test-publish-sn-sl.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/thewilliamsrecord_vol29b_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/uoft_4351105_1626.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/upei_broken_008.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/upei_short_008.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/warofrebellionco1473unit_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/wrapped_lines.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/wwu_51323556.mrc",
-              "openlibrary/catalog/marc/tests/test_data/bin_input/zweibchersatir01horauoft_meta.mrc",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/00schlgoog.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/0descriptionofta1682unit.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/13dipolarcycload00burk.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/1733mmoiresdel00vill.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/39002054008678_yale_edu.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/bijouorannualofl1828cole.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/cu31924091184469.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/engineercorpsofh00sher.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/flatlandromanceo00abbouoft.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/nybc200247.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/onquietcomedyint00brid.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/secretcodeofsucc00stjo.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/soilsurveyrepor00statgoog.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/warofrebellionco1473unit.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_expect/zweibchersatir01horauoft.json",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/00schlgoog_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/0descriptionofta1682unit_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/13dipolarcycload00burk_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/1733mmoiresdel00vill_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/39002054008678_yale_edu_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/abhandlungender01ggoog_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/bijouorannualofl1828cole_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/cu31924091184469_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/dasrmischepriv00rein_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/engineercorpsofh00sher_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/flatlandromanceo00abbouoft_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/lesabndioeinas00sche_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/lincolncentenary00horn_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/livrodostermosh00bragoog_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/mytwocountries1954asto_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/nybc200247_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/onquietcomedyint00brid_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/scrapbooksofmoun03tupp_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/secretcodeofsucc00stjo_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/soilsurveyrepor00statgoog_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/warofrebellionco1473unit_marc.xml",
-              "openlibrary/catalog/marc/tests/test_data/xml_input/zweibchersatir01horauoft_marc.xml",
-              "openlibrary/catalog/marc/tests/test_get_subjects.py",
-              "openlibrary/catalog/marc/tests/test_marc.py",
-              "openlibrary/catalog/marc/tests/test_marc_binary.py",
-              "openlibrary/catalog/marc/tests/test_marc_html.py",
-              "openlibrary/catalog/marc/tests/test_mnemonics.py",
-              "openlibrary/catalog/marc/tests/test_parse.py",
-              "openlibrary/conftest.py",
-              "openlibrary/coverstore/tests/__init__.py",
-              "openlibrary/coverstore/tests/test_archive.py",
-              "openlibrary/coverstore/tests/test_code.py",
-              "openlibrary/coverstore/tests/test_coverstore.py",
-              "openlibrary/coverstore/tests/test_doctests.py",
-              "openlibrary/coverstore/tests/test_webapp.py",
-              "openlibrary/i18n/test_po_files.py",
-              "openlibrary/mocks/tests/__init__.py",
-              "openlibrary/mocks/tests/test_mock_infobase.py",
-              "openlibrary/mocks/tests/test_mock_memcache.py",
-              "openlibrary/olbase/tests/__init__.py",
-              "openlibrary/olbase/tests/test_events.py",
-              "openlibrary/olbase/tests/test_ol_infobase.py",
-              "openlibrary/plugins/admin/tests/__init__.py",
-              "openlibrary/plugins/admin/tests/conftest.py",
-              "openlibrary/plugins/admin/tests/sample_services.yml",
-              "openlibrary/plugins/admin/tests/test_code.py",
-              "openlibrary/plugins/admin/tests/test_services.py",
-              "openlibrary/plugins/books/tests/__init__.py",
-              "openlibrary/plugins/books/tests/test_doctests.py",
-              "openlibrary/plugins/books/tests/test_dynlinks.py",
-              "openlibrary/plugins/books/tests/test_readlinks.py",
-              "openlibrary/plugins/importapi/tests/__init__.py",
-              "openlibrary/plugins/importapi/tests/test_code.py",
-              "openlibrary/plugins/importapi/tests/test_code_ils.py",
-              "openlibrary/plugins/importapi/tests/test_import_edition_builder.py",
-              "openlibrary/plugins/importapi/tests/test_import_validator.py",
-              "openlibrary/plugins/inside/test/test_inside.py",
-              "openlibrary/plugins/openlibrary/tests/__init__.py",
-              "openlibrary/plugins/openlibrary/tests/conftest.py",
-              "openlibrary/plugins/openlibrary/tests/test_bestbookapi.py",
-              "openlibrary/plugins/openlibrary/tests/test_home.py",
-              "openlibrary/plugins/openlibrary/tests/test_listapi.py",
-              "openlibrary/plugins/openlibrary/tests/test_lists.py",
-              "openlibrary/plugins/openlibrary/tests/test_ratingsapi.py",
-              "openlibrary/plugins/openlibrary/tests/test_stats.py",
-              "openlibrary/plugins/upstream/tests/__init__.py",
-              "openlibrary/plugins/upstream/tests/test_account.py",
-              "openlibrary/plugins/upstream/tests/test_addbook.py",
-              "openlibrary/plugins/upstream/tests/test_checkins.py",
-              "openlibrary/plugins/upstream/tests/test_data/goodreads_library_export.csv",
-              "openlibrary/plugins/upstream/tests/test_forms.py",
-              "openlibrary/plugins/upstream/tests/test_merge_authors.py",
-              "openlibrary/plugins/upstream/tests/test_models.py",
-              "openlibrary/plugins/upstream/tests/test_related_carousels.py",
-              "openlibrary/plugins/upstream/tests/test_table_of_contents.py",
-              "openlibrary/plugins/upstream/tests/test_utils.py",
-              "openlibrary/plugins/worksearch/schemes/tests/test_works.py",
-              "openlibrary/plugins/worksearch/tests/test_autocomplete.py",
-              "openlibrary/plugins/worksearch/tests/test_worksearch.py",
-              "openlibrary/records/tests/__init__.py",
-              "openlibrary/records/tests/test_functions.py",
-              "openlibrary/tests/accounts/__init__.py",
-              "openlibrary/tests/accounts/test_models.py",
-              "openlibrary/tests/catalog/test_get_ia.py",
-              "openlibrary/tests/catalog/test_utils.py",
-              "openlibrary/tests/core/__init__.py",
-              "openlibrary/tests/core/lists/test_model.py",
-              "openlibrary/tests/core/sample_amazon_record.py",
-              "openlibrary/tests/core/test_cache.py",
-              "openlibrary/tests/core/test_connections.py",
-              "openlibrary/tests/core/test_db.py",
-              "openlibrary/tests/core/test_fulltext.py",
-              "openlibrary/tests/core/test_helpers.py",
-              "openlibrary/tests/core/test_i18n.py",
-              "openlibrary/tests/core/test_ia.py",
-              "openlibrary/tests/core/test_imports.py",
-              "openlibrary/tests/core/test_lending.py",
-              "openlibrary/tests/core/test_lists_engine.py",
-              "openlibrary/tests/core/test_lists_model.py",
-              "openlibrary/tests/core/test_models.py",
-              "openlibrary/tests/core/test_observations.py",
-              "openlibrary/tests/core/test_olmarkdown.py",
-              "openlibrary/tests/core/test_processors.py",
-              "openlibrary/tests/core/test_processors_invalidation.py",
-              "openlibrary/tests/core/test_ratings.py",
-              "openlibrary/tests/core/test_unmarshal.py",
-              "openlibrary/tests/core/test_vendors.py",
-              "openlibrary/tests/core/test_waitinglist.py",
-              "openlibrary/tests/core/test_wikidata.py",
-              "openlibrary/tests/data/test_dump.py",
-              "openlibrary/tests/solr/__init__.py",
-              "openlibrary/tests/solr/test_data_provider.py",
-              "openlibrary/tests/solr/test_query_utils.py",
-              "openlibrary/tests/solr/test_types_generator.py",
-              "openlibrary/tests/solr/test_update.py",
-              "openlibrary/tests/solr/test_utils.py",
-              "openlibrary/tests/solr/updater/__init__.py",
-              "openlibrary/tests/solr/updater/test_author.py",
-              "openlibrary/tests/solr/updater/test_edition.py",
-              "openlibrary/tests/solr/updater/test_work.py",
-              "openlibrary/tests/test_templates.py",
-              "openlibrary/utils/tests/__init__.py",
-              "openlibrary/utils/tests/test_dateutil.py",
-              "openlibrary/utils/tests/test_ddc.py",
-              "openlibrary/utils/tests/test_isbn.py",
-              "openlibrary/utils/tests/test_lcc.py",
-              "openlibrary/utils/tests/test_lccn.py",
-              "openlibrary/utils/tests/test_processors.py",
-              "openlibrary/utils/tests/test_retry.py",
-              "openlibrary/utils/tests/test_solr.py",
-              "openlibrary/utils/tests/test_utils.py",
-              "requirements_test.txt",
-              "scripts/cron_wrapper.py",
-              "scripts/deployment/patch_test_new_memcache_server.sh",
-              "scripts/monitoring/tests/sample_covers_nginx_logs.log",
-              "scripts/monitoring/tests/test_utils_py.py",
-              "scripts/monitoring/tests/test_utils_sh.py",
-              "scripts/run_doctests.sh",
-              "scripts/solr_builder/tests/__init__.py",
-              "scripts/solr_builder/tests/test_fn_to_cli.py",
-              "scripts/test_py3.sh",
-              "scripts/tests/__init__.py",
-              "scripts/tests/test_affiliate_server.py",
-              "scripts/tests/test_copydocs.py",
-              "scripts/tests/test_import_open_textbook_library.py",
-              "scripts/tests/test_import_standard_ebooks.py",
-              "scripts/tests/test_isbndb.py",
-              "scripts/tests/test_obfi.py",
-              "scripts/tests/test_partner_batch_imports.py",
-              "scripts/tests/test_promise_batch_imports.py",
-              "scripts/tests/test_solr_updater.py",
-              "tests/test_docker_compose.py",
-              "tests/unit/js/Browser.test.js",
-              "tests/unit/js/SearchBar.test.js",
-              "tests/unit/js/SearchUtils.test.js",
-              "tests/unit/js/SelectionManager.test.js",
-              "tests/unit/js/autocomplete.test.js",
-              "tests/unit/js/checkIn.test.js",
-              "tests/unit/js/droppers.test.js",
-              "tests/unit/js/editionEditPageClassification.test.js",
-              "tests/unit/js/editionsEditPage.test.js",
-              "tests/unit/js/html-test-data.js",
-              "tests/unit/js/idValidation.test.js",
-              "tests/unit/js/jquery.repeat.test.js",
-              "tests/unit/js/jsdef.test.js",
-              "tests/unit/js/lists.test.js",
-              "tests/unit/js/my-books.test.js",
-              "tests/unit/js/nonjquery_utils.test.js",
-              "tests/unit/js/python.test.js",
-              "tests/unit/js/readmore.test.js",
-              "tests/unit/js/sample-html/dropper-test-data.js",
-              "tests/unit/js/sample-html/lists-test-data.js",
-              "tests/unit/js/sample-html/utils-test-data.js",
-              "tests/unit/js/search.test.js",
-              "tests/unit/js/service-worker-matchers.test.js",
-              "tests/unit/js/setup.js",
-              "tests/unit/js/signup.test.js",
-              "tests/unit/js/styleMock.js",
-              "tests/unit/js/utils.test.js"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "scripts/monitoring/utils.py"
             ],
-            "spans": {},
+            "spans": {
+              "scripts/monitoring/utils.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "scripts/monitoring/tests/test_utils_py.py"
             ],
-            "spans": {},
+            "spans": {
+              "scripts/monitoring/tests/test_utils_py.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "scripts/monitoring/monitor.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "scripts/monitoring/monitor.py",
-              "scripts/monitoring/tests/test_utils_py.py",
-              "scripts/monitoring/utils.py"
-            ],
             "spans": {
-              "scripts/monitoring/utils.py": [
-                {
-                  "start": 24,
-                  "end": 24
-                },
-                {
-                  "start": 41,
-                  "end": 41
-                },
-                {
-                  "start": 102,
-                  "end": 102
-                }
-              ],
               "scripts/monitoring/monitor.py": [
                 {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 26,
-                  "end": 26
-                },
-                {
-                  "start": 27,
-                  "end": 27
-                },
-                {
-                  "start": 46,
-                  "end": 46
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 66,
-                  "end": 66
-                },
-                {
-                  "start": 67,
-                  "end": 67
-                }
-              ],
-              "scripts/monitoring/tests/test_utils_py.py": [
-                {
-                  "start": 26,
-                  "end": 26
-                },
-                {
-                  "start": 30,
-                  "end": 30
-                },
-                {
-                  "start": 31,
-                  "end": 31
-                },
-                {
-                  "start": 41,
-                  "end": 41
-                },
-                {
-                  "start": 42,
-                  "end": 42
-                },
-                {
-                  "start": 52,
-                  "end": 52
-                },
-                {
-                  "start": 53,
-                  "end": 53
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 64,
-                  "end": 64
+                  "start": 1,
+                  "end": 180
                 }
               ]
             },
@@ -1786,376 +756,98 @@
             "files": [
               "requirements_test.txt"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "Makefile",
-              "pyproject.toml",
-              "requirements.txt",
-              "requirements_scripts.txt",
-              "requirements_test.txt",
-              "scripts/gh_scripts/requirements.txt",
-              "scripts/monitoring/requirements.txt",
-              "scripts/solr_builder/setup.py",
-              "setup.py"
-            ],
-            "spans": {},
+            "spans": {
+              "requirements_test.txt": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "pyproject.toml"
             ],
-            "spans": {},
+            "spans": {
+              "pyproject.toml": [
+                {
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "setup.py"
             ],
-            "spans": {},
+            "spans": {
+              "setup.py": [
+                {
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "requirements_scripts.txt"
             ],
-            "spans": {},
+            "spans": {
+              "requirements_scripts.txt": [
+                {
+                  "start": 1,
+                  "end": 200
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "scripts/monitoring/monitor.py",
+              "scripts/monitoring/utils.py"
+            ],
+            "spans": {
+              "scripts/monitoring/utils.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ],
+              "scripts/monitoring/monitor.py": [
+                {
+                  "start": 1,
+                  "end": 160
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "scripts/monitoring/monitor.py"
+            ],
+            "spans": {
+              "scripts/monitoring/monitor.py": [
+                {
+                  "start": 1,
+                  "end": 140
+                }
+              ]
+            },
             "symbols": {}
           }
         ],
         "predFiles": [
-          "Makefile",
-          "docker/ol-cron-start.sh",
-          "openlibrary/catalog/add_book/tests/__init__.py",
-          "openlibrary/catalog/add_book/tests/conftest.py",
-          "openlibrary/catalog/add_book/tests/test_add_book.py",
-          "openlibrary/catalog/add_book/tests/test_data/coursepuremath00hardrich_meta.mrc",
-          "openlibrary/catalog/add_book/tests/test_data/descendantsofhug00cham_meta.mrc",
-          "openlibrary/catalog/add_book/tests/test_data/flatlandromanceo00abbouoft_meta.mrc",
-          "openlibrary/catalog/add_book/tests/test_data/isbn_9781419594069_meta.mrc",
-          "openlibrary/catalog/add_book/tests/test_data/nurembergwarcrim1997marr_meta.mrc",
-          "openlibrary/catalog/add_book/tests/test_data/roadstogreatness00gall_meta.mrc",
-          "openlibrary/catalog/add_book/tests/test_data/sexuallytransmit00egen_meta.mrc",
-          "openlibrary/catalog/add_book/tests/test_data/treatiseonhistor00dixo_meta.mrc",
-          "openlibrary/catalog/add_book/tests/test_data/v38.i37.records.utf8--16478504-1254",
-          "openlibrary/catalog/add_book/tests/test_data/v39.i28.records.utf8--5362776-1764",
-          "openlibrary/catalog/add_book/tests/test_data/v39.i34.records.utf8--186503-1413",
-          "openlibrary/catalog/add_book/tests/test_data/workshuberthowe00racegoog_meta.mrc",
-          "openlibrary/catalog/add_book/tests/test_load_book.py",
-          "openlibrary/catalog/add_book/tests/test_match.py",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/13dipolarcycload00burk_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/710_org_name_in_direct_order.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/830_series.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/880_Nihon_no_chasho.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/880_alternate_script.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/880_arabic_french_many_linkages.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/880_publisher_unlinked.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/880_table_of_contents.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/bijouorannualofl1828cole_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/bpl_0486266893.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/collingswood_520aa.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/collingswood_bad_008.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/cu31924091184469_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/diebrokeradical400poll_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/engineercorpsofh00sher_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/equalsign_title.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/flatlandromanceo00abbouoft_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/henrywardbeecher00robauoft_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/histoirereligieu05cr_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/ithaca_college_75002321.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/ithaca_two_856u.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/lc_0444897283.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/lc_1416500308.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/lesnoirsetlesrou0000garl_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/memoirsofjosephf00fouc_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/merchantsfromcat00ben_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/ocm00400866.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/onquietcomedyint00brid_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/secretcodeofsucc00stjo_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_245p.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_740.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_856.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_empty_245.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_multi_work_tiles.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_no_title.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/talis_two_authors.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/test-publish-sn-sl-nd.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/test-publish-sn-sl.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/thewilliamsrecord_vol29b_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/uoft_4351105_1626.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/upei_broken_008.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/upei_short_008.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/warofrebellionco1473unit_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/wrapped_lines.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/wwu_51323556.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_expect/zweibchersatir01horauoft_meta.json",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/0descriptionofta1682unit_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/13dipolarcycload00burk_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/1733mmoiresdel00vill_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/710_org_name_in_direct_order.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/830_series.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/880_Nihon_no_chasho.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/880_alternate_script.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/880_arabic_french_many_linkages.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/880_publisher_unlinked.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/880_table_of_contents.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/9999_sd_dates.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/9999_with_correct_date_in_260.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/bijouorannualofl1828cole_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/bpl_0486266893.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/collingswood_520aa.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/collingswood_bad_008.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/cu31924091184469_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/dasrmischepriv00rein_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/diebrokeradical400poll_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/engineercorpsofh00sher_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/equalsign_title.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/flatlandromanceo00abbouoft_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/henrywardbeecher00robauoft_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/histoirereligieu05cr_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/ithaca_college_75002321.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/ithaca_two_856u.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/lc_0444897283.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/lc_1416500308.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/lesabndioeinas00sche_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/lesnoirsetlesrou0000garl_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/lincolncentenary00horn_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/livrodostermosh00bragoog_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/memoirsofjosephf00fouc_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/merchantsfromcat00ben_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/mytwocountries1954asto_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/new_poganucpeoplethe00stowuoft_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/ocm00400866.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/onquietcomedyint00brid_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/poganucpeoplethe00stowuoft_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/reprint_date_wrong_order.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/scrapbooksofmoun03tupp_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/secretcodeofsucc00stjo_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/talis_245p.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/talis_740.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/talis_856.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/talis_empty_245.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/talis_multi_work_tiles.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/talis_no_title.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/talis_no_title2.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/talis_see_also.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/talis_two_authors.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/test-publish-sn-sl-nd.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/test-publish-sn-sl.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/thewilliamsrecord_vol29b_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/uoft_4351105_1626.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/upei_broken_008.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/upei_short_008.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/warofrebellionco1473unit_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/wrapped_lines.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/wwu_51323556.mrc",
-          "openlibrary/catalog/marc/tests/test_data/bin_input/zweibchersatir01horauoft_meta.mrc",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/00schlgoog.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/0descriptionofta1682unit.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/13dipolarcycload00burk.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/1733mmoiresdel00vill.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/39002054008678_yale_edu.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/bijouorannualofl1828cole.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/cu31924091184469.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/engineercorpsofh00sher.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/flatlandromanceo00abbouoft.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/nybc200247.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/onquietcomedyint00brid.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/secretcodeofsucc00stjo.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/soilsurveyrepor00statgoog.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/warofrebellionco1473unit.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_expect/zweibchersatir01horauoft.json",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/00schlgoog_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/0descriptionofta1682unit_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/13dipolarcycload00burk_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/1733mmoiresdel00vill_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/39002054008678_yale_edu_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/abhandlungender01ggoog_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/bijouorannualofl1828cole_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/cu31924091184469_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/dasrmischepriv00rein_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/engineercorpsofh00sher_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/flatlandromanceo00abbouoft_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/lesabndioeinas00sche_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/lincolncentenary00horn_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/livrodostermosh00bragoog_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/mytwocountries1954asto_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/nybc200247_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/onquietcomedyint00brid_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/scrapbooksofmoun03tupp_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/secretcodeofsucc00stjo_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/soilsurveyrepor00statgoog_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/warofrebellionco1473unit_marc.xml",
-          "openlibrary/catalog/marc/tests/test_data/xml_input/zweibchersatir01horauoft_marc.xml",
-          "openlibrary/catalog/marc/tests/test_get_subjects.py",
-          "openlibrary/catalog/marc/tests/test_marc.py",
-          "openlibrary/catalog/marc/tests/test_marc_binary.py",
-          "openlibrary/catalog/marc/tests/test_marc_html.py",
-          "openlibrary/catalog/marc/tests/test_mnemonics.py",
-          "openlibrary/catalog/marc/tests/test_parse.py",
-          "openlibrary/conftest.py",
-          "openlibrary/coverstore/tests/__init__.py",
-          "openlibrary/coverstore/tests/test_archive.py",
-          "openlibrary/coverstore/tests/test_code.py",
-          "openlibrary/coverstore/tests/test_coverstore.py",
-          "openlibrary/coverstore/tests/test_doctests.py",
-          "openlibrary/coverstore/tests/test_webapp.py",
-          "openlibrary/i18n/test_po_files.py",
-          "openlibrary/mocks/tests/__init__.py",
-          "openlibrary/mocks/tests/test_mock_infobase.py",
-          "openlibrary/mocks/tests/test_mock_memcache.py",
-          "openlibrary/olbase/tests/__init__.py",
-          "openlibrary/olbase/tests/test_events.py",
-          "openlibrary/olbase/tests/test_ol_infobase.py",
-          "openlibrary/plugins/admin/tests/__init__.py",
-          "openlibrary/plugins/admin/tests/conftest.py",
-          "openlibrary/plugins/admin/tests/sample_services.yml",
-          "openlibrary/plugins/admin/tests/test_code.py",
-          "openlibrary/plugins/admin/tests/test_services.py",
-          "openlibrary/plugins/books/tests/__init__.py",
-          "openlibrary/plugins/books/tests/test_doctests.py",
-          "openlibrary/plugins/books/tests/test_dynlinks.py",
-          "openlibrary/plugins/books/tests/test_readlinks.py",
-          "openlibrary/plugins/importapi/tests/__init__.py",
-          "openlibrary/plugins/importapi/tests/test_code.py",
-          "openlibrary/plugins/importapi/tests/test_code_ils.py",
-          "openlibrary/plugins/importapi/tests/test_import_edition_builder.py",
-          "openlibrary/plugins/importapi/tests/test_import_validator.py",
-          "openlibrary/plugins/inside/test/test_inside.py",
-          "openlibrary/plugins/openlibrary/tests/__init__.py",
-          "openlibrary/plugins/openlibrary/tests/conftest.py",
-          "openlibrary/plugins/openlibrary/tests/test_bestbookapi.py",
-          "openlibrary/plugins/openlibrary/tests/test_home.py",
-          "openlibrary/plugins/openlibrary/tests/test_listapi.py",
-          "openlibrary/plugins/openlibrary/tests/test_lists.py",
-          "openlibrary/plugins/openlibrary/tests/test_ratingsapi.py",
-          "openlibrary/plugins/openlibrary/tests/test_stats.py",
-          "openlibrary/plugins/upstream/tests/__init__.py",
-          "openlibrary/plugins/upstream/tests/test_account.py",
-          "openlibrary/plugins/upstream/tests/test_addbook.py",
-          "openlibrary/plugins/upstream/tests/test_checkins.py",
-          "openlibrary/plugins/upstream/tests/test_data/goodreads_library_export.csv",
-          "openlibrary/plugins/upstream/tests/test_forms.py",
-          "openlibrary/plugins/upstream/tests/test_merge_authors.py",
-          "openlibrary/plugins/upstream/tests/test_models.py",
-          "openlibrary/plugins/upstream/tests/test_related_carousels.py",
-          "openlibrary/plugins/upstream/tests/test_table_of_contents.py",
-          "openlibrary/plugins/upstream/tests/test_utils.py",
-          "openlibrary/plugins/worksearch/schemes/tests/test_works.py",
-          "openlibrary/plugins/worksearch/tests/test_autocomplete.py",
-          "openlibrary/plugins/worksearch/tests/test_worksearch.py",
-          "openlibrary/records/tests/__init__.py",
-          "openlibrary/records/tests/test_functions.py",
-          "openlibrary/tests/accounts/__init__.py",
-          "openlibrary/tests/accounts/test_models.py",
-          "openlibrary/tests/catalog/test_get_ia.py",
-          "openlibrary/tests/catalog/test_utils.py",
-          "openlibrary/tests/core/__init__.py",
-          "openlibrary/tests/core/lists/test_model.py",
-          "openlibrary/tests/core/sample_amazon_record.py",
-          "openlibrary/tests/core/test_cache.py",
-          "openlibrary/tests/core/test_connections.py",
-          "openlibrary/tests/core/test_db.py",
-          "openlibrary/tests/core/test_fulltext.py",
-          "openlibrary/tests/core/test_helpers.py",
-          "openlibrary/tests/core/test_i18n.py",
-          "openlibrary/tests/core/test_ia.py",
-          "openlibrary/tests/core/test_imports.py",
-          "openlibrary/tests/core/test_lending.py",
-          "openlibrary/tests/core/test_lists_engine.py",
-          "openlibrary/tests/core/test_lists_model.py",
-          "openlibrary/tests/core/test_models.py",
-          "openlibrary/tests/core/test_observations.py",
-          "openlibrary/tests/core/test_olmarkdown.py",
-          "openlibrary/tests/core/test_processors.py",
-          "openlibrary/tests/core/test_processors_invalidation.py",
-          "openlibrary/tests/core/test_ratings.py",
-          "openlibrary/tests/core/test_unmarshal.py",
-          "openlibrary/tests/core/test_vendors.py",
-          "openlibrary/tests/core/test_waitinglist.py",
-          "openlibrary/tests/core/test_wikidata.py",
-          "openlibrary/tests/data/test_dump.py",
-          "openlibrary/tests/solr/__init__.py",
-          "openlibrary/tests/solr/test_data_provider.py",
-          "openlibrary/tests/solr/test_query_utils.py",
-          "openlibrary/tests/solr/test_types_generator.py",
-          "openlibrary/tests/solr/test_update.py",
-          "openlibrary/tests/solr/test_utils.py",
-          "openlibrary/tests/solr/updater/__init__.py",
-          "openlibrary/tests/solr/updater/test_author.py",
-          "openlibrary/tests/solr/updater/test_edition.py",
-          "openlibrary/tests/solr/updater/test_work.py",
-          "openlibrary/tests/test_templates.py",
-          "openlibrary/utils/tests/__init__.py",
-          "openlibrary/utils/tests/test_dateutil.py",
-          "openlibrary/utils/tests/test_ddc.py",
-          "openlibrary/utils/tests/test_isbn.py",
-          "openlibrary/utils/tests/test_lcc.py",
-          "openlibrary/utils/tests/test_lccn.py",
-          "openlibrary/utils/tests/test_processors.py",
-          "openlibrary/utils/tests/test_retry.py",
-          "openlibrary/utils/tests/test_solr.py",
-          "openlibrary/utils/tests/test_utils.py",
-          "pyproject.toml",
-          "requirements.txt",
-          "requirements_scripts.txt",
-          "requirements_test.txt",
-          "scripts/cron_wrapper.py",
-          "scripts/deployment/patch_test_new_memcache_server.sh",
-          "scripts/gh_scripts/requirements.txt",
           "scripts/monitoring/monitor.py",
-          "scripts/monitoring/requirements.txt",
-          "scripts/monitoring/tests/sample_covers_nginx_logs.log",
           "scripts/monitoring/tests/test_utils_py.py",
-          "scripts/monitoring/tests/test_utils_sh.py",
-          "scripts/monitoring/utils.py",
-          "scripts/run_doctests.sh",
-          "scripts/solr_builder/setup.py",
-          "scripts/solr_builder/tests/__init__.py",
-          "scripts/solr_builder/tests/test_fn_to_cli.py",
-          "scripts/test_py3.sh",
-          "scripts/tests/__init__.py",
-          "scripts/tests/test_affiliate_server.py",
-          "scripts/tests/test_copydocs.py",
-          "scripts/tests/test_import_open_textbook_library.py",
-          "scripts/tests/test_import_standard_ebooks.py",
-          "scripts/tests/test_isbndb.py",
-          "scripts/tests/test_obfi.py",
-          "scripts/tests/test_partner_batch_imports.py",
-          "scripts/tests/test_promise_batch_imports.py",
-          "scripts/tests/test_solr_updater.py",
-          "setup.py",
-          "tests/test_docker_compose.py",
-          "tests/unit/js/Browser.test.js",
-          "tests/unit/js/SearchBar.test.js",
-          "tests/unit/js/SearchUtils.test.js",
-          "tests/unit/js/SelectionManager.test.js",
-          "tests/unit/js/autocomplete.test.js",
-          "tests/unit/js/checkIn.test.js",
-          "tests/unit/js/droppers.test.js",
-          "tests/unit/js/editionEditPageClassification.test.js",
-          "tests/unit/js/editionsEditPage.test.js",
-          "tests/unit/js/html-test-data.js",
-          "tests/unit/js/idValidation.test.js",
-          "tests/unit/js/jquery.repeat.test.js",
-          "tests/unit/js/jsdef.test.js",
-          "tests/unit/js/lists.test.js",
-          "tests/unit/js/my-books.test.js",
-          "tests/unit/js/nonjquery_utils.test.js",
-          "tests/unit/js/python.test.js",
-          "tests/unit/js/readmore.test.js",
-          "tests/unit/js/sample-html/dropper-test-data.js",
-          "tests/unit/js/sample-html/lists-test-data.js",
-          "tests/unit/js/sample-html/utils-test-data.js",
-          "tests/unit/js/search.test.js",
-          "tests/unit/js/service-worker-matchers.test.js",
-          "tests/unit/js/setup.js",
-          "tests/unit/js/signup.test.js",
-          "tests/unit/js/styleMock.js",
-          "tests/unit/js/utils.test.js"
+          "scripts/monitoring/utils.py"
         ],
         "predSpans": {
           "scripts/monitoring/utils.py": [
@@ -2164,20 +856,8 @@
               "end": 42
             },
             {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
               "start": 45,
               "end": 92
-            },
-            {
-              "start": 102,
-              "end": 102
             },
             {
               "start": 137,
@@ -2188,80 +868,12 @@
             {
               "start": 8,
               "end": 93
-            },
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 26,
-              "end": 26
-            },
-            {
-              "start": 27,
-              "end": 27
-            },
-            {
-              "start": 46,
-              "end": 46
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 66,
-              "end": 66
-            },
-            {
-              "start": 67,
-              "end": 67
             }
           ],
           "scripts/monitoring/tests/test_utils_py.py": [
             {
               "start": 26,
-              "end": 26
-            },
-            {
-              "start": 26,
               "end": 96
-            },
-            {
-              "start": 30,
-              "end": 30
-            },
-            {
-              "start": 31,
-              "end": 31
-            },
-            {
-              "start": 41,
-              "end": 41
-            },
-            {
-              "start": 42,
-              "end": 42
-            },
-            {
-              "start": 52,
-              "end": 52
-            },
-            {
-              "start": 53,
-              "end": 53
-            },
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 64,
-              "end": 64
             }
           ]
         },
@@ -2279,159 +891,96 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.16666666666666666,
+              "symbol": 0.4375,
+              "span": 0.4129897175582455,
+              "line": 0.43956043956043955
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.3333333333333333,
+              "symbol": 0.75,
+              "span": 0.5942991019133151,
+              "line": 0.6043956043956044
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.8630743199271118,
+              "line": 0.8681318681318682
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.8630743199271118,
+              "line": 0.8681318681318682
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.8630743199271118,
+              "line": 0.8681318681318682
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.8630743199271118,
+              "line": 0.8681318681318682
             }
           },
           {
             "step": 7,
             "coverage": {
-              "file": 0.16666666666666666,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.8630743199271118,
+              "line": 0.8681318681318682
             }
           },
           {
             "step": 8,
             "coverage": {
-              "file": 0.3333333333333333,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 1.0,
+              "span": 0.8630743199271118,
+              "line": 0.8681318681318682
             }
           },
           {
             "step": 9,
             "coverage": {
-              "file": 0.3333333333333333,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
-            }
-          },
-          {
-            "step": 10,
-            "coverage": {
               "file": 0.5,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
-            }
-          },
-          {
-            "step": 11,
-            "coverage": {
-              "file": 0.5,
-              "symbol": 0.25,
-              "span": 0.11544969412989718,
-              "line": 0.06593406593406594
-            }
-          },
-          {
-            "step": 12,
-            "coverage": {
-              "file": 0.5,
-              "symbol": 0.25,
-              "span": 0.11544969412989718,
-              "line": 0.06593406593406594
-            }
-          },
-          {
-            "step": 13,
-            "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.25,
-              "span": 0.11544969412989718,
-              "line": 0.06593406593406594
-            }
-          },
-          {
-            "step": 14,
-            "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.25,
-              "span": 0.11544969412989718,
-              "line": 0.06593406593406594
-            }
-          },
-          {
-            "step": 15,
-            "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.25,
-              "span": 0.11544969412989718,
-              "line": 0.06593406593406594
-            }
-          },
-          {
-            "step": 16,
-            "coverage": {
-              "file": 0.6666666666666666,
-              "symbol": 0.25,
-              "span": 0.11544969412989718,
-              "line": 0.06593406593406594
+              "symbol": 1.0,
+              "span": 0.8630743199271118,
+              "line": 0.8681318681318682
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.3125,
-          "symbol": 0.09375,
-          "span": 0.04329363529871144,
-          "line": 0.024725274725274724
+          "file": 0.4444444444444444,
+          "symbol": 0.9097222222222222,
+          "span": 0.7832010065512605,
+          "line": 0.7912087912087913
         },
         "redundancy": {
-          "file": 0.026627218934911268,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.30000000000000004,
+          "symbol": 0.46875,
+          "span": 0.3715543887877376,
+          "line": 0.2549019607843137
         }
       },
       "fixOverlap": {
@@ -2450,42 +999,42 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/e595b14d8ebc4ca548a3/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/e595b14d8ebc4ca548a3/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/e595b14d8ebc4ca548a3/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/e595b14d8ebc4ca548a3/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,240p' <contextbench-root>/.cache/agent-runtimes/codex/e595b14d8ebc4ca548a3/home/.agents/skills/superpowers/writing-plans/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,240p' <agent-runtime>\"",
           "output": "---\nname: writing-plans\ndescription: Use when you have a spec or requirements for a multi-step task, before touching code\n---\n\n# Writing Plans\n\n## Overview\n\nWrite comprehensive implementation plans assuming the engineer has zero context for our codebase and questionable taste. Document everything they need to know: which files to touch for each task, code, testing, docs they might need to check, how to test it. Give them the whole plan as bite-sized tasks. DRY. YAGNI. TDD. Frequent commits.\n\nAssume they are a skilled developer, but know almost nothing about our toolset or problem domain. Assume they don't know good test design very well.\n\n**Announce at start:** \"I'm using the writing-plans skill to create the implementation plan.\"\n\n**Context:** This should be run in a dedicated worktree (created by brainstorming skill).\n\n**Save plans to:** `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`\n- (User preferences for plan location override this default)\n\n## Scope Check\n\nIf the spec covers multiple independent subsystems, it should have been broken into sub-project specs during brainstorming. If it wasn't, suggest breaking this into separate plans \u2014 one per subsystem. Each plan should produce working, testable software on its own.\n\n## File Structure\n\nBefore defining tasks, map out which files will be created or modified and what each one is responsible for. This is where decomposition decisions get locked in.\n\n- Design units with clear boundaries and well-defined interfaces. Each file should have one clear responsibility.\n- You reason best about code you can hold in context at once, and your edits are more reliable when files are focused. Prefer smaller, focused files over large ones that do too much.\n- Files that change together should live together. Split by responsibility, not by technical layer.\n- In existing codebases, follow established patterns. If the codebase uses large files, don't unilaterally restructure - but if a file you're modifying has grown unwieldy, including a split in the plan is reasonable.\n\nThis structure informs the task decomposition. Each task should produce self-contained changes that make sense independently.\n\n## Bite-Sized Task Granularity\n\n**Each step is one action (2-5 minutes):**\n- \"Write the failing test\" - step\n- \"Run it to make sure it fails\" - step\n- \"Implement the minimal code to make the test pass\" - step\n- \"Run the tests and make sure they pass\" - step\n- \"Commit\" - step\n\n## Plan Document Header\n\n**Every plan MUST start with this header:**\n\n```markdown\n# [Feature Name] Implementation Plan\n\n> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.\n\n**Goal:** [One sentence describing what this builds]\n\n**Architecture:** [2-3 sentences about approach]\n\n**Tech Stack:** [Key technologies/libraries]\n\n---\n```\n\n## Task Structure\n\n````markdown\n### Task N: [Component Name]\n\n**Files:**\n- Create: `exact/path/to/file.py`\n- Modify: `exact/path/to/existing.py:123-145`\n- Test: `tests/exact/path/to/test.py`\n\n- [ ] **Step 1: Write the failing test**\n\n```python\ndef test_specific_behavior():\n    result = function(input)\n    assert result == expected\n```\n\n- [ ] **Step 2: Run test to verify it fails**\n\nRun: `pytest tests/path/test.py::test_name -v`\nExpected: FAIL with \"function not defined\"\n\n- [ ] **Step 3: Write minimal implementation**\n\n```python\ndef function(input):\n    return expected\n```\n\n- [ ] **Step 4: Run test to verify it passes**\n\nRun: `pytest tests/path/test.py::test_name -v`\nExpected: PASS\n\n- [ ] **Step 5: Commit**\n\n```bash\ngit add tests/path/test.py src/path/file.py\ngit commit -m \"feat: add specific feature\"\n```\n````\n\n## Remember\n- Exact file paths always\n- Complete code in plan (not \"add validation\")\n- Exact commands with expected output\n- Reference relevant skills with @ syntax\n- DRY, YAGNI, TDD, frequent commits\n\n## Plan Review Loop\n\nA\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/e595b14d8ebc4ca548a3/home/.agents/skills/superpowers/systematic-debugging/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: systematic-debugging\ndescription: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes\n---\n\n# Systematic Debugging\n\n## Overview\n\nRandom fixes waste time and create new bugs. Quick patches mask underlying issues.\n\n**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.\n\n**Violating the letter of this process is violating the spirit of debugging.**\n\n## The Iron Law\n\n```\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST\n```\n\nIf you haven't completed Phase 1, you cannot propose fixes.\n\n## When to Use\n\nUse for ANY technical issue:\n- Test failures\n- Bugs in production\n- Unexpected behavior\n- Performance problems\n- Build failures\n- Integration issues\n\n**Use this ESPECIALLY when:**\n- Under time pressure (emergencies make guessing tempting)\n- \"Just one quick fix\" seems obvious\n- You've already tried multiple fixes\n- Previous fix didn't work\n- You don't fully understand the issue\n\n**Don't skip when:**\n- Issue seems simple (simple bugs have root causes too)\n- You're in a hurry (rushing guarantees rework)\n- Manager wants it fixed NOW (systematic is faster than thrashing)\n\n## The Four Phases\n\nYou MUST complete each phase before proceeding to the next.\n\n### Phase 1: Root Cause Investigation\n\n**BEFORE attempting ANY fix:**\n\n1. **Read Error Messages Carefully**\n   - Don't skip past errors or warnings\n   - They often contain the exact solution\n   - Read stack traces completely\n   - Note line numbers, file paths, error codes\n\n2. **Reproduce Consistently**\n   - Can you trigger it reliably?\n   - What are the exact steps?\n   - Does it happen every time?\n   - If not reproducible \u2192 gather more data, don't guess\n\n3. **Check Recent Changes**\n   - What changed that could cause this?\n   - Git diff, recent commits\n   - New dependencies, config changes\n   - Environmental differences\n\n4. **Gather Evidence in Multi-Component Systems**\n\n   **WHEN system has multiple components (CI \u2192 build \u2192 signing, API \u2192 service \u2192 database):**\n\n   **BEFORE proposing fixes, add diagnostic instrumentation:**\n   ```\n   For EACH component boundary:\n     - Log what data enters component\n     - Log what data exits component\n     - Verify environment/config propagation\n     - Check state at each layer\n\n   Run once to gather evidence showing WHERE it breaks\n   THEN analyze evidence to identify failing component\n   THEN investigate that specific component\n   ```\n\n   **Example (multi-layer system):**\n   ```bash\n   # Layer 1: Workflow\n   echo \"=== Secrets available in workflow: ===\"\n   echo \"IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}\"\n\n   # Layer 2: Build script\n   echo \"=== Env vars in build script: ===\"\n   env | grep IDENTITY || echo \"IDENTITY not in environment\"\n\n   # Layer 3: Signing script\n   echo \"=== Keychain state: ===\"\n   security list-keychains\n   security find-identity -v\n\n   # Layer 4: Actual signing\n   codesign --sign \"$IDENTITY\" --verbose=4 \"$APP\"\n   ```\n\n   **This reveals:** Which layer fails (secrets \u2192 workflow \u2713, workflow \u2192 build \u2717)\n\n5. **Trace Data Flow**\n\n   **WHEN error is deep in call stack:**\n\n   See `root-cause-tracing.md` in this directory for the complete backward tracing technique.\n\n   **Quick version:**\n   - Where does bad value originate?\n   - What called this with bad value?\n   - Keep tracing up until you find the source\n   - Fix at source, not at symptom\n\n### Phase 2: Pattern Analysis\n\n**Find the pattern before fixing:**\n\n1. **Find Working Examples**\n   - Locate similar working code in same codebase\n   - What works that's similar to what's broken?\n\n2. **Compare Against References**\n   - If implementing pattern, read reference implementation COMPLETELY\n   - Don't skim - read every line\n   - Understand the pattern fully before applying\n\n3. **Identify Differences**\n   - What's different between working and broken?\n   - List every difference, however small\n   - Don't assume \"that can't matter\"\n\n4. **Understand Dependencies**\n   - What other components does this need?\n   - \u2026",
           "exitCode": 0
         },
@@ -2632,7 +1181,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/scripts/monitoring/tests/test_utils_py.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/scripts/monitoring/tests/test_utils_py.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2651,12 +1209,30 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/scripts/monitoring/utils.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/scripts/monitoring/utils.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/scripts/monitoring/monitor.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/scripts/monitoring/monitor.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2720,7 +1296,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/scripts/monitoring/utils.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/scripts/monitoring/utils.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",

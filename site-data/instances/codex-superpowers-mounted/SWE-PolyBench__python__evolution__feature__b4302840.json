@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-01T21:16:21Z",
       "completedAt": "2026-05-01T21:21:13Z",
       "durationMs": 291815,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1049526,
@@ -25,67 +40,89 @@
         "total_tokens": 1062628,
         "cache_read_input_tokens": 959488
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 27,
+        "readToolCalls": 0,
+        "editToolCalls": 3
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/transformers/optimization.py b/src/transformers/optimization.py\nindex 659b92a59b..373606b3b6 100644\n--- a/src/transformers/optimization.py\n+++ b/src/transformers/optimization.py\n@@ -31,6 +31,111 @@ from .utils.versions import require_version\n logger = logging.get_logger(__name__)\n \n \n+class _ConstantSchedule:\n+    def __call__(self, current_step: int):\n+        return 1\n+\n+\n+class _ConstantScheduleWithWarmup:\n+    def __init__(self, num_warmup_steps: int):\n+        self.num_warmup_steps = num_warmup_steps\n+\n+    def __call__(self, current_step: int):\n+        if current_step < self.num_warmup_steps:\n+            return float(current_step) / float(max(1.0, self.num_warmup_steps))\n+        return 1.0\n+\n+\n+class _LinearScheduleWithWarmup:\n+    def __init__(self, num_warmup_steps: int, num_training_steps: int):\n+        self.num_warmup_steps = num_warmup_steps\n+        self.num_training_steps = num_training_steps\n+\n+    def __call__(self, current_step: int):\n+        if current_step < self.num_warmup_steps:\n+            return float(current_step) / float(max(1, self.num_warmup_steps))\n+        return max(\n+            0.0,\n+            float(self.num_training_steps - current_step)\n+            / float(max(1, self.num_training_steps - self.num_warmup_steps)),\n+        )\n+\n+\n+class _CosineScheduleWithWarmup:\n+    def __init__(self, num_warmup_steps: int, num_training_steps: int, num_cycles: float):\n+        self.num_warmup_steps = num_warmup_steps\n+        self.num_training_steps = num_training_steps\n+        self.num_cycles = num_cycles\n+\n+    def __call__(self, current_step: int):\n+        if current_step < self.num_warmup_steps:\n+            return float(current_step) / float(max(1, self.num_warmup_steps))\n+        progress = float(current_step - self.num_warmup_steps) / float(\n+            max(1, self.num_training_steps - self.num_warmup_steps)\n+        )\n+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(self.num_cycles) * 2.0 * progress)))\n+\n+\n+class _CosineWithHardRestartsScheduleWithWarmup:\n+    def __init__(self, num_warmup_steps: int, num_training_steps: int, num_cycles: int):\n+        self.num_warmup_steps = num_warmup_steps\n+        self.num_training_steps = num_training_steps\n+        self.num_cycles = num_cycles\n+\n+    def __call__(self, current_step: int):\n+        if current_step < self.num_warmup_steps:\n+            return float(current_step) / float(max(1, self.num_warmup_steps))\n+        progress = float(current_step - self.num_warmup_steps) / float(\n+            max(1, self.num_training_steps - self.num_warmup_steps)\n+        )\n+        if progress >= 1.0:\n+            return 0.0\n+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * ((float(self.num_cycles) * progress) % 1.0))))\n+\n+\n+class _PolynomialDecayScheduleWithWarmup:\n+    def __init__(\n+        self, num_warmup_steps: int, num_training_steps: int, lr_end: float, power: float, lr_init: float\n+    ):\n+        self.num_warmup_steps = num_warmup_steps\n+        self.num_training_steps = num_training_steps\n+        self.lr_end = lr_end\n+        self.power = power\n+        self.lr_init = lr_init\n+\n+    def __call__(self, current_step: int):\n+        if current_step < self.num_warmup_steps:\n+            return float(current_step) / float(max(1, self.num_warmup_steps))\n+        if current_step > self.num_training_steps:\n+            return self.lr_end / self.lr_init  # as LambdaLR multiplies by lr_init\n+\n+        lr_range = self.lr_init - self.lr_end\n+        decay_steps = self.num_training_steps - self.num_warmup_steps\n+        pct_remaining = 1 - (current_step - self.num_warmup_steps) / decay_steps\n+        decay = lr_range * pct_remaining**self.power + self.lr_end\n+        return decay / self.lr_init  # as LambdaLR multiplies by lr_init\n+\n+\n+class _InverseSqrtSchedule:\n+    def __init__(self, num_warmup_steps: int, timescale: int):\n+        self.num_warmup_steps = num_warmup_steps\n+        self.timescale = timescale\n+\n+    def __call__(self, current_step: int):\n+        if current_step < self.num_warmup_steps:\n+            return float(current_step) / float(max(1, self.num_warmup_steps))\n+        shift = self.timescale - self.num_warmup_steps\n+        return 1.0 / math.sqrt((current_step + shift) / self.timescale)\n+\n+\n+class _AdafactorSchedule:\n+    def __init__(self, initial_lr: float):\n+        self.initial_lr = initial_lr\n+\n+    def __call__(self, current_step: int):\n+        return self.initial_lr\n+\n+\n def get_constant_schedule(optimizer: Optimizer, last_epoch: int = -1):\n     \"\"\"\n     Create a schedule with a constant learning rate, using the learning rate set in optimizer.\n@@ -44,7 +149,7 @@ def get_constant_schedule(optimizer: Optimizer, last_epoch: int = -1):\n     Return:\n         `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.\n     \"\"\"\n-    return LambdaLR(optimizer, lambda _: 1, last_epoch=last_epoch)\n+    return LambdaLR(optimizer, _ConstantSchedule(), last_epoch=last_epoch)\n \n \n def get_constant_schedule_with_warmup(optimizer: Optimizer, num_warmup_steps: int, last_epoch: int = -1):\n@@ -64,12 +169,7 @@ def get_constant_schedule_with_warmup(optimizer: Optimizer, num_warmup_steps: in\n         `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.\n     \"\"\"\n \n-    def lr_lambda(current_step: int):\n-        if current_step < num_warmup_steps:\n-            return float(current_step) / float(max(1.0, num_warmup_steps))\n-        return 1.0\n-\n-    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)\n+    return LambdaLR(optimizer, _ConstantScheduleWithWarmup(num_warmup_steps), last_epoch=last_epoch)\n \n \n def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):\n@@ -91,14 +191,7 @@ def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st\n         `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.\n     \"\"\"\n \n-    def lr_lambda(current_step: int):\n-        if current_step < num_warmup_steps:\n-            return float(current_step) / float(max(1, num_warmup_steps))\n-        return max(\n-            0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps))\n-        )\n-\n-    return LambdaLR(optimizer, lr_lambda, last_epoch)\n+    return LambdaLR(optimizer, _LinearScheduleWithWarmup(num_warmup_steps, num_training_steps), last_epoch)\n \n \n def get_cosine_schedule_with_warmup(\n@@ -126,13 +219,9 @@ def get_cosine_schedule_with_warmup(\n         `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.\n     \"\"\"\n \n-    def lr_lambda(current_step):\n-        if current_step < num_warmup_steps:\n-            return float(current_step) / float(max(1, num_warmup_steps))\n-        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))\n-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))\n-\n-    return LambdaLR(optimizer, lr_lambda, last_epoch)\n+    return LambdaLR(\n+        optimizer, _CosineScheduleWithWarmup(num_warmup_steps, num_training_steps, num_cycles), last_epoch\n+    )\n \n \n def get_cosine_with_hard_restarts_schedule_with_warmup(\n@@ -159,15 +248,11 @@ def get_cosine_with_hard_restarts_schedule_with_warmup(\n         `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.\n     \"\"\"\n \n-    def lr_lambda(current_step):\n-        if current_step < num_warmup_steps:\n-            return float(current_step) / float(max(1, num_warmup_steps))\n-        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))\n-        if progress >= 1.0:\n-            return 0.0\n-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * ((float(num_cycles) * progress) % 1.0))))\n-\n-    return LambdaLR(optimizer, lr_lambda, last_epoch)\n+    return LambdaLR(\n+        optimizer,\n+        _CosineWithHardRestartsScheduleWithWarmup(num_warmup_steps, num_training_steps, num_cycles),\n+        last_epoch,\n+    )\n \n \n def get_polynomial_decay_schedule_with_warmup(\n@@ -205,19 +290,11 @@ def get_polynomial_decay_schedule_with_warmup(\n     if not (lr_init > lr_end):\n         raise ValueError(f\"lr_end ({lr_end}) must be be smaller than initial lr ({lr_init})\")\n \n-    def lr_lambda(current_step: int):\n-        if current_step < num_warmup_steps:\n-            return float(current_step) / float(max(1, num_warmup_steps))\n-        elif current_step > num_training_steps:\n-            return lr_end / lr_init  # as LambdaLR multiplies by lr_init\n-        else:\n-            lr_range = lr_init - lr_end\n-            decay_steps = num_training_steps - num_warmup_steps\n-            pct_remaining = 1 - (current_step - num_warmup_steps) / decay_steps\n-            decay = lr_range * pct_remaining**power + lr_end\n-            return decay / lr_init  # as LambdaLR multiplies by lr_init\n-\n-    return LambdaLR(optimizer, lr_lambda, last_epoch)\n+    return LambdaLR(\n+        optimizer,\n+        _PolynomialDecayScheduleWithWarmup(num_warmup_steps, num_training_steps, lr_end, power, lr_init),\n+        last_epoch,\n+    )\n \n \n def get_inverse_sqrt_schedule(\n@@ -246,14 +323,7 @@ def get_inverse_sqrt_schedule(\n     if timescale is None:\n         timescale = num_warmup_steps\n \n-    def lr_lambda(current_step: int):\n-        if current_step < num_warmup_steps:\n-            return float(current_step) / float(max(1, num_warmup_steps))\n-        shift = timescale - num_warmup_steps\n-        decay = 1.0 / math.sqrt((current_step + shift) / timescale)\n-        return decay\n-\n-    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)\n+    return LambdaLR(optimizer, _InverseSqrtSchedule(num_warmup_steps, timescale), last_epoch=last_epoch)\n \n \n TYPE_TO_SCHEDULER_FUNCTION = {\n@@ -672,12 +742,9 @@ class AdafactorSchedule(LambdaLR):\n     \"\"\"\n \n     def __init__(self, optimizer, initial_lr=0.0):\n-        def lr_lambda(_):\n-            return initial_lr\n-\n         for group in optimizer.param_groups:\n             group[\"initial_lr\"] = initial_lr\n-        super().__init__(optimizer, lr_lambda)\n+        super().__init__(optimizer, _AdafactorSchedule(initial_lr))\n         for group in optimizer.param_groups:\n             del group[\"initial_lr\"]\n \ndiff --git a/tests/optimization/test_optimization.py b/tests/optimization/test_optimization.py\nindex 0280121ee6..2e0ff80523 100644\n--- a/tests/optimization/test_optimization.py\n+++ b/tests/optimization/test_optimization.py\n@@ -14,6 +14,7 @@\n # limitations under the License.\n \n \n+import pickle\n import os\n import tempfile\n import unittest\n@@ -62,6 +63,16 @@ def unwrap_and_save_reload_schedule(scheduler, num_steps=10):\n     return lrs\n \n \n+def unwrap_and_pickle_reload_schedule(scheduler, num_steps=10):\n+    lrs = []\n+    for step in range(num_steps):\n+        lrs.append(scheduler.get_lr()[0])\n+        scheduler.step()\n+        if step == num_steps // 2:\n+            scheduler = pickle.loads(pickle.dumps(scheduler))\n+    return lrs\n+\n+\n @require_torch\n class OptimizationTest(unittest.TestCase):\n     def assertListAlmostEqual(self, list1, list2, tol):\n@@ -168,3 +179,7 @@ class ScheduleInitTest(unittest.TestCase):\n             scheduler = scheduler_func(self.optimizer, **kwargs)\n             lrs_2 = unwrap_and_save_reload_schedule(scheduler, self.num_steps)\n             self.assertListEqual(lrs_1, lrs_2, msg=f\"failed for {scheduler_func} in save and reload\")\n+\n+            scheduler = scheduler_func(self.optimizer, **kwargs)\n+            lrs_3 = unwrap_and_pickle_reload_schedule(scheduler, self.num_steps)\n+            self.assertListEqual(lrs_1, lrs_3, msg=f\"failed for {scheduler_func} in pickle reload\")\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Replaced the non-picklable inline `lambda`/local `lr_lambda` functions in `src/transformers/optimization.py` with module-level callable objects, covering the requested warmup/decay schedulers and the related `get_inverse_sqrt_schedule` and `AdafactorSchedule` paths for consistency. Added a regression in `tests/optimization/test_optimization.py` that pickles and unpickles schedulers mid-run and asserts the LR sequence is preserved.\n\nVerification: `python3 -m py_compile src/transformers/optimization.py tests/optimization/test_optimization.py`, `python3 -m compileall -q src/transformers/optimization.py tests/optimization/test_optimization.py`, and `git diff --check` all passed.\n\nVerification limitation: repo-native torch tests could not run in this environment because the available Python is missing `pytest`, `torch`, and `packaging` for importing the local `transformers` package.",
         "notes": "Strongest offline-safe checks completed were syntax/bytecode validation and diff hygiene checks. `python3 -m pytest tests/optimization/test_optimization.py` could not run because `pytest` is not installed. `PYTHONPATH=src python3 -m unittest tests.optimization.test_optimization` also failed before test execution because the environment lacks `packaging` (required by local `transformers` import) and `torch`.",
         "retrievedContextFiles": [
-          "<worktree>/src/transformers/optimization.py",
-          "<worktree>/tests/optimization/test_optimization.py"
+          "src/transformers/optimization.py",
+          "tests/optimization/test_optimization.py"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/src/transformers/optimization.py",
+            "file": "src/transformers/optimization.py",
             "start": 34,
             "end": 325
           },
           {
-            "file": "<worktree>/src/transformers/optimization.py",
+            "file": "src/transformers/optimization.py",
             "start": 736,
             "end": 746
           },
           {
-            "file": "<worktree>/tests/optimization/test_optimization.py",
+            "file": "tests/optimization/test_optimization.py",
             "start": 17,
             "end": 185
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/src/transformers/optimization.py",
+            "file": "src/transformers/optimization.py",
             "name": "AdafactorSchedule"
           },
           {
-            "file": "<worktree>/src/transformers/optimization.py",
+            "file": "src/transformers/optimization.py",
             "name": "get_constant_schedule"
           },
           {
-            "file": "<worktree>/src/transformers/optimization.py",
+            "file": "src/transformers/optimization.py",
             "name": "get_constant_schedule_with_warmup"
           },
           {
-            "file": "<worktree>/src/transformers/optimization.py",
+            "file": "src/transformers/optimization.py",
             "name": "get_cosine_schedule_with_warmup"
           },
           {
-            "file": "<worktree>/src/transformers/optimization.py",
+            "file": "src/transformers/optimization.py",
             "name": "get_cosine_with_hard_restarts_schedule_with_warmup"
           },
           {
-            "file": "<worktree>/src/transformers/optimization.py",
+            "file": "src/transformers/optimization.py",
             "name": "get_inverse_sqrt_schedule"
           },
           {
-            "file": "<worktree>/src/transformers/optimization.py",
+            "file": "src/transformers/optimization.py",
             "name": "get_linear_schedule_with_warmup"
           },
           {
-            "file": "<worktree>/src/transformers/optimization.py",
+            "file": "src/transformers/optimization.py",
             "name": "get_polynomial_decay_schedule_with_warmup"
           },
           {
-            "file": "<worktree>/tests/optimization/test_optimization.py",
+            "file": "tests/optimization/test_optimization.py",
             "name": "ScheduleInitTest.test_schedulers"
           }
         ]
@@ -96,38 +133,74 @@
             "files": [
               "src/transformers/optimization.py"
             ],
+            "spans": {
+              "src/transformers/optimization.py": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/optimization.py"
+            ],
             "spans": {},
             "symbols": {}
           },
           {
             "files": [
-              "src/transformers/utils/dummy_pt_objects.py"
+              "tests/optimization/test_optimization.py"
             ],
             "spans": {
-              "src/transformers/utils/dummy_pt_objects.py": [
+              "tests/optimization/test_optimization.py": [
                 {
-                  "start": 7317,
-                  "end": 7317
-                },
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/optimization.py"
+            ],
+            "spans": {
+              "src/transformers/optimization.py": [
                 {
-                  "start": 7321,
-                  "end": 7321
-                },
+                  "start": 220,
+                  "end": 740
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/optimization.py"
+            ],
+            "spans": {
+              "src/transformers/optimization.py": [
                 {
-                  "start": 7325,
-                  "end": 7325
-                },
+                  "start": 1,
+                  "end": 280
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/optimization.py"
+            ],
+            "spans": {
+              "src/transformers/optimization.py": [
                 {
-                  "start": 7329,
-                  "end": 7329
-                },
-                {
-                  "start": 7337,
-                  "end": 7337
-                },
-                {
-                  "start": 7341,
-                  "end": 7341
+                  "start": 650,
+                  "end": 710
                 }
               ]
             },
@@ -137,1068 +210,95 @@
             "files": [
               "tests/optimization/test_optimization.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/optimization/test_optimization.py": [
+                {
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/transformers/__init__.py",
-              "src/transformers/benchmark/benchmark_args.py",
-              "src/transformers/benchmark/benchmark_tf.py",
-              "src/transformers/convert_graph_to_onnx.py",
-              "src/transformers/image_transforms.py",
-              "src/transformers/modeling_flax_pytorch_utils.py",
-              "src/transformers/modeling_flax_utils.py",
-              "src/transformers/modeling_utils.py",
-              "src/transformers/models/bart/configuration_bart.py",
-              "src/transformers/models/bert/convert_bert_original_tf2_checkpoint_to_pytorch.py",
-              "src/transformers/models/bigbird_pegasus/configuration_bigbird_pegasus.py",
-              "src/transformers/models/blenderbot/configuration_blenderbot.py",
-              "src/transformers/models/blenderbot_small/configuration_blenderbot_small.py",
-              "src/transformers/models/fnet/configuration_fnet.py",
-              "src/transformers/models/fnet/modeling_fnet.py",
-              "src/transformers/models/layoutlmv3/configuration_layoutlmv3.py",
-              "src/transformers/models/m2m_100/configuration_m2m_100.py",
-              "src/transformers/models/marian/configuration_marian.py",
-              "src/transformers/models/mask2former/modeling_mask2former.py",
-              "src/transformers/models/maskformer/convert_maskformer_resnet_to_pytorch.py",
-              "src/transformers/models/maskformer/convert_maskformer_swin_to_pytorch.py",
-              "src/transformers/models/mbart/configuration_mbart.py",
-              "src/transformers/models/perceiver/configuration_perceiver.py",
-              "src/transformers/models/perceiver/convert_perceiver_haiku_to_pytorch.py",
-              "src/transformers/models/rag/retrieval_rag.py",
-              "src/transformers/models/realm/retrieval_realm.py",
-              "src/transformers/models/reformer/convert_reformer_trax_checkpoint_to_pytorch.py",
-              "src/transformers/models/transfo_xl/convert_transfo_xl_original_tf_checkpoint_to_pytorch.py",
-              "src/transformers/models/transfo_xl/tokenization_transfo_xl.py",
-              "src/transformers/optimization.py",
-              "src/transformers/optimization_tf.py",
-              "src/transformers/pipelines/base.py",
-              "src/transformers/training_args_tf.py",
-              "src/transformers/utils/dummy_pt_objects.py",
-              "src/transformers/utils/fx.py",
-              "tests/deepspeed/test_deepspeed.py",
-              "tests/models/bert_japanese/test_tokenization_bert_japanese.py",
-              "tests/models/fnet/test_modeling_fnet.py",
-              "tests/models/gpt2/test_modeling_tf_gpt2.py",
-              "tests/models/hubert/test_modeling_hubert.py",
-              "tests/models/rag/test_retrieval_rag.py",
-              "tests/models/speecht5/test_tokenization_speecht5.py",
-              "tests/models/wav2vec2/test_modeling_wav2vec2.py",
-              "tests/models/xglm/test_tokenization_xglm.py",
-              "tests/models/xlm_roberta/test_tokenization_xlm_roberta.py",
-              "tests/optimization/test_optimization.py",
-              "tests/test_modeling_common.py",
-              "tests/test_modeling_tf_common.py",
-              "tests/test_tokenization_common.py",
-              "tests/tokenization/test_tokenization_utils.py",
-              "tests/trainer/test_trainer.py"
+              "tests/optimization/test_optimization.py"
             ],
             "spans": {
-              "src/transformers/modeling_utils.py": [
-                {
-                  "start": 275,
-                  "end": 275
-                },
-                {
-                  "start": 1653,
-                  "end": 1653
-                }
-              ],
-              "src/transformers/training_args_tf.py": [
-                {
-                  "start": 132,
-                  "end": 132
-                }
-              ],
-              "src/transformers/__init__.py": [
-                {
-                  "start": 2698,
-                  "end": 2698
-                },
-                {
-                  "start": 2702,
-                  "end": 2702
-                },
-                {
-                  "start": 2703,
-                  "end": 2703
-                },
-                {
-                  "start": 2704,
-                  "end": 2704
-                },
-                {
-                  "start": 2705,
-                  "end": 2705
-                },
-                {
-                  "start": 2706,
-                  "end": 2706
-                },
-                {
-                  "start": 2707,
-                  "end": 2707
-                },
-                {
-                  "start": 3372,
-                  "end": 3372
-                },
-                {
-                  "start": 5881,
-                  "end": 5881
-                },
-                {
-                  "start": 5885,
-                  "end": 5885
-                },
-                {
-                  "start": 5886,
-                  "end": 5886
-                },
-                {
-                  "start": 5887,
-                  "end": 5887
-                },
-                {
-                  "start": 5888,
-                  "end": 5888
-                },
-                {
-                  "start": 5889,
-                  "end": 5889
-                },
-                {
-                  "start": 5890,
-                  "end": 5890
-                },
-                {
-                  "start": 6425,
-                  "end": 6425
-                }
-              ],
-              "src/transformers/pipelines/base.py": [
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 482,
-                  "end": 482
-                },
-                {
-                  "start": 491,
-                  "end": 491
-                },
-                {
-                  "start": 494,
-                  "end": 494
-                },
-                {
-                  "start": 714,
-                  "end": 714
-                },
-                {
-                  "start": 741,
-                  "end": 741
-                }
-              ],
-              "src/transformers/models/mbart/configuration_mbart.py": [
-                {
-                  "start": 344,
-                  "end": 344
-                },
-                {
-                  "start": 349,
-                  "end": 349
-                }
-              ],
-              "src/transformers/utils/fx.py": [
-                {
-                  "start": 708,
-                  "end": 708
-                }
-              ],
-              "src/transformers/utils/dummy_pt_objects.py": [
-                {
-                  "start": 7321,
-                  "end": 7321
-                },
-                {
-                  "start": 7322,
-                  "end": 7322
-                },
-                {
-                  "start": 7325,
-                  "end": 7325
-                },
-                {
-                  "start": 7326,
-                  "end": 7326
-                },
-                {
-                  "start": 7329,
-                  "end": 7329
-                },
-                {
-                  "start": 7330,
-                  "end": 7330
-                },
-                {
-                  "start": 7333,
-                  "end": 7333
-                },
-                {
-                  "start": 7334,
-                  "end": 7334
-                },
-                {
-                  "start": 7337,
-                  "end": 7337
-                },
-                {
-                  "start": 7338,
-                  "end": 7338
-                },
-                {
-                  "start": 7341,
-                  "end": 7341
-                },
-                {
-                  "start": 7342,
-                  "end": 7342
-                }
-              ],
-              "src/transformers/models/fnet/modeling_fnet.py": [
-                {
-                  "start": 165,
-                  "end": 165
-                },
-                {
-                  "start": 572,
-                  "end": 572
-                },
-                {
-                  "start": 578,
-                  "end": 578
-                }
-              ],
-              "src/transformers/models/realm/retrieval_realm.py": [
-                {
-                  "start": 117,
-                  "end": 117
-                }
-              ],
-              "src/transformers/models/fnet/configuration_fnet.py": [
-                {
-                  "start": 65,
-                  "end": 65
-                },
-                {
-                  "start": 70,
-                  "end": 70
-                },
-                {
-                  "start": 101,
-                  "end": 101
-                },
-                {
-                  "start": 120,
-                  "end": 120
-                }
-              ],
-              "src/transformers/models/perceiver/convert_perceiver_haiku_to_pytorch.py": [
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 264,
-                  "end": 264
-                },
-                {
-                  "start": 270,
-                  "end": 270
-                },
-                {
-                  "start": 271,
-                  "end": 271
-                },
-                {
-                  "start": 444,
-                  "end": 444
-                },
-                {
-                  "start": 448,
-                  "end": 448
-                },
-                {
-                  "start": 468,
-                  "end": 468
-                }
-              ],
-              "src/transformers/models/perceiver/configuration_perceiver.py": [
-                {
-                  "start": 215,
-                  "end": 215
-                },
-                {
-                  "start": 219,
-                  "end": 219
-                },
-                {
-                  "start": 230,
-                  "end": 230
-                }
-              ],
-              "src/transformers/models/blenderbot_small/configuration_blenderbot_small.py": [
-                {
-                  "start": 345,
-                  "end": 345
-                },
-                {
-                  "start": 350,
-                  "end": 350
-                }
-              ],
-              "src/transformers/models/bert/convert_bert_original_tf2_checkpoint_to_pytorch.py": [
-                {
-                  "start": 57,
-                  "end": 57
-                }
-              ],
-              "src/transformers/models/blenderbot/configuration_blenderbot.py": [
-                {
-                  "start": 332,
-                  "end": 332
-                },
-                {
-                  "start": 337,
-                  "end": 337
-                }
-              ],
-              "src/transformers/models/rag/retrieval_rag.py": [
-                {
-                  "start": 18,
-                  "end": 18
-                },
-                {
-                  "start": 135,
-                  "end": 135
-                },
-                {
-                  "start": 144,
-                  "end": 144
-                }
-              ],
-              "src/transformers/models/bart/configuration_bart.py": [
-                {
-                  "start": 359,
-                  "end": 359
-                },
-                {
-                  "start": 364,
-                  "end": 364
-                }
-              ],
-              "src/transformers/models/layoutlmv3/configuration_layoutlmv3.py": [
-                {
-                  "start": 265,
-                  "end": 265
-                },
-                {
-                  "start": 269,
-                  "end": 269
-                },
-                {
-                  "start": 280,
-                  "end": 280
-                }
-              ],
-              "src/transformers/models/transfo_xl/tokenization_transfo_xl.py": [
-                {
-                  "start": 23,
-                  "end": 23
-                },
-                {
-                  "start": 226,
-                  "end": 226
-                },
-                {
-                  "start": 228,
-                  "end": 228
-                },
-                {
-                  "start": 230,
-                  "end": 230
-                },
-                {
-                  "start": 231,
-                  "end": 231
-                },
-                {
-                  "start": 319,
-                  "end": 319
-                },
-                {
-                  "start": 777,
-                  "end": 777
-                },
-                {
-                  "start": 780,
-                  "end": 780
-                },
-                {
-                  "start": 782,
-                  "end": 782
-                },
-                {
-                  "start": 784,
-                  "end": 784
-                }
-              ],
-              "src/transformers/models/transfo_xl/convert_transfo_xl_original_tf_checkpoint_to_pytorch.py": [
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 33,
-                  "end": 33
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 48,
-                  "end": 48
-                }
-              ],
-              "src/transformers/models/mask2former/modeling_mask2former.py": [
-                {
-                  "start": 1553,
-                  "end": 1553
-                }
-              ],
-              "src/transformers/models/reformer/convert_reformer_trax_checkpoint_to_pytorch.py": [
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 193,
-                  "end": 193
-                }
-              ],
-              "src/transformers/models/maskformer/convert_maskformer_swin_to_pytorch.py": [
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 241,
-                  "end": 241
-                }
-              ],
-              "src/transformers/models/maskformer/convert_maskformer_resnet_to_pytorch.py": [
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 272,
-                  "end": 272
-                },
-                {
-                  "start": 378,
-                  "end": 378
-                }
-              ],
-              "src/transformers/models/marian/configuration_marian.py": [
-                {
-                  "start": 347,
-                  "end": 347
-                },
-                {
-                  "start": 352,
-                  "end": 352
-                }
-              ],
-              "src/transformers/models/m2m_100/configuration_m2m_100.py": [
-                {
-                  "start": 198,
-                  "end": 198
-                },
-                {
-                  "start": 203,
-                  "end": 203
-                }
-              ],
-              "src/transformers/models/bigbird_pegasus/configuration_bigbird_pegasus.py": [
-                {
-                  "start": 375,
-                  "end": 375
-                },
-                {
-                  "start": 380,
-                  "end": 380
-                }
-              ],
-              "src/transformers/optimization.py": [
-                {
-                  "start": 15,
-                  "end": 15
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 75,
-                  "end": 75
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 138,
-                  "end": 138
-                },
-                {
-                  "start": 173,
-                  "end": 173
-                },
-                {
-                  "start": 197,
-                  "end": 197
-                },
-                {
-                  "start": 223,
-                  "end": 223
-                },
-                {
-                  "start": 260,
-                  "end": 260
-                },
-                {
-                  "start": 261,
-                  "end": 261
-                },
-                {
-                  "start": 262,
-                  "end": 262
-                },
-                {
-                  "start": 263,
-                  "end": 263
-                },
-                {
-                  "start": 265,
-                  "end": 265
-                },
-                {
-                  "start": 266,
-                  "end": 266
-                },
-                {
-                  "start": 366,
-                  "end": 366
-                },
-                {
-                  "start": 482,
-                  "end": 482
-                },
-                {
-                  "start": 486,
-                  "end": 486
-                },
-                {
-                  "start": 489,
-                  "end": 489
-                },
-                {
-                  "start": 567,
-                  "end": 567
-                },
-                {
-                  "start": 574,
-                  "end": 574
-                },
-                {
-                  "start": 666,
-                  "end": 666
-                },
-                {
-                  "start": 668,
-                  "end": 668
-                },
-                {
-                  "start": 698,
-                  "end": 698
-                },
-                {
-                  "start": 707,
-                  "end": 707
-                },
-                {
-                  "start": 711,
-                  "end": 711
-                }
-              ],
-              "src/transformers/modeling_flax_utils.py": [
-                {
-                  "start": 22,
-                  "end": 22
-                },
-                {
-                  "start": 96,
-                  "end": 96
-                },
-                {
-                  "start": 450,
-                  "end": 450
-                },
-                {
-                  "start": 818,
-                  "end": 818
-                }
-              ],
-              "src/transformers/convert_graph_to_onnx.py": [
-                {
-                  "start": 405,
-                  "end": 405
-                },
-                {
-                  "start": 539,
-                  "end": 539
-                },
-                {
-                  "start": 542,
-                  "end": 542
-                }
-              ],
-              "src/transformers/modeling_flax_pytorch_utils.py": [
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 296,
-                  "end": 296
-                }
-              ],
-              "src/transformers/optimization_tf.py": [
-                {
-                  "start": 15,
-                  "end": 15
-                }
-              ],
-              "src/transformers/image_transforms.py": [
-                {
-                  "start": 250,
-                  "end": 250
-                }
-              ],
-              "tests/test_modeling_tf_common.py": [
-                {
-                  "start": 2291,
-                  "end": 2291
-                }
-              ],
-              "tests/trainer/test_trainer.py": [
-                {
-                  "start": 90,
-                  "end": 90
-                },
-                {
-                  "start": 550,
-                  "end": 550
-                },
-                {
-                  "start": 556,
-                  "end": 556
-                },
-                {
-                  "start": 1925,
-                  "end": 1925
-                },
-                {
-                  "start": 2308,
-                  "end": 2308
-                },
-                {
-                  "start": 2313,
-                  "end": 2313
-                },
-                {
-                  "start": 2323,
-                  "end": 2323
-                }
-              ],
-              "src/transformers/benchmark/benchmark_args.py": [
-                {
-                  "start": 71,
-                  "end": 71
-                }
-              ],
-              "src/transformers/benchmark/benchmark_tf.py": [
-                {
-                  "start": 51,
-                  "end": 51
-                },
-                {
-                  "start": 152,
-                  "end": 152
-                },
-                {
-                  "start": 156,
-                  "end": 156
-                },
-                {
-                  "start": 197,
-                  "end": 197
-                },
-                {
-                  "start": 203,
-                  "end": 203
-                }
-              ],
               "tests/optimization/test_optimization.py": [
                 {
-                  "start": 33,
-                  "end": 33
-                },
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/optimization.py"
+            ],
+            "spans": {
+              "src/transformers/optimization.py": [
+                {
+                  "start": 30,
+                  "end": 340
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/optimization.py"
+            ],
+            "spans": {
+              "src/transformers/optimization.py": [
+                {
+                  "start": 730,
+                  "end": 750
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/optimization.py"
+            ],
+            "spans": {
+              "src/transformers/optimization.py": [
                 {
                   "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 35,
-                  "end": 35
-                },
-                {
-                  "start": 36,
-                  "end": 36
-                },
-                {
-                  "start": 37,
-                  "end": 37
-                },
-                {
-                  "start": 38,
-                  "end": 38
-                },
-                {
-                  "start": 129,
-                  "end": 129
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                },
-                {
-                  "start": 137,
-                  "end": 137
-                },
-                {
-                  "start": 141,
-                  "end": 141
-                },
-                {
-                  "start": 145,
-                  "end": 145
-                },
-                {
-                  "start": 149,
-                  "end": 149
+                  "end": 325
                 }
-              ],
-              "tests/models/xglm/test_tokenization_xglm.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/optimization.py"
+            ],
+            "spans": {
+              "src/transformers/optimization.py": [
                 {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 143,
-                  "end": 143
-                },
-                {
-                  "start": 147,
-                  "end": 147
-                },
-                {
-                  "start": 148,
-                  "end": 148
+                  "start": 731,
+                  "end": 746
                 }
-              ],
-              "tests/models/gpt2/test_modeling_tf_gpt2.py": [
-                {
-                  "start": 445,
-                  "end": 445
-                }
-              ],
-              "tests/models/fnet/test_modeling_fnet.py": [
-                {
-                  "start": 144,
-                  "end": 144
-                }
-              ],
-              "tests/models/bert_japanese/test_tokenization_bert_japanese.py": [
-                {
-                  "start": 18,
-                  "end": 18
-                },
-                {
-                  "start": 96,
-                  "end": 96
-                },
-                {
-                  "start": 107,
-                  "end": 107
-                },
-                {
-                  "start": 110,
-                  "end": 110
-                },
-                {
-                  "start": 177,
-                  "end": 177
-                },
-                {
-                  "start": 188,
-                  "end": 188
-                },
-                {
-                  "start": 191,
-                  "end": 191
-                },
-                {
-                  "start": 258,
-                  "end": 258
-                },
-                {
-                  "start": 269,
-                  "end": 269
-                },
-                {
-                  "start": 272,
-                  "end": 272
-                }
-              ],
-              "tests/models/speecht5/test_tokenization_speecht5.py": [
-                {
-                  "start": 124,
-                  "end": 124
-                }
-              ],
-              "tests/models/xlm_roberta/test_tokenization_xlm_roberta.py": [
-                {
-                  "start": 16,
-                  "end": 16
-                },
-                {
-                  "start": 217,
-                  "end": 217
-                },
-                {
-                  "start": 221,
-                  "end": 221
-                },
-                {
-                  "start": 222,
-                  "end": 222
-                }
-              ],
-              "tests/models/wav2vec2/test_modeling_wav2vec2.py": [
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 791,
-                  "end": 791
-                },
-                {
-                  "start": 793,
-                  "end": 793
-                }
-              ],
-              "tests/models/rag/test_retrieval_rag.py": [
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/optimization/test_optimization.py"
+            ],
+            "spans": {
+              "tests/optimization/test_optimization.py": [
                 {
                   "start": 17,
-                  "end": 17
-                },
-                {
-                  "start": 190,
                   "end": 190
-                },
-                {
-                  "start": 194,
-                  "end": 194
-                }
-              ],
-              "tests/models/hubert/test_modeling_hubert.py": [
-                {
-                  "start": 20,
-                  "end": 20
-                },
-                {
-                  "start": 534,
-                  "end": 534
-                },
-                {
-                  "start": 536,
-                  "end": 536
-                }
-              ],
-              "tests/tokenization/test_tokenization_utils.py": [
-                {
-                  "start": 19,
-                  "end": 19
-                },
-                {
-                  "start": 60,
-                  "end": 60
-                },
-                {
-                  "start": 63,
-                  "end": 63
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 137,
-                  "end": 137
-                }
-              ],
-              "tests/test_modeling_common.py": [
-                {
-                  "start": 22,
-                  "end": 22
-                },
-                {
-                  "start": 966,
-                  "end": 966
-                },
-                {
-                  "start": 968,
-                  "end": 968
-                },
-                {
-                  "start": 2999,
-                  "end": 2999
-                }
-              ],
-              "tests/test_tokenization_common.py": [
-                {
-                  "start": 21,
-                  "end": 21
-                },
-                {
-                  "start": 429,
-                  "end": 429
-                },
-                {
-                  "start": 433,
-                  "end": 433
-                },
-                {
-                  "start": 437,
-                  "end": 437
-                },
-                {
-                  "start": 439,
-                  "end": 439
-                },
-                {
-                  "start": 727,
-                  "end": 727
-                },
-                {
-                  "start": 728,
-                  "end": 728
-                },
-                {
-                  "start": 739,
-                  "end": 739
-                },
-                {
-                  "start": 742,
-                  "end": 742
-                },
-                {
-                  "start": 749,
-                  "end": 749
-                },
-                {
-                  "start": 751,
-                  "end": 751
-                }
-              ],
-              "tests/deepspeed/test_deepspeed.py": [
-                {
-                  "start": 182,
-                  "end": 182
-                },
-                {
-                  "start": 199,
-                  "end": 199
-                },
-                {
-                  "start": 200,
-                  "end": 200
-                },
-                {
-                  "start": 243,
-                  "end": 243
-                },
-                {
-                  "start": 348,
-                  "end": 348
-                },
-                {
-                  "start": 360,
-                  "end": 360
-                },
-                {
-                  "start": 372,
-                  "end": 372
-                },
-                {
-                  "start": 387,
-                  "end": 387
-                },
-                {
-                  "start": 388,
-                  "end": 388
-                },
-                {
-                  "start": 428,
-                  "end": 428
-                },
-                {
-                  "start": 594,
-                  "end": 594
-                },
-                {
-                  "start": 645,
-                  "end": 645
-                },
-                {
-                  "start": 780,
-                  "end": 780
                 }
               ]
             },
@@ -1206,1072 +306,11 @@
           }
         ],
         "predFiles": [
-          "<worktree>/src/transformers/optimization.py",
-          "<worktree>/tests/optimization/test_optimization.py",
-          "src/transformers/__init__.py",
-          "src/transformers/benchmark/benchmark_args.py",
-          "src/transformers/benchmark/benchmark_tf.py",
-          "src/transformers/convert_graph_to_onnx.py",
-          "src/transformers/image_transforms.py",
-          "src/transformers/modeling_flax_pytorch_utils.py",
-          "src/transformers/modeling_flax_utils.py",
-          "src/transformers/modeling_utils.py",
-          "src/transformers/models/bart/configuration_bart.py",
-          "src/transformers/models/bert/convert_bert_original_tf2_checkpoint_to_pytorch.py",
-          "src/transformers/models/bigbird_pegasus/configuration_bigbird_pegasus.py",
-          "src/transformers/models/blenderbot/configuration_blenderbot.py",
-          "src/transformers/models/blenderbot_small/configuration_blenderbot_small.py",
-          "src/transformers/models/fnet/configuration_fnet.py",
-          "src/transformers/models/fnet/modeling_fnet.py",
-          "src/transformers/models/layoutlmv3/configuration_layoutlmv3.py",
-          "src/transformers/models/m2m_100/configuration_m2m_100.py",
-          "src/transformers/models/marian/configuration_marian.py",
-          "src/transformers/models/mask2former/modeling_mask2former.py",
-          "src/transformers/models/maskformer/convert_maskformer_resnet_to_pytorch.py",
-          "src/transformers/models/maskformer/convert_maskformer_swin_to_pytorch.py",
-          "src/transformers/models/mbart/configuration_mbart.py",
-          "src/transformers/models/perceiver/configuration_perceiver.py",
-          "src/transformers/models/perceiver/convert_perceiver_haiku_to_pytorch.py",
-          "src/transformers/models/rag/retrieval_rag.py",
-          "src/transformers/models/realm/retrieval_realm.py",
-          "src/transformers/models/reformer/convert_reformer_trax_checkpoint_to_pytorch.py",
-          "src/transformers/models/transfo_xl/convert_transfo_xl_original_tf_checkpoint_to_pytorch.py",
-          "src/transformers/models/transfo_xl/tokenization_transfo_xl.py",
           "src/transformers/optimization.py",
-          "src/transformers/optimization_tf.py",
-          "src/transformers/pipelines/base.py",
-          "src/transformers/training_args_tf.py",
-          "src/transformers/utils/dummy_pt_objects.py",
-          "src/transformers/utils/fx.py",
-          "tests/deepspeed/test_deepspeed.py",
-          "tests/models/bert_japanese/test_tokenization_bert_japanese.py",
-          "tests/models/fnet/test_modeling_fnet.py",
-          "tests/models/gpt2/test_modeling_tf_gpt2.py",
-          "tests/models/hubert/test_modeling_hubert.py",
-          "tests/models/rag/test_retrieval_rag.py",
-          "tests/models/speecht5/test_tokenization_speecht5.py",
-          "tests/models/wav2vec2/test_modeling_wav2vec2.py",
-          "tests/models/xglm/test_tokenization_xglm.py",
-          "tests/models/xlm_roberta/test_tokenization_xlm_roberta.py",
-          "tests/optimization/test_optimization.py",
-          "tests/test_modeling_common.py",
-          "tests/test_modeling_tf_common.py",
-          "tests/test_tokenization_common.py",
-          "tests/tokenization/test_tokenization_utils.py",
-          "tests/trainer/test_trainer.py"
+          "tests/optimization/test_optimization.py"
         ],
         "predSpans": {
-          "src/transformers/utils/dummy_pt_objects.py": [
-            {
-              "start": 7317,
-              "end": 7317
-            },
-            {
-              "start": 7321,
-              "end": 7321
-            },
-            {
-              "start": 7322,
-              "end": 7322
-            },
-            {
-              "start": 7325,
-              "end": 7325
-            },
-            {
-              "start": 7326,
-              "end": 7326
-            },
-            {
-              "start": 7329,
-              "end": 7329
-            },
-            {
-              "start": 7330,
-              "end": 7330
-            },
-            {
-              "start": 7333,
-              "end": 7333
-            },
-            {
-              "start": 7334,
-              "end": 7334
-            },
-            {
-              "start": 7337,
-              "end": 7337
-            },
-            {
-              "start": 7338,
-              "end": 7338
-            },
-            {
-              "start": 7341,
-              "end": 7341
-            },
-            {
-              "start": 7342,
-              "end": 7342
-            }
-          ],
-          "src/transformers/modeling_utils.py": [
-            {
-              "start": 275,
-              "end": 275
-            },
-            {
-              "start": 1653,
-              "end": 1653
-            }
-          ],
-          "src/transformers/training_args_tf.py": [
-            {
-              "start": 132,
-              "end": 132
-            }
-          ],
-          "src/transformers/__init__.py": [
-            {
-              "start": 2698,
-              "end": 2698
-            },
-            {
-              "start": 2702,
-              "end": 2702
-            },
-            {
-              "start": 2703,
-              "end": 2703
-            },
-            {
-              "start": 2704,
-              "end": 2704
-            },
-            {
-              "start": 2705,
-              "end": 2705
-            },
-            {
-              "start": 2706,
-              "end": 2706
-            },
-            {
-              "start": 2707,
-              "end": 2707
-            },
-            {
-              "start": 3372,
-              "end": 3372
-            },
-            {
-              "start": 5881,
-              "end": 5881
-            },
-            {
-              "start": 5885,
-              "end": 5885
-            },
-            {
-              "start": 5886,
-              "end": 5886
-            },
-            {
-              "start": 5887,
-              "end": 5887
-            },
-            {
-              "start": 5888,
-              "end": 5888
-            },
-            {
-              "start": 5889,
-              "end": 5889
-            },
-            {
-              "start": 5890,
-              "end": 5890
-            },
-            {
-              "start": 6425,
-              "end": 6425
-            }
-          ],
-          "src/transformers/pipelines/base.py": [
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 482,
-              "end": 482
-            },
-            {
-              "start": 491,
-              "end": 491
-            },
-            {
-              "start": 494,
-              "end": 494
-            },
-            {
-              "start": 714,
-              "end": 714
-            },
-            {
-              "start": 741,
-              "end": 741
-            }
-          ],
-          "src/transformers/models/mbart/configuration_mbart.py": [
-            {
-              "start": 344,
-              "end": 344
-            },
-            {
-              "start": 349,
-              "end": 349
-            }
-          ],
-          "src/transformers/utils/fx.py": [
-            {
-              "start": 708,
-              "end": 708
-            }
-          ],
-          "src/transformers/models/fnet/modeling_fnet.py": [
-            {
-              "start": 165,
-              "end": 165
-            },
-            {
-              "start": 572,
-              "end": 572
-            },
-            {
-              "start": 578,
-              "end": 578
-            }
-          ],
-          "src/transformers/models/realm/retrieval_realm.py": [
-            {
-              "start": 117,
-              "end": 117
-            }
-          ],
-          "src/transformers/models/fnet/configuration_fnet.py": [
-            {
-              "start": 65,
-              "end": 65
-            },
-            {
-              "start": 70,
-              "end": 70
-            },
-            {
-              "start": 101,
-              "end": 101
-            },
-            {
-              "start": 120,
-              "end": 120
-            }
-          ],
-          "src/transformers/models/perceiver/convert_perceiver_haiku_to_pytorch.py": [
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 264,
-              "end": 264
-            },
-            {
-              "start": 270,
-              "end": 270
-            },
-            {
-              "start": 271,
-              "end": 271
-            },
-            {
-              "start": 444,
-              "end": 444
-            },
-            {
-              "start": 448,
-              "end": 448
-            },
-            {
-              "start": 468,
-              "end": 468
-            }
-          ],
-          "src/transformers/models/perceiver/configuration_perceiver.py": [
-            {
-              "start": 215,
-              "end": 215
-            },
-            {
-              "start": 219,
-              "end": 219
-            },
-            {
-              "start": 230,
-              "end": 230
-            }
-          ],
-          "src/transformers/models/blenderbot_small/configuration_blenderbot_small.py": [
-            {
-              "start": 345,
-              "end": 345
-            },
-            {
-              "start": 350,
-              "end": 350
-            }
-          ],
-          "src/transformers/models/bert/convert_bert_original_tf2_checkpoint_to_pytorch.py": [
-            {
-              "start": 57,
-              "end": 57
-            }
-          ],
-          "src/transformers/models/blenderbot/configuration_blenderbot.py": [
-            {
-              "start": 332,
-              "end": 332
-            },
-            {
-              "start": 337,
-              "end": 337
-            }
-          ],
-          "src/transformers/models/rag/retrieval_rag.py": [
-            {
-              "start": 18,
-              "end": 18
-            },
-            {
-              "start": 135,
-              "end": 135
-            },
-            {
-              "start": 144,
-              "end": 144
-            }
-          ],
-          "src/transformers/models/bart/configuration_bart.py": [
-            {
-              "start": 359,
-              "end": 359
-            },
-            {
-              "start": 364,
-              "end": 364
-            }
-          ],
-          "src/transformers/models/layoutlmv3/configuration_layoutlmv3.py": [
-            {
-              "start": 265,
-              "end": 265
-            },
-            {
-              "start": 269,
-              "end": 269
-            },
-            {
-              "start": 280,
-              "end": 280
-            }
-          ],
-          "src/transformers/models/transfo_xl/tokenization_transfo_xl.py": [
-            {
-              "start": 23,
-              "end": 23
-            },
-            {
-              "start": 226,
-              "end": 226
-            },
-            {
-              "start": 228,
-              "end": 228
-            },
-            {
-              "start": 230,
-              "end": 230
-            },
-            {
-              "start": 231,
-              "end": 231
-            },
-            {
-              "start": 319,
-              "end": 319
-            },
-            {
-              "start": 777,
-              "end": 777
-            },
-            {
-              "start": 780,
-              "end": 780
-            },
-            {
-              "start": 782,
-              "end": 782
-            },
-            {
-              "start": 784,
-              "end": 784
-            }
-          ],
-          "src/transformers/models/transfo_xl/convert_transfo_xl_original_tf_checkpoint_to_pytorch.py": [
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 48,
-              "end": 48
-            }
-          ],
-          "src/transformers/models/mask2former/modeling_mask2former.py": [
-            {
-              "start": 1553,
-              "end": 1553
-            }
-          ],
-          "src/transformers/models/reformer/convert_reformer_trax_checkpoint_to_pytorch.py": [
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 193,
-              "end": 193
-            }
-          ],
-          "src/transformers/models/maskformer/convert_maskformer_swin_to_pytorch.py": [
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 241,
-              "end": 241
-            }
-          ],
-          "src/transformers/models/maskformer/convert_maskformer_resnet_to_pytorch.py": [
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 272,
-              "end": 272
-            },
-            {
-              "start": 378,
-              "end": 378
-            }
-          ],
-          "src/transformers/models/marian/configuration_marian.py": [
-            {
-              "start": 347,
-              "end": 347
-            },
-            {
-              "start": 352,
-              "end": 352
-            }
-          ],
-          "src/transformers/models/m2m_100/configuration_m2m_100.py": [
-            {
-              "start": 198,
-              "end": 198
-            },
-            {
-              "start": 203,
-              "end": 203
-            }
-          ],
-          "src/transformers/models/bigbird_pegasus/configuration_bigbird_pegasus.py": [
-            {
-              "start": 375,
-              "end": 375
-            },
-            {
-              "start": 380,
-              "end": 380
-            }
-          ],
           "src/transformers/optimization.py": [
-            {
-              "start": 15,
-              "end": 15
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 75,
-              "end": 75
-            },
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 138,
-              "end": 138
-            },
-            {
-              "start": 173,
-              "end": 173
-            },
-            {
-              "start": 197,
-              "end": 197
-            },
-            {
-              "start": 223,
-              "end": 223
-            },
-            {
-              "start": 260,
-              "end": 260
-            },
-            {
-              "start": 261,
-              "end": 261
-            },
-            {
-              "start": 262,
-              "end": 262
-            },
-            {
-              "start": 263,
-              "end": 263
-            },
-            {
-              "start": 265,
-              "end": 265
-            },
-            {
-              "start": 266,
-              "end": 266
-            },
-            {
-              "start": 366,
-              "end": 366
-            },
-            {
-              "start": 482,
-              "end": 482
-            },
-            {
-              "start": 486,
-              "end": 486
-            },
-            {
-              "start": 489,
-              "end": 489
-            },
-            {
-              "start": 567,
-              "end": 567
-            },
-            {
-              "start": 574,
-              "end": 574
-            },
-            {
-              "start": 666,
-              "end": 666
-            },
-            {
-              "start": 668,
-              "end": 668
-            },
-            {
-              "start": 698,
-              "end": 698
-            },
-            {
-              "start": 707,
-              "end": 707
-            },
-            {
-              "start": 711,
-              "end": 711
-            }
-          ],
-          "src/transformers/modeling_flax_utils.py": [
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 96,
-              "end": 96
-            },
-            {
-              "start": 450,
-              "end": 450
-            },
-            {
-              "start": 818,
-              "end": 818
-            }
-          ],
-          "src/transformers/convert_graph_to_onnx.py": [
-            {
-              "start": 405,
-              "end": 405
-            },
-            {
-              "start": 539,
-              "end": 539
-            },
-            {
-              "start": 542,
-              "end": 542
-            }
-          ],
-          "src/transformers/modeling_flax_pytorch_utils.py": [
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 296,
-              "end": 296
-            }
-          ],
-          "src/transformers/optimization_tf.py": [
-            {
-              "start": 15,
-              "end": 15
-            }
-          ],
-          "src/transformers/image_transforms.py": [
-            {
-              "start": 250,
-              "end": 250
-            }
-          ],
-          "tests/test_modeling_tf_common.py": [
-            {
-              "start": 2291,
-              "end": 2291
-            }
-          ],
-          "tests/trainer/test_trainer.py": [
-            {
-              "start": 90,
-              "end": 90
-            },
-            {
-              "start": 550,
-              "end": 550
-            },
-            {
-              "start": 556,
-              "end": 556
-            },
-            {
-              "start": 1925,
-              "end": 1925
-            },
-            {
-              "start": 2308,
-              "end": 2308
-            },
-            {
-              "start": 2313,
-              "end": 2313
-            },
-            {
-              "start": 2323,
-              "end": 2323
-            }
-          ],
-          "src/transformers/benchmark/benchmark_args.py": [
-            {
-              "start": 71,
-              "end": 71
-            }
-          ],
-          "src/transformers/benchmark/benchmark_tf.py": [
-            {
-              "start": 51,
-              "end": 51
-            },
-            {
-              "start": 152,
-              "end": 152
-            },
-            {
-              "start": 156,
-              "end": 156
-            },
-            {
-              "start": 197,
-              "end": 197
-            },
-            {
-              "start": 203,
-              "end": 203
-            }
-          ],
-          "tests/optimization/test_optimization.py": [
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 35,
-              "end": 35
-            },
-            {
-              "start": 36,
-              "end": 36
-            },
-            {
-              "start": 37,
-              "end": 37
-            },
-            {
-              "start": 38,
-              "end": 38
-            },
-            {
-              "start": 129,
-              "end": 129
-            },
-            {
-              "start": 133,
-              "end": 133
-            },
-            {
-              "start": 137,
-              "end": 137
-            },
-            {
-              "start": 141,
-              "end": 141
-            },
-            {
-              "start": 145,
-              "end": 145
-            },
-            {
-              "start": 149,
-              "end": 149
-            }
-          ],
-          "tests/models/xglm/test_tokenization_xglm.py": [
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 143,
-              "end": 143
-            },
-            {
-              "start": 147,
-              "end": 147
-            },
-            {
-              "start": 148,
-              "end": 148
-            }
-          ],
-          "tests/models/gpt2/test_modeling_tf_gpt2.py": [
-            {
-              "start": 445,
-              "end": 445
-            }
-          ],
-          "tests/models/fnet/test_modeling_fnet.py": [
-            {
-              "start": 144,
-              "end": 144
-            }
-          ],
-          "tests/models/bert_japanese/test_tokenization_bert_japanese.py": [
-            {
-              "start": 18,
-              "end": 18
-            },
-            {
-              "start": 96,
-              "end": 96
-            },
-            {
-              "start": 107,
-              "end": 107
-            },
-            {
-              "start": 110,
-              "end": 110
-            },
-            {
-              "start": 177,
-              "end": 177
-            },
-            {
-              "start": 188,
-              "end": 188
-            },
-            {
-              "start": 191,
-              "end": 191
-            },
-            {
-              "start": 258,
-              "end": 258
-            },
-            {
-              "start": 269,
-              "end": 269
-            },
-            {
-              "start": 272,
-              "end": 272
-            }
-          ],
-          "tests/models/speecht5/test_tokenization_speecht5.py": [
-            {
-              "start": 124,
-              "end": 124
-            }
-          ],
-          "tests/models/xlm_roberta/test_tokenization_xlm_roberta.py": [
-            {
-              "start": 16,
-              "end": 16
-            },
-            {
-              "start": 217,
-              "end": 217
-            },
-            {
-              "start": 221,
-              "end": 221
-            },
-            {
-              "start": 222,
-              "end": 222
-            }
-          ],
-          "tests/models/wav2vec2/test_modeling_wav2vec2.py": [
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 791,
-              "end": 791
-            },
-            {
-              "start": 793,
-              "end": 793
-            }
-          ],
-          "tests/models/rag/test_retrieval_rag.py": [
-            {
-              "start": 17,
-              "end": 17
-            },
-            {
-              "start": 190,
-              "end": 190
-            },
-            {
-              "start": 194,
-              "end": 194
-            }
-          ],
-          "tests/models/hubert/test_modeling_hubert.py": [
-            {
-              "start": 20,
-              "end": 20
-            },
-            {
-              "start": 534,
-              "end": 534
-            },
-            {
-              "start": 536,
-              "end": 536
-            }
-          ],
-          "tests/tokenization/test_tokenization_utils.py": [
-            {
-              "start": 19,
-              "end": 19
-            },
-            {
-              "start": 60,
-              "end": 60
-            },
-            {
-              "start": 63,
-              "end": 63
-            },
-            {
-              "start": 91,
-              "end": 91
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 137,
-              "end": 137
-            }
-          ],
-          "tests/test_modeling_common.py": [
-            {
-              "start": 22,
-              "end": 22
-            },
-            {
-              "start": 966,
-              "end": 966
-            },
-            {
-              "start": 968,
-              "end": 968
-            },
-            {
-              "start": 2999,
-              "end": 2999
-            }
-          ],
-          "tests/test_tokenization_common.py": [
-            {
-              "start": 21,
-              "end": 21
-            },
-            {
-              "start": 429,
-              "end": 429
-            },
-            {
-              "start": 433,
-              "end": 433
-            },
-            {
-              "start": 437,
-              "end": 437
-            },
-            {
-              "start": 439,
-              "end": 439
-            },
-            {
-              "start": 727,
-              "end": 727
-            },
-            {
-              "start": 728,
-              "end": 728
-            },
-            {
-              "start": 739,
-              "end": 739
-            },
-            {
-              "start": 742,
-              "end": 742
-            },
-            {
-              "start": 749,
-              "end": 749
-            },
-            {
-              "start": 751,
-              "end": 751
-            }
-          ],
-          "tests/deepspeed/test_deepspeed.py": [
-            {
-              "start": 182,
-              "end": 182
-            },
-            {
-              "start": 199,
-              "end": 199
-            },
-            {
-              "start": 200,
-              "end": 200
-            },
-            {
-              "start": 243,
-              "end": 243
-            },
-            {
-              "start": 348,
-              "end": 348
-            },
-            {
-              "start": 360,
-              "end": 360
-            },
-            {
-              "start": 372,
-              "end": 372
-            },
-            {
-              "start": 387,
-              "end": 387
-            },
-            {
-              "start": 388,
-              "end": 388
-            },
-            {
-              "start": 428,
-              "end": 428
-            },
-            {
-              "start": 594,
-              "end": 594
-            },
-            {
-              "start": 645,
-              "end": 645
-            },
-            {
-              "start": 780,
-              "end": 780
-            }
-          ],
-          "<worktree>/src/transformers/optimization.py": [
             {
               "start": 34,
               "end": 325
@@ -2281,7 +320,7 @@
               "end": 746
             }
           ],
-          "<worktree>/tests/optimization/test_optimization.py": [
+          "tests/optimization/test_optimization.py": [
             {
               "start": 17,
               "end": 185
@@ -2289,7 +328,7 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/src/transformers/optimization.py": [
+          "src/transformers/optimization.py": [
             "AdafactorSchedule",
             "get_constant_schedule",
             "get_constant_schedule_with_warmup",
@@ -2299,7 +338,7 @@
             "get_linear_schedule_with_warmup",
             "get_polynomial_decay_schedule_with_warmup"
           ],
-          "<worktree>/tests/optimization/test_optimization.py": [
+          "tests/optimization/test_optimization.py": [
             "ScheduleInitTest.test_schedulers"
           ]
         }
@@ -2310,50 +349,131 @@
             "step": 1,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.9285714285714286,
+              "span": 0.673063153372476,
+              "line": 0.7126436781609196
             }
           },
           {
             "step": 2,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.9285714285714286,
+              "span": 0.673063153372476,
+              "line": 0.7126436781609196
             }
           },
           {
             "step": 3,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.9285714285714286,
+              "span": 0.673063153372476,
+              "line": 0.7126436781609196
             }
           },
           {
             "step": 4,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.42857142857142855,
-              "span": 0.11384791636832307,
-              "line": 0.06896551724137931
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 5,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 6,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 7,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 8,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 9,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 10,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 11,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 12,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 13,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
           "file": 1.0,
-          "symbol": 0.10714285714285714,
-          "span": 0.02846197909208077,
-          "line": 0.017241379310344827
+          "symbol": 0.9835164835164836,
+          "span": 0.9245530353936483,
+          "line": 0.9336870026525198
         },
         "redundancy": {
-          "file": 0.05555555555555558,
-          "symbol": 0.03597122302158273,
-          "span": 0.01994434137291279,
-          "line": 0.02155172413793105
+          "file": 0.8461538461538461,
+          "symbol": 0.6833333333333333,
+          "span": 0.6224860571235423,
+          "line": 0.6197289156626506
         }
       },
       "fixOverlap": {
@@ -2456,7 +576,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/optimization.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/optimization.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2488,7 +617,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/optimization/test_optimization.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/optimization/test_optimization.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2556,7 +694,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/optimization.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/optimization.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -2647,9 +794,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-01T21:16:23Z",
       "completedAt": "2026-05-01T21:24:03Z",
       "durationMs": 460533,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1225063,
@@ -2658,6 +820,28 @@
         "total_tokens": 1245428,
         "cache_read_input_tokens": 1143680
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 27,
+        "readToolCalls": 0,
+        "editToolCalls": 3
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/transformers/optimization.py b/src/transformers/optimization.py\nindex 659b92a59b..caefbb3f69 100644\n--- a/src/transformers/optimization.py\n+++ b/src/transformers/optimization.py\n@@ -16,6 +16,7 @@\n \n import math\n import warnings\n+from functools import partial\n from typing import Callable, Iterable, Optional, Tuple, Union\n \n import torch\n@@ -31,6 +32,79 @@ from .utils.versions import require_version\n logger = logging.get_logger(__name__)\n \n \n+def _get_constant_schedule_lambda(_=None):\n+    return 1\n+\n+\n+def _get_constant_schedule_with_warmup_lambda(current_step: int, *, num_warmup_steps: int):\n+    if current_step < num_warmup_steps:\n+        return float(current_step) / float(max(1.0, num_warmup_steps))\n+    return 1.0\n+\n+\n+def _get_linear_schedule_with_warmup_lambda(\n+    current_step: int, *, num_warmup_steps: int, num_training_steps: int\n+):\n+    if current_step < num_warmup_steps:\n+        return float(current_step) / float(max(1, num_warmup_steps))\n+    return max(\n+        0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps))\n+    )\n+\n+\n+def _get_cosine_schedule_with_warmup_lambda(\n+    current_step: int, *, num_warmup_steps: int, num_training_steps: int, num_cycles: float\n+):\n+    if current_step < num_warmup_steps:\n+        return float(current_step) / float(max(1, num_warmup_steps))\n+    progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))\n+    return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))\n+\n+\n+def _get_cosine_with_hard_restarts_schedule_with_warmup_lambda(\n+    current_step: int, *, num_warmup_steps: int, num_training_steps: int, num_cycles: int\n+):\n+    if current_step < num_warmup_steps:\n+        return float(current_step) / float(max(1, num_warmup_steps))\n+    progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))\n+    if progress >= 1.0:\n+        return 0.0\n+    return max(0.0, 0.5 * (1.0 + math.cos(math.pi * ((float(num_cycles) * progress) % 1.0))))\n+\n+\n+def _get_polynomial_decay_schedule_with_warmup_lambda(\n+    current_step: int,\n+    *,\n+    num_warmup_steps: int,\n+    num_training_steps: int,\n+    lr_end: float,\n+    power: float,\n+    lr_init: float,\n+):\n+    if current_step < num_warmup_steps:\n+        return float(current_step) / float(max(1, num_warmup_steps))\n+    elif current_step > num_training_steps:\n+        return lr_end / lr_init  # as LambdaLR multiplies by lr_init\n+    else:\n+        lr_range = lr_init - lr_end\n+        decay_steps = num_training_steps - num_warmup_steps\n+        pct_remaining = 1 - (current_step - num_warmup_steps) / decay_steps\n+        decay = lr_range * pct_remaining**power + lr_end\n+        return decay / lr_init  # as LambdaLR multiplies by lr_init\n+\n+\n+def _get_inverse_sqrt_schedule_lambda(current_step: int, *, num_warmup_steps: int, timescale: int):\n+    if current_step < num_warmup_steps:\n+        return float(current_step) / float(max(1, num_warmup_steps))\n+    shift = timescale - num_warmup_steps\n+    decay = 1.0 / math.sqrt((current_step + shift) / timescale)\n+    return decay\n+\n+\n+def _get_adafactor_schedule_lambda(_, *, initial_lr: float):\n+    return initial_lr\n+\n+\n def get_constant_schedule(optimizer: Optimizer, last_epoch: int = -1):\n     \"\"\"\n     Create a schedule with a constant learning rate, using the learning rate set in optimizer.\n@@ -44,7 +118,7 @@ def get_constant_schedule(optimizer: Optimizer, last_epoch: int = -1):\n     Return:\n         `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.\n     \"\"\"\n-    return LambdaLR(optimizer, lambda _: 1, last_epoch=last_epoch)\n+    return LambdaLR(optimizer, partial(_get_constant_schedule_lambda), last_epoch=last_epoch)\n \n \n def get_constant_schedule_with_warmup(optimizer: Optimizer, num_warmup_steps: int, last_epoch: int = -1):\n@@ -64,11 +138,7 @@ def get_constant_schedule_with_warmup(optimizer: Optimizer, num_warmup_steps: in\n         `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.\n     \"\"\"\n \n-    def lr_lambda(current_step: int):\n-        if current_step < num_warmup_steps:\n-            return float(current_step) / float(max(1.0, num_warmup_steps))\n-        return 1.0\n-\n+    lr_lambda = partial(_get_constant_schedule_with_warmup_lambda, num_warmup_steps=num_warmup_steps)\n     return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)\n \n \n@@ -91,14 +161,12 @@ def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st\n         `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.\n     \"\"\"\n \n-    def lr_lambda(current_step: int):\n-        if current_step < num_warmup_steps:\n-            return float(current_step) / float(max(1, num_warmup_steps))\n-        return max(\n-            0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps))\n-        )\n-\n-    return LambdaLR(optimizer, lr_lambda, last_epoch)\n+    lr_lambda = partial(\n+        _get_linear_schedule_with_warmup_lambda,\n+        num_warmup_steps=num_warmup_steps,\n+        num_training_steps=num_training_steps,\n+    )\n+    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)\n \n \n def get_cosine_schedule_with_warmup(\n@@ -126,13 +194,13 @@ def get_cosine_schedule_with_warmup(\n         `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.\n     \"\"\"\n \n-    def lr_lambda(current_step):\n-        if current_step < num_warmup_steps:\n-            return float(current_step) / float(max(1, num_warmup_steps))\n-        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))\n-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))\n-\n-    return LambdaLR(optimizer, lr_lambda, last_epoch)\n+    lr_lambda = partial(\n+        _get_cosine_schedule_with_warmup_lambda,\n+        num_warmup_steps=num_warmup_steps,\n+        num_training_steps=num_training_steps,\n+        num_cycles=num_cycles,\n+    )\n+    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)\n \n \n def get_cosine_with_hard_restarts_schedule_with_warmup(\n@@ -159,15 +227,13 @@ def get_cosine_with_hard_restarts_schedule_with_warmup(\n         `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.\n     \"\"\"\n \n-    def lr_lambda(current_step):\n-        if current_step < num_warmup_steps:\n-            return float(current_step) / float(max(1, num_warmup_steps))\n-        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))\n-        if progress >= 1.0:\n-            return 0.0\n-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * ((float(num_cycles) * progress) % 1.0))))\n-\n-    return LambdaLR(optimizer, lr_lambda, last_epoch)\n+    lr_lambda = partial(\n+        _get_cosine_with_hard_restarts_schedule_with_warmup_lambda,\n+        num_warmup_steps=num_warmup_steps,\n+        num_training_steps=num_training_steps,\n+        num_cycles=num_cycles,\n+    )\n+    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)\n \n \n def get_polynomial_decay_schedule_with_warmup(\n@@ -205,19 +271,15 @@ def get_polynomial_decay_schedule_with_warmup(\n     if not (lr_init > lr_end):\n         raise ValueError(f\"lr_end ({lr_end}) must be be smaller than initial lr ({lr_init})\")\n \n-    def lr_lambda(current_step: int):\n-        if current_step < num_warmup_steps:\n-            return float(current_step) / float(max(1, num_warmup_steps))\n-        elif current_step > num_training_steps:\n-            return lr_end / lr_init  # as LambdaLR multiplies by lr_init\n-        else:\n-            lr_range = lr_init - lr_end\n-            decay_steps = num_training_steps - num_warmup_steps\n-            pct_remaining = 1 - (current_step - num_warmup_steps) / decay_steps\n-            decay = lr_range * pct_remaining**power + lr_end\n-            return decay / lr_init  # as LambdaLR multiplies by lr_init\n-\n-    return LambdaLR(optimizer, lr_lambda, last_epoch)\n+    lr_lambda = partial(\n+        _get_polynomial_decay_schedule_with_warmup_lambda,\n+        num_warmup_steps=num_warmup_steps,\n+        num_training_steps=num_training_steps,\n+        lr_end=lr_end,\n+        power=power,\n+        lr_init=lr_init,\n+    )\n+    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)\n \n \n def get_inverse_sqrt_schedule(\n@@ -246,13 +308,9 @@ def get_inverse_sqrt_schedule(\n     if timescale is None:\n         timescale = num_warmup_steps\n \n-    def lr_lambda(current_step: int):\n-        if current_step < num_warmup_steps:\n-            return float(current_step) / float(max(1, num_warmup_steps))\n-        shift = timescale - num_warmup_steps\n-        decay = 1.0 / math.sqrt((current_step + shift) / timescale)\n-        return decay\n-\n+    lr_lambda = partial(\n+        _get_inverse_sqrt_schedule_lambda, num_warmup_steps=num_warmup_steps, timescale=timescale\n+    )\n     return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)\n \n \n@@ -672,12 +730,9 @@ class AdafactorSchedule(LambdaLR):\n     \"\"\"\n \n     def __init__(self, optimizer, initial_lr=0.0):\n-        def lr_lambda(_):\n-            return initial_lr\n-\n         for group in optimizer.param_groups:\n             group[\"initial_lr\"] = initial_lr\n-        super().__init__(optimizer, lr_lambda)\n+        super().__init__(optimizer, partial(_get_adafactor_schedule_lambda, initial_lr=initial_lr))\n         for group in optimizer.param_groups:\n             del group[\"initial_lr\"]\n \ndiff --git a/tests/optimization/test_optimization.py b/tests/optimization/test_optimization.py\nindex 0280121ee6..0506f5241c 100644\n--- a/tests/optimization/test_optimization.py\n+++ b/tests/optimization/test_optimization.py\n@@ -14,6 +14,7 @@\n # limitations under the License.\n \n \n+import pickle\n import os\n import tempfile\n import unittest\n@@ -62,6 +63,16 @@ def unwrap_and_save_reload_schedule(scheduler, num_steps=10):\n     return lrs\n \n \n+def unwrap_and_pickle_reload_schedule(scheduler, num_steps=10):\n+    lrs = []\n+    for step in range(num_steps):\n+        lrs.append(scheduler.get_lr()[0])\n+        scheduler.step()\n+        if step == num_steps // 2:\n+            scheduler = pickle.loads(pickle.dumps(scheduler))\n+    return lrs\n+\n+\n @require_torch\n class OptimizationTest(unittest.TestCase):\n     def assertListAlmostEqual(self, list1, list2, tol):\n@@ -120,11 +131,11 @@ class ScheduleInitTest(unittest.TestCase):\n         for a, b in zip(list1, list2):\n             self.assertAlmostEqual(a, b, delta=tol, msg=msg)\n \n-    def test_schedulers(self):\n+    def get_scheduler_configs(self):\n         common_kwargs = {\"num_warmup_steps\": 2, \"num_training_steps\": 10}\n         # schedulers doct format\n         # function: (sched_args_dict, expected_learning_rates)\n-        scheds = {\n+        return {\n             get_constant_schedule: ({}, [10.0] * self.num_steps),\n             get_constant_schedule_with_warmup: (\n                 {\"num_warmup_steps\": 4},\n@@ -152,7 +163,8 @@ class ScheduleInitTest(unittest.TestCase):\n             ),\n         }\n \n-        for scheduler_func, data in scheds.items():\n+    def test_schedulers(self):\n+        for scheduler_func, data in self.get_scheduler_configs().items():\n             kwargs, expected_learning_rates = data\n \n             scheduler = scheduler_func(self.optimizer, **kwargs)\n@@ -168,3 +180,16 @@ class ScheduleInitTest(unittest.TestCase):\n             scheduler = scheduler_func(self.optimizer, **kwargs)\n             lrs_2 = unwrap_and_save_reload_schedule(scheduler, self.num_steps)\n             self.assertListEqual(lrs_1, lrs_2, msg=f\"failed for {scheduler_func} in save and reload\")\n+\n+    def test_schedulers_can_be_pickled(self):\n+        for scheduler_func, data in self.get_scheduler_configs().items():\n+            kwargs, expected_learning_rates = data\n+\n+            scheduler = scheduler_func(self.optimizer, **kwargs)\n+            lrs = unwrap_and_pickle_reload_schedule(scheduler, self.num_steps)\n+            self.assertListAlmostEqual(\n+                lrs,\n+                expected_learning_rates,\n+                tol=1e-2,\n+                msg=f\"failed for {scheduler_func} when pickled and reloaded\",\n+            )\n",
       "finalOutput": {
         "status": "completed",
@@ -2732,340 +916,47 @@
           {
             "files": [
               "src/transformers/optimization.py",
-              "src/transformers/optimization_tf.py",
-              "src/transformers/sagemaker/trainer_sm.py",
-              "src/transformers/trainer.py",
-              "src/transformers/trainer_callback.py",
-              "src/transformers/trainer_pt_utils.py",
-              "src/transformers/trainer_seq2seq.py",
-              "src/transformers/trainer_tf.py",
-              "src/transformers/trainer_utils.py",
-              "tests/extended/test_trainer_ext.py",
-              "tests/optimization/__init__.py",
-              "tests/optimization/test_optimization.py",
-              "tests/optimization/test_optimization_tf.py",
-              "tests/trainer/__init__.py",
-              "tests/trainer/test_data_collator.py",
-              "tests/trainer/test_trainer.py",
-              "tests/trainer/test_trainer_callback.py",
-              "tests/trainer/test_trainer_distributed.py",
-              "tests/trainer/test_trainer_seq2seq.py",
-              "tests/trainer/test_trainer_tpu.py",
-              "tests/trainer/test_trainer_utils.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/transformers/__init__.py",
-              "src/transformers/optimization.py",
-              "src/transformers/utils/dummy_pt_objects.py",
               "tests/optimization/test_optimization.py"
             ],
             "spans": {
-              "src/transformers/__init__.py": [
-                {
-                  "start": 2701,
-                  "end": 2701
-                },
-                {
-                  "start": 2702,
-                  "end": 2702
-                },
-                {
-                  "start": 2703,
-                  "end": 2703
-                },
-                {
-                  "start": 2704,
-                  "end": 2704
-                },
-                {
-                  "start": 2706,
-                  "end": 2706
-                },
-                {
-                  "start": 2707,
-                  "end": 2707
-                },
-                {
-                  "start": 5884,
-                  "end": 5884
-                },
-                {
-                  "start": 5885,
-                  "end": 5885
-                },
-                {
-                  "start": 5886,
-                  "end": 5886
-                },
-                {
-                  "start": 5887,
-                  "end": 5887
-                },
-                {
-                  "start": 5889,
-                  "end": 5889
-                },
-                {
-                  "start": 5890,
-                  "end": 5890
-                }
-              ],
-              "src/transformers/utils/dummy_pt_objects.py": [
-                {
-                  "start": 7317,
-                  "end": 7317
-                },
-                {
-                  "start": 7318,
-                  "end": 7318
-                },
-                {
-                  "start": 7321,
-                  "end": 7321
-                },
-                {
-                  "start": 7322,
-                  "end": 7322
-                },
-                {
-                  "start": 7325,
-                  "end": 7325
-                },
-                {
-                  "start": 7326,
-                  "end": 7326
-                },
-                {
-                  "start": 7329,
-                  "end": 7329
-                },
-                {
-                  "start": 7330,
-                  "end": 7330
-                },
-                {
-                  "start": 7337,
-                  "end": 7337
-                },
-                {
-                  "start": 7338,
-                  "end": 7338
-                },
-                {
-                  "start": 7341,
-                  "end": 7341
-                },
-                {
-                  "start": 7342,
-                  "end": 7342
-                }
-              ],
               "src/transformers/optimization.py": [
                 {
-                  "start": 24,
-                  "end": 24
-                },
-                {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 45,
-                  "end": 45
-                },
-                {
-                  "start": 47,
-                  "end": 47
-                },
-                {
-                  "start": 50,
-                  "end": 50
-                },
-                {
-                  "start": 64,
-                  "end": 64
-                },
-                {
-                  "start": 67,
-                  "end": 67
-                },
-                {
-                  "start": 72,
-                  "end": 72
-                },
-                {
-                  "start": 75,
-                  "end": 75
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                },
-                {
-                  "start": 94,
-                  "end": 94
-                },
-                {
-                  "start": 101,
-                  "end": 101
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 126,
-                  "end": 126
-                },
-                {
-                  "start": 129,
-                  "end": 129
-                },
-                {
-                  "start": 135,
-                  "end": 135
-                },
-                {
-                  "start": 138,
-                  "end": 138
-                },
-                {
-                  "start": 159,
-                  "end": 159
-                },
-                {
-                  "start": 162,
-                  "end": 162
-                },
-                {
-                  "start": 170,
-                  "end": 170
-                },
-                {
-                  "start": 173,
-                  "end": 173
-                },
-                {
-                  "start": 200,
-                  "end": 200
-                },
-                {
-                  "start": 208,
-                  "end": 208
-                },
-                {
-                  "start": 212,
-                  "end": 212
-                },
-                {
-                  "start": 218,
-                  "end": 218
-                },
-                {
-                  "start": 220,
-                  "end": 220
-                },
-                {
-                  "start": 241,
-                  "end": 241
-                },
-                {
-                  "start": 249,
-                  "end": 249
-                },
-                {
-                  "start": 256,
-                  "end": 256
-                },
-                {
-                  "start": 260,
+                  "start": 1,
                   "end": 260
-                },
-                {
-                  "start": 261,
-                  "end": 261
-                },
-                {
-                  "start": 262,
-                  "end": 262
-                },
-                {
-                  "start": 263,
-                  "end": 263
-                },
-                {
-                  "start": 264,
-                  "end": 264
-                },
-                {
-                  "start": 265,
-                  "end": 265
-                },
-                {
-                  "start": 666,
-                  "end": 666
-                },
-                {
-                  "start": 675,
-                  "end": 675
-                },
-                {
-                  "start": 680,
-                  "end": 680
                 }
               ],
               "tests/optimization/test_optimization.py": [
                 {
-                  "start": 32,
-                  "end": 32
-                },
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/optimization.py"
+            ],
+            "spans": {
+              "src/transformers/optimization.py": [
                 {
-                  "start": 33,
-                  "end": 33
-                },
+                  "start": 620,
+                  "end": 720
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/optimization.py"
+            ],
+            "spans": {
+              "src/transformers/optimization.py": [
                 {
-                  "start": 34,
-                  "end": 34
-                },
-                {
-                  "start": 35,
-                  "end": 35
-                },
-                {
-                  "start": 37,
-                  "end": 37
-                },
-                {
-                  "start": 38,
-                  "end": 38
-                },
-                {
-                  "start": 128,
-                  "end": 128
-                },
-                {
-                  "start": 129,
-                  "end": 129
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                },
-                {
-                  "start": 137,
-                  "end": 137
-                },
-                {
-                  "start": 141,
-                  "end": 141
-                },
-                {
-                  "start": 145,
-                  "end": 145
+                  "start": 1,
+                  "end": 180
                 }
               ]
             },
@@ -3075,93 +966,39 @@
             "files": [
               "tests/optimization/test_optimization.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/optimization/test_optimization.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/transformers/optimization.py"
             ],
-            "spans": {},
+            "spans": {
+              "src/transformers/optimization.py": [
+                {
+                  "start": 1,
+                  "end": 240
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "src/transformers/models/transfo_xl/tokenization_transfo_xl.py",
-              "src/transformers/pipelines/base.py",
-              "tests/models/hubert/test_modeling_hubert.py",
-              "tests/models/rag/test_retrieval_rag.py",
-              "tests/models/wav2vec2/test_modeling_wav2vec2.py",
-              "tests/models/xlm_roberta/test_tokenization_xlm_roberta.py",
-              "tests/optimization/test_optimization.py",
-              "tests/test_modeling_common.py",
-              "tests/test_tokenization_common.py"
+              "src/transformers/optimization.py"
             ],
             "spans": {
-              "tests/models/rag/test_retrieval_rag.py": [
+              "src/transformers/optimization.py": [
                 {
-                  "start": 190,
-                  "end": 190
-                },
-                {
-                  "start": 194,
-                  "end": 194
-                }
-              ],
-              "tests/models/wav2vec2/test_modeling_wav2vec2.py": [
-                {
-                  "start": 791,
-                  "end": 791
-                }
-              ],
-              "tests/models/xlm_roberta/test_tokenization_xlm_roberta.py": [
-                {
-                  "start": 221,
-                  "end": 221
-                }
-              ],
-              "tests/models/hubert/test_modeling_hubert.py": [
-                {
-                  "start": 534,
-                  "end": 534
-                }
-              ],
-              "tests/optimization/test_optimization.py": [
-                {
-                  "start": 58,
-                  "end": 58
-                }
-              ],
-              "tests/test_tokenization_common.py": [
-                {
-                  "start": 437,
-                  "end": 437
-                },
-                {
-                  "start": 739,
-                  "end": 739
-                },
-                {
-                  "start": 751,
-                  "end": 751
-                }
-              ],
-              "tests/test_modeling_common.py": [
-                {
-                  "start": 966,
-                  "end": 966
-                }
-              ],
-              "src/transformers/pipelines/base.py": [
-                {
-                  "start": 494,
-                  "end": 494
-                }
-              ],
-              "src/transformers/models/transfo_xl/tokenization_transfo_xl.py": [
-                {
-                  "start": 319,
-                  "end": 319
+                  "start": 300,
+                  "end": 760
                 }
               ]
             },
@@ -3169,295 +1006,14 @@
           }
         ],
         "predFiles": [
-          "src/transformers/__init__.py",
-          "src/transformers/models/transfo_xl/tokenization_transfo_xl.py",
           "src/transformers/optimization.py",
-          "src/transformers/optimization_tf.py",
-          "src/transformers/pipelines/base.py",
-          "src/transformers/sagemaker/trainer_sm.py",
-          "src/transformers/trainer.py",
-          "src/transformers/trainer_callback.py",
-          "src/transformers/trainer_pt_utils.py",
-          "src/transformers/trainer_seq2seq.py",
-          "src/transformers/trainer_tf.py",
-          "src/transformers/trainer_utils.py",
-          "src/transformers/utils/dummy_pt_objects.py",
-          "tests/extended/test_trainer_ext.py",
-          "tests/models/hubert/test_modeling_hubert.py",
-          "tests/models/rag/test_retrieval_rag.py",
-          "tests/models/wav2vec2/test_modeling_wav2vec2.py",
-          "tests/models/xlm_roberta/test_tokenization_xlm_roberta.py",
-          "tests/optimization/__init__.py",
-          "tests/optimization/test_optimization.py",
-          "tests/optimization/test_optimization_tf.py",
-          "tests/test_modeling_common.py",
-          "tests/test_tokenization_common.py",
-          "tests/trainer/__init__.py",
-          "tests/trainer/test_data_collator.py",
-          "tests/trainer/test_trainer.py",
-          "tests/trainer/test_trainer_callback.py",
-          "tests/trainer/test_trainer_distributed.py",
-          "tests/trainer/test_trainer_seq2seq.py",
-          "tests/trainer/test_trainer_tpu.py",
-          "tests/trainer/test_trainer_utils.py"
+          "tests/optimization/test_optimization.py"
         ],
         "predSpans": {
-          "src/transformers/__init__.py": [
-            {
-              "start": 2701,
-              "end": 2701
-            },
-            {
-              "start": 2702,
-              "end": 2702
-            },
-            {
-              "start": 2703,
-              "end": 2703
-            },
-            {
-              "start": 2704,
-              "end": 2704
-            },
-            {
-              "start": 2706,
-              "end": 2706
-            },
-            {
-              "start": 2707,
-              "end": 2707
-            },
-            {
-              "start": 5884,
-              "end": 5884
-            },
-            {
-              "start": 5885,
-              "end": 5885
-            },
-            {
-              "start": 5886,
-              "end": 5886
-            },
-            {
-              "start": 5887,
-              "end": 5887
-            },
-            {
-              "start": 5889,
-              "end": 5889
-            },
-            {
-              "start": 5890,
-              "end": 5890
-            }
-          ],
-          "src/transformers/utils/dummy_pt_objects.py": [
-            {
-              "start": 7317,
-              "end": 7317
-            },
-            {
-              "start": 7318,
-              "end": 7318
-            },
-            {
-              "start": 7321,
-              "end": 7321
-            },
-            {
-              "start": 7322,
-              "end": 7322
-            },
-            {
-              "start": 7325,
-              "end": 7325
-            },
-            {
-              "start": 7326,
-              "end": 7326
-            },
-            {
-              "start": 7329,
-              "end": 7329
-            },
-            {
-              "start": 7330,
-              "end": 7330
-            },
-            {
-              "start": 7337,
-              "end": 7337
-            },
-            {
-              "start": 7338,
-              "end": 7338
-            },
-            {
-              "start": 7341,
-              "end": 7341
-            },
-            {
-              "start": 7342,
-              "end": 7342
-            }
-          ],
           "src/transformers/optimization.py": [
             {
               "start": 17,
               "end": 314
-            },
-            {
-              "start": 24,
-              "end": 24
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 45,
-              "end": 45
-            },
-            {
-              "start": 47,
-              "end": 47
-            },
-            {
-              "start": 50,
-              "end": 50
-            },
-            {
-              "start": 64,
-              "end": 64
-            },
-            {
-              "start": 67,
-              "end": 67
-            },
-            {
-              "start": 72,
-              "end": 72
-            },
-            {
-              "start": 75,
-              "end": 75
-            },
-            {
-              "start": 91,
-              "end": 91
-            },
-            {
-              "start": 94,
-              "end": 94
-            },
-            {
-              "start": 101,
-              "end": 101
-            },
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 126,
-              "end": 126
-            },
-            {
-              "start": 129,
-              "end": 129
-            },
-            {
-              "start": 135,
-              "end": 135
-            },
-            {
-              "start": 138,
-              "end": 138
-            },
-            {
-              "start": 159,
-              "end": 159
-            },
-            {
-              "start": 162,
-              "end": 162
-            },
-            {
-              "start": 170,
-              "end": 170
-            },
-            {
-              "start": 173,
-              "end": 173
-            },
-            {
-              "start": 200,
-              "end": 200
-            },
-            {
-              "start": 208,
-              "end": 208
-            },
-            {
-              "start": 212,
-              "end": 212
-            },
-            {
-              "start": 218,
-              "end": 218
-            },
-            {
-              "start": 220,
-              "end": 220
-            },
-            {
-              "start": 241,
-              "end": 241
-            },
-            {
-              "start": 249,
-              "end": 249
-            },
-            {
-              "start": 256,
-              "end": 256
-            },
-            {
-              "start": 260,
-              "end": 260
-            },
-            {
-              "start": 261,
-              "end": 261
-            },
-            {
-              "start": 262,
-              "end": 262
-            },
-            {
-              "start": 263,
-              "end": 263
-            },
-            {
-              "start": 264,
-              "end": 264
-            },
-            {
-              "start": 265,
-              "end": 265
-            },
-            {
-              "start": 666,
-              "end": 666
-            },
-            {
-              "start": 675,
-              "end": 675
-            },
-            {
-              "start": 680,
-              "end": 680
             },
             {
               "start": 724,
@@ -3468,118 +1024,6 @@
             {
               "start": 17,
               "end": 195
-            },
-            {
-              "start": 32,
-              "end": 32
-            },
-            {
-              "start": 33,
-              "end": 33
-            },
-            {
-              "start": 34,
-              "end": 34
-            },
-            {
-              "start": 35,
-              "end": 35
-            },
-            {
-              "start": 37,
-              "end": 37
-            },
-            {
-              "start": 38,
-              "end": 38
-            },
-            {
-              "start": 58,
-              "end": 58
-            },
-            {
-              "start": 128,
-              "end": 128
-            },
-            {
-              "start": 129,
-              "end": 129
-            },
-            {
-              "start": 133,
-              "end": 133
-            },
-            {
-              "start": 137,
-              "end": 137
-            },
-            {
-              "start": 141,
-              "end": 141
-            },
-            {
-              "start": 145,
-              "end": 145
-            }
-          ],
-          "tests/models/rag/test_retrieval_rag.py": [
-            {
-              "start": 190,
-              "end": 190
-            },
-            {
-              "start": 194,
-              "end": 194
-            }
-          ],
-          "tests/models/wav2vec2/test_modeling_wav2vec2.py": [
-            {
-              "start": 791,
-              "end": 791
-            }
-          ],
-          "tests/models/xlm_roberta/test_tokenization_xlm_roberta.py": [
-            {
-              "start": 221,
-              "end": 221
-            }
-          ],
-          "tests/models/hubert/test_modeling_hubert.py": [
-            {
-              "start": 534,
-              "end": 534
-            }
-          ],
-          "tests/test_tokenization_common.py": [
-            {
-              "start": 437,
-              "end": 437
-            },
-            {
-              "start": 739,
-              "end": 739
-            },
-            {
-              "start": 751,
-              "end": 751
-            }
-          ],
-          "tests/test_modeling_common.py": [
-            {
-              "start": 966,
-              "end": 966
-            }
-          ],
-          "src/transformers/pipelines/base.py": [
-            {
-              "start": 494,
-              "end": 494
-            }
-          ],
-          "src/transformers/models/transfo_xl/tokenization_transfo_xl.py": [
-            {
-              "start": 319,
-              "end": 319
             }
           ]
         },
@@ -3605,96 +1049,69 @@
           {
             "step": 1,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.9285714285714286,
+              "span": 0.673063153372476,
+              "line": 0.7126436781609196
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.9285714285714286,
+              "span": 0.673063153372476,
+              "line": 0.7126436781609196
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.9285714285714286,
+              "span": 0.673063153372476,
+              "line": 0.7126436781609196
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 0.9285714285714286,
+              "span": 0.673063153372476,
+              "line": 0.7126436781609196
             }
           },
           {
             "step": 5,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "symbol": 0.9285714285714286,
+              "span": 0.673063153372476,
+              "line": 0.7126436781609196
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.9285714285714286,
-              "span": 0.2796792209652012,
-              "line": 0.1839080459770115
-            }
-          },
-          {
-            "step": 7,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.9285714285714286,
-              "span": 0.2796792209652012,
-              "line": 0.1839080459770115
-            }
-          },
-          {
-            "step": 8,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.9285714285714286,
-              "span": 0.2796792209652012,
-              "line": 0.1839080459770115
-            }
-          },
-          {
-            "step": 9,
-            "coverage": {
-              "file": 1.0,
-              "symbol": 0.9285714285714286,
-              "span": 0.2796792209652012,
-              "line": 0.1839080459770115
+              "symbol": 1.0,
+              "span": 0.7511098381784334,
+              "line": 0.7758620689655172
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.5555555555555556,
-          "symbol": 0.41269841269841273,
-          "span": 0.12430187598453386,
-          "line": 0.08173690932311622
+          "file": 1.0,
+          "symbol": 0.9404761904761906,
+          "span": 0.6860709341734689,
+          "line": 0.7231800766283526
         },
         "redundancy": {
-          "file": 0.13888888888888884,
-          "symbol": 0.0,
-          "span": 0.0,
-          "line": 0.0
+          "file": 0.7142857142857143,
+          "symbol": 0.5,
+          "span": 0.44159235354978565,
+          "line": 0.43031358885017423
         }
       },
       "fixOverlap": {
@@ -3713,28 +1130,28 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/3535414e877850de19c3/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/3535414e877850de19c3/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/3535414e877850de19c3/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/3535414e877850de19c3/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
@@ -3821,7 +1238,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/optimization/test_optimization.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/optimization/test_optimization.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3885,7 +1311,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/optimization.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/optimization.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3904,7 +1339,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/optimization.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/optimization.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",

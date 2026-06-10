@@ -9,7 +9,7 @@ import {
   TrendingUpDown,
 } from "lucide-react";
 
-import type { ComparisonCard, ComparisonInstanceDetail } from "@/data/comparisons";
+import type { ComparisonCard, ComparisonInstance, ComparisonInstanceDetail } from "@/data/comparisons";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -58,13 +58,13 @@ const instanceDetailTabs: Array<{ id: InstanceDetailTab; label: string }> = [
 
 const segmentedControlClassName = "gap-0 rounded-md shadow-lg backdrop-blur";
 const segmentedControlItemClassName = "w-14 rounded-none bg-background px-0 data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
-const trajectoryExplanation = "Shows how cumulative retrieved context coverage changes over retrieval steps. Each row is a step, and the columns measure file, block, line, and symbol-level overlap with the gold context.";
+const trajectoryExplanation = "Shows how cumulative retrieved context coverage changes over scored retrieval steps. Each row is an inferred context retrieval step, and the columns measure file, block, line, and symbol-level overlap with the gold context.";
 const instanceResourceMetricDefinitions: MetricDefinition[] = resourceMetricDefinitions.map((metric) => {
   if (metric.key === "averageSteps") {
     return {
       ...metric,
-      label: "Steps",
-      explanation: "Inferred retrieval steps for this run.",
+      label: "Scored Retrieval Steps",
+      explanation: "Inferred context retrieval steps scored by the evaluator for this run.",
     };
   }
   if (metric.key === "averageDuration") {
@@ -92,7 +92,7 @@ const instanceResourceMetricDefinitions: MetricDefinition[] = resourceMetricDefi
 
 const overviewMetricDefinitions = [
   ...resolutionMetricDefinitions.filter((metric) => ["fixOverlapVsGoldF1"].includes(metric.key)),
-  ...contextRetrievalMetricDefinitions.filter((metric) => ["contextF1", "fileF1", "spanF1"].includes(metric.key)),
+  ...contextRetrievalMetricDefinitions.filter((metric) => ["contextF1", "trajectoryGoldFound", "contextRecall", "contextPrecision"].includes(metric.key)),
   ...instanceResourceMetricDefinitions.filter((metric) => ["averageSteps", "averageDuration", "totalTokens", "estimatedCost"].includes(metric.key)),
 ];
 
@@ -111,23 +111,24 @@ export function ComparisonInstanceDetailPage({
     () => buildInstanceRows(comparison).find((instanceRow) => instanceRow.instanceId === instanceId) ?? null,
     [comparison, instanceId],
   );
-  const instanceComparison = row ? buildInstanceComparison(comparison, row) : null;
+  const metricRow = useMemo(() => (row ? mergeDetailTrajectoryIntoRow(row, detail) : null), [detail, row]);
+  const instanceComparison = metricRow ? buildInstanceComparison(comparison, metricRow) : null;
   const [viewMode, setViewMode] = useState<ComparisonResultsViewMode>("treatment-delta");
-  const [deltaDisplayMode, setDeltaDisplayMode] = useState<DeltaDisplayMode>("percent");
+  const [deltaDisplayMode, setDeltaDisplayMode] = useState<DeltaDisplayMode>("absolute");
   const [activeTab, setActiveTab] = useState<InstanceDetailTab>("overview");
 
-  if (!row || !instanceComparison) {
+  if (!metricRow || !instanceComparison) {
     return <section className="rounded-lg border bg-background p-6 text-sm text-muted-foreground">Instance detail not found in the current comparison snapshot.</section>;
   }
 
   return (
     <TooltipProvider>
       <div className="space-y-4 pb-40">
-        <InstanceHeader row={row} />
+        <InstanceHeader row={metricRow} />
         <InstanceDetailTabs activeTab={activeTab} onChange={setActiveTab} />
         {renderInstanceDetailTab({
           activeTab,
-          row,
+          row: metricRow,
           instanceComparison,
           viewMode,
           deltaDisplayMode,
@@ -143,6 +144,33 @@ export function ComparisonInstanceDetailPage({
       </div>
     </TooltipProvider>
   );
+}
+
+function mergeDetailTrajectoryIntoRow(
+  row: ReturnType<typeof buildInstanceRows>[number],
+  detail: ComparisonInstanceDetail | null | undefined,
+): ReturnType<typeof buildInstanceRows>[number] {
+  if (!detail) return row;
+  const detailByLabel = new Map(detail.variants.map((variant) => [variant.label, variant]));
+  return {
+    ...row,
+    baseline: mergeDetailTrajectoryIntoInstance(row.baseline, detailByLabel.get("A")),
+    treatment: mergeDetailTrajectoryIntoInstance(row.treatment, detailByLabel.get("B")),
+  };
+}
+
+function mergeDetailTrajectoryIntoInstance(
+  instance: ComparisonInstance | undefined,
+  detailVariant: ComparisonInstanceDetail["variants"][number] | undefined,
+): ComparisonInstance | undefined {
+  if (!instance || !detailVariant?.evaluatedTrajectory?.steps) return instance;
+  return {
+    ...instance,
+    evaluatedTrajectory: {
+      ...instance.evaluatedTrajectory,
+      steps: detailVariant.evaluatedTrajectory.steps,
+    },
+  };
 }
 
 function renderInstanceDetailTab({
@@ -559,7 +587,7 @@ function overviewMetricLabel(metric: (typeof overviewMetricDefinitions)[number])
 }
 
 function overviewMetricExplanation(metric: (typeof overviewMetricDefinitions)[number]): string {
-  if (metric.key === "contextF1") return "Balanced file/symbol/block F1 score.";
+  if (metric.key === "contextF1") return "Macro-average file/block/line/symbol F1 score.";
   if (metric.key === "spanF1") return "Block-level retrieval F1.";
   return metric.explanation;
 }
@@ -686,24 +714,24 @@ function DetailControls({
           variant="outline"
           value={deltaDisplayMode}
           onValueChange={(value) => value && onDeltaDisplayModeChange(value as DeltaDisplayMode)}
-          className={segmentedControlClassName}
+        className={segmentedControlClassName}
+      >
+        <ToggleGroupItem
+          value="absolute"
+          aria-label="Numerical diff"
+          title="Numerical diff"
+          className={`${segmentedControlItemClassName} rounded-l-md border-r-0`}
         >
-          <ToggleGroupItem
-            value="percent"
-            aria-label="Percent diff"
-            title="Percent diff"
-            className={`${segmentedControlItemClassName} rounded-l-md border-r-0`}
-          >
-            <Percent className="h-4 w-4" />
-          </ToggleGroupItem>
-          <ToggleGroupItem
-            value="absolute"
-            aria-label="Numerical diff"
-            title="Numerical diff"
-            className={`${segmentedControlItemClassName} rounded-r-md`}
-          >
-            <span className="font-semibold tabular-nums">1.2→</span>
-          </ToggleGroupItem>
+          <span className="font-semibold tabular-nums">1.2→</span>
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value="percent"
+          aria-label="Percent diff"
+          title="Percent diff"
+          className={`${segmentedControlItemClassName} rounded-r-md`}
+        >
+          <Percent className="h-4 w-4" />
+        </ToggleGroupItem>
         </ToggleGroup>
       </div>
       <ToggleGroup
@@ -806,37 +834,42 @@ function TrajectorySection({
 
   return (
     <section className="space-y-4">
-      <SectionTitleWithHelp title="Cumulative Evaluated Trajectory" explanation={trajectoryExplanation} />
+      <div>
+        <SectionTitleWithHelp title="Cumulative Evaluated Trajectory" explanation={trajectoryExplanation} />
+      </div>
       <div className={variants.length > 1 ? "grid gap-6 xl:grid-cols-2" : "grid gap-6"}>
-        {variants.map((variant) => (
-          <div key={variant.label} className="h-full rounded-lg bg-background p-5">
-            <h3 className="text-lg font-semibold">{variant.name}</h3>
-            {(variant.evaluatedTrajectory?.steps?.length ?? 0) > 0 ? (
-              <Table className="mt-4">
-                <TableHeader>
-                  <TableRow>
-                    <TrajectoryTableHead label="Step" explanation="Cumulative retrieval step number." />
-                    <TrajectoryTableHead label="File" explanation="Cumulative file-level gold-context coverage." />
-                    <TrajectoryTableHead label="Block" explanation="Cumulative block-level gold-context coverage." />
-                    <TrajectoryTableHead label="Line" explanation="Cumulative line-level gold-context coverage." />
-                    <TrajectoryTableHead label="Symbol" explanation="Cumulative symbol-level gold-context coverage." />
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {variant.evaluatedTrajectory?.steps?.map((step) => (
-                    <TableRow key={`${variant.label}-coverage-${step.step}`}>
-                      <TableCell>{step.step}</TableCell>
-                      <TableCell>{formatInstanceMetric(step.coverage.file ?? null)}</TableCell>
-                      <TableCell>{formatInstanceMetric(step.coverage.span ?? null)}</TableCell>
-                      <TableCell>{formatInstanceMetric(step.coverage.line ?? null)}</TableCell>
-                      <TableCell>{formatInstanceMetric(step.coverage.symbol ?? null)}</TableCell>
+        {variants.map((variant) => {
+          const steps = visibleTrajectorySteps(variant.evaluatedTrajectory?.steps);
+          return (
+            <div key={variant.label} className="h-full rounded-lg bg-background p-5">
+              <h3 className="text-lg font-semibold">{variant.name}</h3>
+              {steps.length > 0 ? (
+                <Table className="mt-4">
+                  <TableHeader>
+                    <TableRow>
+                      <TrajectoryTableHead label="Retrieval Step" explanation="Cumulative scored context retrieval step number." />
+                      <TrajectoryTableHead label="File" explanation="Cumulative file-level gold-context coverage." />
+                      <TrajectoryTableHead label="Block" explanation="Cumulative block-level gold-context coverage." />
+                      <TrajectoryTableHead label="Line" explanation="Cumulative line-level gold-context coverage." />
+                      <TrajectoryTableHead label="Symbol" explanation="Cumulative symbol-level gold-context coverage." />
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            ) : <p className="mt-4 text-sm text-muted-foreground">No evaluated trajectory coverage data was recorded.</p>}
-          </div>
-        ))}
+                  </TableHeader>
+                  <TableBody>
+                    {steps.map((step, index) => (
+                      <TableRow key={`${variant.label}-coverage-${step.step}`}>
+                        <TableCell>{index + 1}</TableCell>
+                        <TableCell>{formatInstanceMetric(step.coverage.file ?? null)}</TableCell>
+                        <TableCell>{formatInstanceMetric(step.coverage.span ?? null)}</TableCell>
+                        <TableCell>{formatInstanceMetric(step.coverage.line ?? null)}</TableCell>
+                        <TableCell>{formatInstanceMetric(step.coverage.symbol ?? null)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              ) : <p className="mt-4 text-sm text-muted-foreground">No evaluated trajectory coverage data was recorded.</p>}
+            </div>
+          );
+        })}
       </div>
     </section>
   );
@@ -1089,13 +1122,15 @@ function TrajectoryVersusSection({
   const rows = mergedTrajectorySteps(baseline, treatment);
   return (
     <section className="space-y-4">
-      <SectionTitleWithHelp title="Cumulative Evaluated Trajectory" explanation={trajectoryExplanation} />
+      <div>
+        <SectionTitleWithHelp title="Cumulative Evaluated Trajectory" explanation={trajectoryExplanation} />
+      </div>
       <div className="rounded-lg bg-background p-5">
         {rows.length > 0 ? (
           <Table className="min-w-[42rem] table-fixed">
             <TableHeader>
               <TableRow>
-                <TrajectoryMajorTableHead label="Step" explanation="Cumulative retrieval step number." className="w-16 border-l-0" />
+                <TrajectoryMajorTableHead label="Retrieval Step" explanation="Cumulative scored context retrieval step number." className="w-24 border-l-0" />
                 <TrajectoryMajorTableHead label="File" explanation="Cumulative file-level gold-context coverage." />
                 <TrajectoryMajorTableHead label="Block" explanation="Cumulative block-level gold-context coverage." />
                 <TrajectoryMajorTableHead label="Line" explanation="Cumulative line-level gold-context coverage." />
@@ -1105,7 +1140,7 @@ function TrajectoryVersusSection({
             <TableBody>
               {rows.map((row) => (
                 <TableRow key={`trajectory-versus-${row.step}`}>
-                  <TableCell className="w-16 px-3 py-3">{row.step}</TableCell>
+                  <TableCell className="w-24 px-3 py-3">{row.step}</TableCell>
                   <TrajectoryMajorTableCell><CoverageVersusValue baselineValue={row.baseline?.coverage.file} treatmentValue={row.treatment?.coverage.file} /></TrajectoryMajorTableCell>
                   <TrajectoryMajorTableCell><CoverageVersusValue baselineValue={row.baseline?.coverage.span} treatmentValue={row.treatment?.coverage.span} /></TrajectoryMajorTableCell>
                   <TrajectoryMajorTableCell><CoverageVersusValue baselineValue={row.baseline?.coverage.line} treatmentValue={row.treatment?.coverage.line} /></TrajectoryMajorTableCell>
@@ -1120,6 +1155,12 @@ function TrajectoryVersusSection({
       </div>
     </section>
   );
+}
+
+type EvaluatedTrajectoryStep = NonNullable<NonNullable<ComparisonInstanceDetail["variants"][number]["evaluatedTrajectory"]>["steps"]>[number];
+
+function visibleTrajectorySteps(steps: EvaluatedTrajectoryStep[] | undefined): EvaluatedTrajectoryStep[] {
+  return (steps ?? []).filter((step) => !step.isSkillRead);
 }
 
 function TrajectoryMajorTableHead({
@@ -1153,14 +1194,13 @@ function mergedTrajectorySteps(
   baseline: ComparisonInstanceDetail["variants"][number],
   treatment: ComparisonInstanceDetail["variants"][number],
 ) {
-  const baselineSteps = new Map((baseline.evaluatedTrajectory?.steps ?? []).map((step) => [step.step, step]));
-  const treatmentSteps = new Map((treatment.evaluatedTrajectory?.steps ?? []).map((step) => [step.step, step]));
-  return Array.from(new Set([...baselineSteps.keys(), ...treatmentSteps.keys()]))
-    .sort((left, right) => left - right)
-    .map((step) => ({
-      step,
-      baseline: baselineSteps.get(step),
-      treatment: treatmentSteps.get(step),
+  const baselineSteps = visibleTrajectorySteps(baseline.evaluatedTrajectory?.steps);
+  const treatmentSteps = visibleTrajectorySteps(treatment.evaluatedTrajectory?.steps);
+  const rowCount = Math.max(baselineSteps.length, treatmentSteps.length);
+  return Array.from({ length: rowCount }, (_value, index) => ({
+      step: index + 1,
+      baseline: baselineSteps[index],
+      treatment: treatmentSteps[index],
     }));
 }
 

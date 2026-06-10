@@ -14,9 +14,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-02T09:08:06Z",
       "completedAt": "2026-05-02T09:14:21Z",
       "durationMs": 374769,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1093949,
@@ -25,54 +40,76 @@
         "total_tokens": 1109512,
         "cache_read_input_tokens": 1039104
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 36,
+        "readToolCalls": 0,
+        "editToolCalls": 3
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/transformers/modeling_tf_transfo_xl.py b/src/transformers/modeling_tf_transfo_xl.py\nindex d0f589ed1a..539f7c9f9e 100644\n--- a/src/transformers/modeling_tf_transfo_xl.py\n+++ b/src/transformers/modeling_tf_transfo_xl.py\n@@ -847,6 +847,10 @@ class TFTransfoXLLMHeadModel(TFTransfoXLPreTrainedModel):\n         pred_hid = last_hidden[:, -tgt_len:]\n         outputs = transformer_outputs[1:]\n \n+        if labels is not None:\n+            pred_hid = pred_hid[:, :-1]\n+            labels = labels[:, 1:]\n+\n         softmax_output = self.crit([pred_hid, labels], training=training)\n         outputs = [softmax_output] + outputs\n \ndiff --git a/src/transformers/modeling_transfo_xl.py b/src/transformers/modeling_transfo_xl.py\nindex 1ed8408966..64090c55d9 100644\n--- a/src/transformers/modeling_transfo_xl.py\n+++ b/src/transformers/modeling_transfo_xl.py\n@@ -859,7 +859,7 @@ class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):\n \n     Return:\n         :obj:`tuple(torch.FloatTensor)` comprising various elements depending on the configuration (:class:`~transformers.TransfoXLConfig`) and inputs:\n-        loss (:obj:`torch.FloatTensor` of shape `(batch_size, sequence_length)`, `optional`, returned when ``labels`` is provided)\n+        loss (:obj:`torch.FloatTensor` of shape `(batch_size, sequence_length - 1)`, `optional`, returned when ``labels`` is provided)\n             Language modeling loss.\n         prediction_scores (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, config.vocab_size)`):\n             Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).\n@@ -904,12 +904,16 @@ class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):\n         pred_hid = last_hidden[:, -tgt_len:]\n         outputs = transformer_outputs[1:]\n \n+        if labels is not None:\n+            pred_hid = pred_hid[:, :-1].contiguous()\n+            labels = labels[:, 1:].contiguous()\n+\n         softmax_output = self.crit(pred_hid.view(-1, pred_hid.size(-1)), labels)\n         if labels is None:\n             softmax_output = softmax_output.view(bsz, tgt_len, -1)\n             outputs = [softmax_output] + outputs\n         else:\n-            softmax_output = softmax_output.view(bsz, tgt_len)\n+            softmax_output = softmax_output.view(bsz, tgt_len - 1)\n             outputs = [softmax_output, None] + outputs\n \n         return outputs  # (loss), logits or None if labels is not None (speed up adaptive softmax), new_mems, (all hidden states), (all attentions)\ndiff --git a/tests/test_modeling_tf_transfo_xl.py b/tests/test_modeling_tf_transfo_xl.py\nindex b432f49e3c..52fb8d3c0c 100644\n--- a/tests/test_modeling_tf_transfo_xl.py\n+++ b/tests/test_modeling_tf_transfo_xl.py\n@@ -17,6 +17,8 @@\n import random\n import unittest\n \n+import numpy as np\n+\n from transformers import TransfoXLConfig, is_tf_available\n \n from .test_configuration_common import ConfigTester\n@@ -207,6 +209,42 @@ class TFTransfoXLModelTest(TFModelTesterMixin, unittest.TestCase):\n         config_and_inputs = self.model_tester.prepare_config_and_inputs()\n         self.model_tester.create_and_check_transfo_xl_lm_head(*config_and_inputs)\n \n+    def test_transfo_xl_lm_head_labels_are_shifted(self):\n+        self.model_tester.set_seed()\n+        config, input_ids_1, _, _ = self.model_tester.prepare_config_and_inputs()\n+        model = TFTransfoXLLMHeadModel(config)\n+\n+        log_probs, _ = model(input_ids_1)\n+        model({\"input_ids\": input_ids_1, \"labels\": input_ids_1})\n+\n+        shift_log_probs = log_probs[:, :-1, :]\n+        shift_labels = input_ids_1[:, 1:]\n+        expected_loss = -tf.reduce_sum(tf.one_hot(shift_labels, depth=config.vocab_size) * shift_log_probs, axis=-1)\n+\n+        self.assertTrue(np.allclose(model.losses[0].numpy(), tf.reduce_mean(expected_loss).numpy(), atol=1e-5))\n+\n+    def test_transfo_xl_lm_head_labels_are_shifted_for_single_token(self):\n+        config = TransfoXLConfig(\n+            vocab_size=self.model_tester.vocab_size,\n+            mem_len=self.model_tester.mem_len,\n+            clamp_len=self.model_tester.clamp_len,\n+            cutoffs=self.model_tester.cutoffs,\n+            d_model=self.model_tester.hidden_size,\n+            d_embed=self.model_tester.d_embed,\n+            n_head=self.model_tester.num_attention_heads,\n+            d_head=self.model_tester.d_head,\n+            d_inner=self.model_tester.d_inner,\n+            div_val=self.model_tester.div_val,\n+            n_layer=self.model_tester.num_hidden_layers,\n+            eos_token_id=self.model_tester.eos_token_id,\n+        )\n+        model = TFTransfoXLLMHeadModel(config)\n+        input_ids = tf.constant([[0]], dtype=tf.int32)\n+\n+        model({\"input_ids\": input_ids, \"labels\": input_ids})\n+\n+        self.assertTrue(np.isnan(model.losses[0].numpy()))\n+\n     @slow\n     def test_model_from_pretrained(self):\n         for model_name in list(TF_TRANSFO_XL_PRETRAINED_MODEL_ARCHIVE_MAP.keys())[:1]:\ndiff --git a/tests/test_modeling_transfo_xl.py b/tests/test_modeling_transfo_xl.py\nindex 18212c8828..d9c30b724e 100644\n--- a/tests/test_modeling_transfo_xl.py\n+++ b/tests/test_modeling_transfo_xl.py\n@@ -164,7 +164,7 @@ class TransfoXLModelTest(ModelTesterMixin, unittest.TestCase):\n             return outputs\n \n         def check_transfo_xl_lm_head_output(self, result):\n-            self.parent.assertListEqual(list(result[\"loss_1\"].size()), [self.batch_size, self.seq_length])\n+            self.parent.assertListEqual(list(result[\"loss_1\"].size()), [self.batch_size, self.seq_length - 1])\n             self.parent.assertListEqual(\n                 list(result[\"lm_logits_1\"].size()), [self.batch_size, self.seq_length, self.vocab_size],\n             )\n@@ -173,7 +173,7 @@ class TransfoXLModelTest(ModelTesterMixin, unittest.TestCase):\n                 [[self.mem_len, self.batch_size, self.hidden_size]] * self.num_hidden_layers,\n             )\n \n-            self.parent.assertListEqual(list(result[\"loss_2\"].size()), [self.batch_size, self.seq_length])\n+            self.parent.assertListEqual(list(result[\"loss_2\"].size()), [self.batch_size, self.seq_length - 1])\n             self.parent.assertListEqual(\n                 list(result[\"lm_logits_2\"].size()), [self.batch_size, self.seq_length, self.vocab_size],\n             )\n@@ -207,6 +207,49 @@ class TransfoXLModelTest(ModelTesterMixin, unittest.TestCase):\n         output_result = self.model_tester.create_transfo_xl_lm_head(*config_and_inputs)\n         self.model_tester.check_transfo_xl_lm_head_output(output_result)\n \n+    def test_transfo_xl_lm_head_labels_are_shifted(self):\n+        self.model_tester.set_seed()\n+        config, input_ids_1, _, _ = self.model_tester.prepare_config_and_inputs()\n+\n+        model = TransfoXLLMHeadModel(config)\n+        model.to(torch_device)\n+        model.eval()\n+\n+        with torch.no_grad():\n+            log_probs, _ = model(input_ids_1)\n+            loss, _, _ = model(input_ids_1, labels=input_ids_1)\n+\n+        expected_loss = -log_probs[:, :-1].gather(-1, input_ids_1[:, 1:].unsqueeze(-1)).squeeze(-1)\n+\n+        self.assertListEqual(list(loss.size()), [self.model_tester.batch_size, self.model_tester.seq_length - 1])\n+        self.assertTrue(torch.allclose(loss, expected_loss, atol=1e-5))\n+\n+    def test_transfo_xl_lm_head_labels_are_shifted_for_single_token(self):\n+        config = TransfoXLConfig(\n+            vocab_size=self.model_tester.vocab_size,\n+            mem_len=self.model_tester.mem_len,\n+            clamp_len=self.model_tester.clamp_len,\n+            cutoffs=self.model_tester.cutoffs,\n+            d_model=self.model_tester.hidden_size,\n+            d_embed=self.model_tester.d_embed,\n+            n_head=self.model_tester.num_attention_heads,\n+            d_head=self.model_tester.d_head,\n+            d_inner=self.model_tester.d_inner,\n+            div_val=self.model_tester.div_val,\n+            n_layer=self.model_tester.num_hidden_layers,\n+            eos_token_id=self.model_tester.eos_token_id,\n+        )\n+        model = TransfoXLLMHeadModel(config)\n+        model.to(torch_device)\n+        model.eval()\n+\n+        input_ids = torch.LongTensor([[0]]).to(torch_device)\n+\n+        with torch.no_grad():\n+            loss, _, _ = model(input_ids, labels=input_ids)\n+\n+        self.assertListEqual(list(loss.size()), [1, 0])\n+\n     @slow\n     def test_model_from_pretrained(self):\n         for model_name in list(TRANSFO_XL_PRETRAINED_MODEL_ARCHIVE_MAP.keys())[:1]:\n",
       "finalOutput": {
         "status": "completed",
         "finalAnswer": "Implemented the Transfo-XL LM loss fix so both PyTorch and TensorFlow LM heads now shift labels internally before computing language-modeling loss. In PyTorch, the returned per-token loss now has shape `(batch_size, sequence_length - 1)`, which makes the single-token case produce an empty loss tensor instead of a bogus 1x1 loss.\n\nAdded regression coverage for both backends to check that `labels=input_ids` matches a manually shifted next-token loss, and added single-token edge-case tests. Offline verification passed with `python3 -m py_compile` on the touched source and test files plus `git diff --check`. Runtime test execution was not possible in this environment because the required test dependencies/framework packages are missing.",
         "notes": "Verification limits: `pytest` is not installed, `torch` and `tensorflow` are unavailable, and importing the package in this environment also fails on missing optional dependency `boto3`. Because of that, I could not run the repo\u2019s runtime tests here. Completed offline-safe checks: `python3 -m py_compile src/transformers/modeling_transfo_xl.py src/transformers/modeling_tf_transfo_xl.py tests/test_modeling_transfo_xl.py tests/test_modeling_tf_transfo_xl.py` and `git diff --check -- ...`.",
         "retrievedContextFiles": [
-          "<worktree>/src/transformers/modeling_transfo_xl.py",
-          "<worktree>/src/transformers/modeling_tf_transfo_xl.py",
-          "<worktree>/tests/test_modeling_transfo_xl.py",
-          "<worktree>/tests/test_modeling_tf_transfo_xl.py"
+          "src/transformers/modeling_transfo_xl.py",
+          "src/transformers/modeling_tf_transfo_xl.py",
+          "tests/test_modeling_transfo_xl.py",
+          "tests/test_modeling_tf_transfo_xl.py"
         ],
         "retrievedContextSpans": [
           {
-            "file": "<worktree>/src/transformers/modeling_transfo_xl.py",
+            "file": "src/transformers/modeling_transfo_xl.py",
             "start": 851,
             "end": 919
           },
           {
-            "file": "<worktree>/src/transformers/modeling_tf_transfo_xl.py",
+            "file": "src/transformers/modeling_tf_transfo_xl.py",
             "start": 844,
             "end": 857
           },
           {
-            "file": "<worktree>/tests/test_modeling_transfo_xl.py",
+            "file": "tests/test_modeling_transfo_xl.py",
             "start": 166,
             "end": 251
           },
           {
-            "file": "<worktree>/tests/test_modeling_tf_transfo_xl.py",
+            "file": "tests/test_modeling_tf_transfo_xl.py",
             "start": 207,
             "end": 246
           }
         ],
         "retrievedContextSymbols": [
           {
-            "file": "<worktree>/src/transformers/modeling_transfo_xl.py",
+            "file": "src/transformers/modeling_transfo_xl.py",
             "name": "TransfoXLLMHeadModel.forward"
           },
           {
-            "file": "<worktree>/src/transformers/modeling_tf_transfo_xl.py",
+            "file": "src/transformers/modeling_tf_transfo_xl.py",
             "name": "TFTransfoXLLMHeadModel.call"
           },
           {
-            "file": "<worktree>/tests/test_modeling_transfo_xl.py",
+            "file": "tests/test_modeling_transfo_xl.py",
             "name": "TransfoXLModelTest.test_transfo_xl_lm_head_labels_are_shifted"
           },
           {
-            "file": "<worktree>/tests/test_modeling_tf_transfo_xl.py",
+            "file": "tests/test_modeling_tf_transfo_xl.py",
             "name": "TFTransfoXLModelTest.test_transfo_xl_lm_head_labels_are_shifted"
           }
         ]
@@ -81,297 +118,13 @@
         "predSteps": [
           {
             "files": [
-              "src/transformers/__init__.py",
-              "src/transformers/activations.py",
-              "src/transformers/benchmark_utils.py",
-              "src/transformers/commands/__init__.py",
-              "src/transformers/commands/convert.py",
-              "src/transformers/commands/download.py",
-              "src/transformers/commands/env.py",
-              "src/transformers/commands/run.py",
-              "src/transformers/commands/serving.py",
-              "src/transformers/commands/train.py",
-              "src/transformers/commands/user.py",
-              "src/transformers/configuration_albert.py",
-              "src/transformers/configuration_auto.py",
-              "src/transformers/configuration_bart.py",
-              "src/transformers/configuration_bert.py",
-              "src/transformers/configuration_camembert.py",
-              "src/transformers/configuration_ctrl.py",
-              "src/transformers/configuration_distilbert.py",
-              "src/transformers/configuration_electra.py",
-              "src/transformers/configuration_flaubert.py",
-              "src/transformers/configuration_gpt2.py",
-              "src/transformers/configuration_mmbt.py",
-              "src/transformers/configuration_openai.py",
-              "src/transformers/configuration_roberta.py",
-              "src/transformers/configuration_t5.py",
-              "src/transformers/configuration_transfo_xl.py",
-              "src/transformers/configuration_utils.py",
-              "src/transformers/configuration_xlm.py",
-              "src/transformers/configuration_xlm_roberta.py",
-              "src/transformers/configuration_xlnet.py",
-              "src/transformers/convert_albert_original_tf_checkpoint_to_pytorch.py",
-              "src/transformers/convert_bart_original_pytorch_checkpoint_to_pytorch.py",
-              "src/transformers/convert_bert_original_tf_checkpoint_to_pytorch.py",
-              "src/transformers/convert_bert_pytorch_checkpoint_to_original_tf.py",
-              "src/transformers/convert_dialogpt_original_pytorch_checkpoint_to_pytorch.py",
-              "src/transformers/convert_electra_original_tf_checkpoint_to_pytorch.py",
-              "src/transformers/convert_gpt2_original_tf_checkpoint_to_pytorch.py",
-              "src/transformers/convert_openai_original_tf_checkpoint_to_pytorch.py",
-              "src/transformers/convert_pytorch_checkpoint_to_tf2.py",
-              "src/transformers/convert_roberta_original_pytorch_checkpoint_to_pytorch.py",
-              "src/transformers/convert_t5_original_tf_checkpoint_to_pytorch.py",
-              "src/transformers/convert_transfo_xl_original_tf_checkpoint_to_pytorch.py",
-              "src/transformers/convert_xlm_original_pytorch_checkpoint_to_pytorch.py",
-              "src/transformers/convert_xlnet_original_tf_checkpoint_to_pytorch.py",
-              "src/transformers/data/__init__.py",
-              "src/transformers/data/metrics/__init__.py",
-              "src/transformers/data/metrics/squad_metrics.py",
-              "src/transformers/data/processors/__init__.py",
-              "src/transformers/data/processors/glue.py",
-              "src/transformers/data/processors/squad.py",
-              "src/transformers/data/processors/utils.py",
-              "src/transformers/data/processors/xnli.py",
-              "src/transformers/file_utils.py",
-              "src/transformers/hf_api.py",
-              "src/transformers/modelcard.py",
-              "src/transformers/modeling_albert.py",
-              "src/transformers/modeling_auto.py",
-              "src/transformers/modeling_bart.py",
-              "src/transformers/modeling_bert.py",
-              "src/transformers/modeling_camembert.py",
-              "src/transformers/modeling_ctrl.py",
-              "src/transformers/modeling_distilbert.py",
-              "src/transformers/modeling_electra.py",
-              "src/transformers/modeling_encoder_decoder.py",
-              "src/transformers/modeling_flaubert.py",
-              "src/transformers/modeling_gpt2.py",
-              "src/transformers/modeling_mmbt.py",
-              "src/transformers/modeling_openai.py",
-              "src/transformers/modeling_roberta.py",
-              "src/transformers/modeling_t5.py",
-              "src/transformers/modeling_tf_albert.py",
-              "src/transformers/modeling_tf_auto.py",
-              "src/transformers/modeling_tf_bert.py",
-              "src/transformers/modeling_tf_camembert.py",
-              "src/transformers/modeling_tf_ctrl.py",
-              "src/transformers/modeling_tf_distilbert.py",
-              "src/transformers/modeling_tf_electra.py",
-              "src/transformers/modeling_tf_flaubert.py",
-              "src/transformers/modeling_tf_gpt2.py",
-              "src/transformers/modeling_tf_openai.py",
-              "src/transformers/modeling_tf_pytorch_utils.py",
-              "src/transformers/modeling_tf_roberta.py",
-              "src/transformers/modeling_tf_t5.py",
-              "src/transformers/modeling_tf_transfo_xl.py",
-              "src/transformers/modeling_tf_transfo_xl_utilities.py",
-              "src/transformers/modeling_tf_utils.py",
-              "src/transformers/modeling_tf_xlm.py",
-              "src/transformers/modeling_tf_xlm_roberta.py",
-              "src/transformers/modeling_tf_xlnet.py",
-              "src/transformers/modeling_transfo_xl.py",
-              "src/transformers/modeling_transfo_xl_utilities.py",
-              "src/transformers/modeling_utils.py",
-              "src/transformers/modeling_xlm.py",
-              "src/transformers/modeling_xlm_roberta.py",
-              "src/transformers/modeling_xlnet.py",
-              "src/transformers/optimization.py",
-              "src/transformers/optimization_tf.py",
-              "src/transformers/pipelines.py",
-              "src/transformers/tokenization_albert.py",
-              "src/transformers/tokenization_auto.py",
-              "src/transformers/tokenization_bart.py",
-              "src/transformers/tokenization_bert.py",
-              "src/transformers/tokenization_bert_japanese.py",
-              "src/transformers/tokenization_camembert.py",
-              "src/transformers/tokenization_ctrl.py",
-              "src/transformers/tokenization_distilbert.py",
-              "src/transformers/tokenization_electra.py",
-              "src/transformers/tokenization_flaubert.py",
-              "src/transformers/tokenization_gpt2.py",
-              "src/transformers/tokenization_openai.py",
-              "src/transformers/tokenization_roberta.py",
-              "src/transformers/tokenization_t5.py",
-              "src/transformers/tokenization_transfo_xl.py",
-              "src/transformers/tokenization_utils.py",
-              "src/transformers/tokenization_xlm.py",
-              "src/transformers/tokenization_xlm_roberta.py",
-              "src/transformers/tokenization_xlnet.py",
-              "src/transformers/utils_encoder_decoder.py",
-              "tests/test_modeling_tf_transfo_xl.py",
-              "tests/test_modeling_transfo_xl.py",
-              "tests/test_tokenization_transfo_xl.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/transformers/modeling_tf_transfo_xl.py",
-              "src/transformers/modeling_tf_transfo_xl_utilities.py",
-              "src/transformers/modeling_transfo_xl.py",
-              "src/transformers/modeling_transfo_xl_utilities.py"
+              "src/transformers/modeling_transfo_xl.py"
             ],
             "spans": {
-              "src/transformers/modeling_transfo_xl_utilities.py": [
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 90,
-                  "end": 90
-                },
-                {
-                  "start": 92,
-                  "end": 92
-                },
-                {
-                  "start": 101,
-                  "end": 101
-                },
-                {
-                  "start": 102,
-                  "end": 102
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 108,
-                  "end": 108
-                },
-                {
-                  "start": 109,
-                  "end": 109
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 139,
-                  "end": 139
-                },
-                {
-                  "start": 146,
-                  "end": 146
-                },
-                {
-                  "start": 147,
-                  "end": 147
-                },
-                {
-                  "start": 153,
-                  "end": 153
-                },
-                {
-                  "start": 160,
-                  "end": 160
-                },
-                {
-                  "start": 170,
-                  "end": 170
-                },
-                {
-                  "start": 178,
-                  "end": 178
-                }
-              ],
-              "src/transformers/modeling_tf_transfo_xl_utilities.py": [
-                {
-                  "start": 123,
-                  "end": 123
-                }
-              ],
-              "src/transformers/modeling_tf_transfo_xl.py": [
-                {
-                  "start": 788,
-                  "end": 788
-                },
-                {
-                  "start": 827,
-                  "end": 827
-                },
-                {
-                  "start": 834,
-                  "end": 834
-                },
-                {
-                  "start": 850,
-                  "end": 850
-                }
-              ],
               "src/transformers/modeling_transfo_xl.py": [
                 {
-                  "start": 175,
-                  "end": 175
-                },
-                {
-                  "start": 205,
-                  "end": 205
-                },
-                {
-                  "start": 280,
-                  "end": 280
-                },
-                {
-                  "start": 380,
-                  "end": 380
-                },
-                {
-                  "start": 418,
-                  "end": 418
-                },
-                {
-                  "start": 673,
-                  "end": 673
-                },
-                {
-                  "start": 807,
-                  "end": 807
-                },
-                {
-                  "start": 851,
-                  "end": 851
-                },
-                {
-                  "start": 853,
-                  "end": 853
-                },
-                {
-                  "start": 855,
-                  "end": 855
-                },
-                {
-                  "start": 857,
-                  "end": 857
-                },
-                {
-                  "start": 858,
-                  "end": 858
-                },
-                {
-                  "start": 862,
-                  "end": 862
-                },
-                {
-                  "start": 907,
-                  "end": 907
-                },
-                {
-                  "start": 908,
-                  "end": 908
-                },
-                {
-                  "start": 915,
-                  "end": 915
+                  "start": 820,
+                  "end": 930
                 }
               ]
             },
@@ -379,346 +132,41 @@
           },
           {
             "files": [
-              "src/transformers/modeling_transfo_xl.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
               "src/transformers/modeling_gpt2.py"
             ],
-            "spans": {},
+            "spans": {
+              "src/transformers/modeling_gpt2.py": [
+                {
+                  "start": 660,
+                  "end": 760
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "tests/test_modeling_transfo_xl.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/test_modeling_transfo_xl.py": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
               "src/transformers/modeling_transfo_xl_utilities.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/transformers/modeling_albert.py",
-              "src/transformers/modeling_bart.py",
-              "src/transformers/modeling_bert.py",
-              "src/transformers/modeling_ctrl.py",
-              "src/transformers/modeling_distilbert.py",
-              "src/transformers/modeling_electra.py",
-              "src/transformers/modeling_gpt2.py",
-              "src/transformers/modeling_mmbt.py",
-              "src/transformers/modeling_openai.py",
-              "src/transformers/modeling_roberta.py",
-              "src/transformers/modeling_t5.py",
-              "src/transformers/modeling_tf_xlnet.py",
-              "src/transformers/modeling_transfo_xl.py",
-              "src/transformers/modeling_utils.py",
-              "src/transformers/modeling_xlm.py",
-              "src/transformers/modeling_xlnet.py"
-            ],
             "spans": {
-              "src/transformers/modeling_xlm.py": [
+              "src/transformers/modeling_transfo_xl_utilities.py": [
                 {
-                  "start": 659,
-                  "end": 659
-                },
-                {
-                  "start": 803,
-                  "end": 803
-                },
-                {
-                  "start": 917,
-                  "end": 917
-                },
-                {
-                  "start": 1124,
-                  "end": 1124
-                }
-              ],
-              "src/transformers/modeling_transfo_xl.py": [
-                {
-                  "start": 855,
-                  "end": 855
-                }
-              ],
-              "src/transformers/modeling_xlnet.py": [
-                {
-                  "start": 1061,
-                  "end": 1061
-                },
-                {
-                  "start": 1165,
-                  "end": 1165
-                },
-                {
-                  "start": 1263,
-                  "end": 1263
-                },
-                {
-                  "start": 1383,
-                  "end": 1383
-                },
-                {
-                  "start": 1502,
-                  "end": 1502
-                },
-                {
-                  "start": 1634,
-                  "end": 1634
-                }
-              ],
-              "src/transformers/modeling_tf_xlnet.py": [
-                {
-                  "start": 1192,
-                  "end": 1192
-                }
-              ],
-              "src/transformers/modeling_utils.py": [
-                {
-                  "start": 1780,
-                  "end": 1780
-                }
-              ],
-              "src/transformers/modeling_mmbt.py": [
-                {
-                  "start": 415,
-                  "end": 415
-                }
-              ],
-              "src/transformers/modeling_openai.py": [
-                {
-                  "start": 511,
-                  "end": 511
-                },
-                {
-                  "start": 564,
-                  "end": 564
-                },
-                {
-                  "start": 565,
-                  "end": 565
-                },
-                {
-                  "start": 567,
-                  "end": 567
-                },
-                {
-                  "start": 568,
-                  "end": 568
-                },
-                {
-                  "start": 615,
-                  "end": 615
-                },
-                {
-                  "start": 683,
-                  "end": 683
-                },
-                {
-                  "start": 687,
-                  "end": 687
-                },
-                {
-                  "start": 688,
-                  "end": 688
-                },
-                {
-                  "start": 689,
-                  "end": 689
-                },
-                {
-                  "start": 690,
-                  "end": 690
-                }
-              ],
-              "src/transformers/modeling_gpt2.py": [
-                {
-                  "start": 555,
-                  "end": 555
-                },
-                {
-                  "start": 611,
-                  "end": 611
-                },
-                {
-                  "start": 612,
-                  "end": 612
-                },
-                {
-                  "start": 614,
-                  "end": 614
-                },
-                {
-                  "start": 615,
-                  "end": 615
-                },
-                {
-                  "start": 662,
-                  "end": 662
-                },
-                {
-                  "start": 738,
-                  "end": 738
-                },
-                {
-                  "start": 742,
-                  "end": 742
-                },
-                {
-                  "start": 743,
-                  "end": 743
-                },
-                {
-                  "start": 744,
-                  "end": 744
-                },
-                {
-                  "start": 745,
-                  "end": 745
-                }
-              ],
-              "src/transformers/modeling_roberta.py": [
-                {
-                  "start": 240,
-                  "end": 240
-                },
-                {
-                  "start": 356,
-                  "end": 356
-                },
-                {
-                  "start": 455,
-                  "end": 455
-                },
-                {
-                  "start": 547,
-                  "end": 547
-                },
-                {
-                  "start": 691,
-                  "end": 691
-                }
-              ],
-              "src/transformers/modeling_ctrl.py": [
-                {
-                  "start": 482,
-                  "end": 482
-                },
-                {
-                  "start": 540,
-                  "end": 540
-                },
-                {
-                  "start": 541,
-                  "end": 541
-                },
-                {
-                  "start": 543,
-                  "end": 543
-                },
-                {
-                  "start": 544,
-                  "end": 544
-                }
-              ],
-              "src/transformers/modeling_t5.py": [
-                {
-                  "start": 969,
-                  "end": 969
-                }
-              ],
-              "src/transformers/modeling_distilbert.py": [
-                {
-                  "start": 506,
-                  "end": 506
-                },
-                {
-                  "start": 642,
-                  "end": 642
-                },
-                {
-                  "start": 742,
-                  "end": 742
-                },
-                {
-                  "start": 817,
-                  "end": 817
-                }
-              ],
-              "src/transformers/modeling_bart.py": [
-                {
-                  "start": 899,
-                  "end": 899
-                }
-              ],
-              "src/transformers/modeling_electra.py": [
-                {
-                  "start": 571,
-                  "end": 571
-                },
-                {
-                  "start": 657,
-                  "end": 657
-                }
-              ],
-              "src/transformers/modeling_albert.py": [
-                {
-                  "start": 689,
-                  "end": 689
-                },
-                {
-                  "start": 784,
-                  "end": 784
-                },
-                {
-                  "start": 874,
-                  "end": 874
-                },
-                {
-                  "start": 989,
-                  "end": 989
-                }
-              ],
-              "src/transformers/modeling_bert.py": [
-                {
-                  "start": 896,
-                  "end": 896
-                },
-                {
-                  "start": 1002,
-                  "end": 1002
-                },
-                {
-                  "start": 1010,
-                  "end": 1010
-                },
-                {
-                  "start": 1095,
-                  "end": 1095
-                },
-                {
-                  "start": 1192,
-                  "end": 1192
-                },
-                {
-                  "start": 1292,
-                  "end": 1292
-                },
-                {
-                  "start": 1381,
-                  "end": 1381
-                },
-                {
-                  "start": 1502,
-                  "end": 1502
+                  "start": 80,
+                  "end": 190
                 }
               ]
             },
@@ -728,36 +176,11 @@
             "files": [
               "src/transformers/modeling_tf_transfo_xl.py"
             ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/test_modeling_tf_transfo_xl.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/transformers/modeling_tf_transfo_xl_utilities.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/transformers/modeling_transfo_xl.py"
-            ],
             "spans": {
-              "src/transformers/modeling_transfo_xl.py": [
+              "src/transformers/modeling_tf_transfo_xl.py": [
                 {
-                  "start": 856,
-                  "end": 856
-                },
-                {
-                  "start": 857,
-                  "end": 857
+                  "start": 820,
+                  "end": 885
                 }
               ]
             },
@@ -765,98 +188,41 @@
           },
           {
             "files": [
-              "tests/test_modeling_common.py",
-              "tests/test_modeling_tf_common.py",
-              "tests/test_modeling_transfo_xl.py",
-              "tests/test_modeling_xlnet.py"
+              "tests/test_modeling_tf_transfo_xl.py"
+            ],
+            "spans": {
+              "tests/test_modeling_tf_transfo_xl.py": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/modeling_tf_transfo_xl_utilities.py"
+            ],
+            "spans": {
+              "src/transformers/modeling_tf_transfo_xl_utilities.py": [
+                {
+                  "start": 90,
+                  "end": 180
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_modeling_tf_common.py"
             ],
             "spans": {
               "tests/test_modeling_tf_common.py": [
                 {
-                  "start": 132,
-                  "end": 132
-                },
-                {
-                  "start": 133,
-                  "end": 133
-                },
-                {
-                  "start": 175,
-                  "end": 175
-                },
-                {
-                  "start": 176,
-                  "end": 176
-                },
-                {
-                  "start": 217,
-                  "end": 217
-                },
-                {
-                  "start": 218,
-                  "end": 218
-                },
-                {
-                  "start": 376,
-                  "end": 376
-                },
-                {
-                  "start": 377,
-                  "end": 377
-                }
-              ],
-              "tests/test_modeling_xlnet.py": [
-                {
-                  "start": 267,
-                  "end": 267
-                },
-                {
-                  "start": 276,
-                  "end": 276
-                },
-                {
-                  "start": 284,
-                  "end": 284
-                }
-              ],
-              "tests/test_modeling_transfo_xl.py": [
-                {
-                  "start": 152,
-                  "end": 152
-                },
-                {
-                  "start": 157,
-                  "end": 157
-                },
-                {
-                  "start": 167,
-                  "end": 167
-                }
-              ],
-              "tests/test_modeling_common.py": [
-                {
-                  "start": 74,
-                  "end": 74
-                },
-                {
-                  "start": 85,
-                  "end": 85
-                },
-                {
-                  "start": 115,
-                  "end": 115
-                },
-                {
-                  "start": 116,
-                  "end": 116
-                },
-                {
-                  "start": 289,
-                  "end": 289
-                },
-                {
-                  "start": 292,
-                  "end": 292
+                  "start": 1,
+                  "end": 120
                 }
               ]
             },
@@ -868,700 +234,139 @@
             ],
             "spans": {},
             "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_modeling_tf_common.py"
+            ],
+            "spans": {
+              "tests/test_modeling_tf_common.py": [
+                {
+                  "start": 532,
+                  "end": 560
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_modeling_tf_transfo_xl.py",
+              "tests/test_modeling_transfo_xl.py"
+            ],
+            "spans": {
+              "tests/test_modeling_transfo_xl.py": [
+                {
+                  "start": 218,
+                  "end": 245
+                }
+              ],
+              "tests/test_modeling_tf_transfo_xl.py": [
+                {
+                  "start": 220,
+                  "end": 250
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/modeling_transfo_xl.py"
+            ],
+            "spans": {
+              "src/transformers/modeling_transfo_xl.py": [
+                {
+                  "start": 850,
+                  "end": 920
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_modeling_tf_transfo_xl.py"
+            ],
+            "spans": {
+              "tests/test_modeling_tf_transfo_xl.py": [
+                {
+                  "start": 200,
+                  "end": 255
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_modeling_transfo_xl.py"
+            ],
+            "spans": {
+              "tests/test_modeling_transfo_xl.py": [
+                {
+                  "start": 160,
+                  "end": 250
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/modeling_tf_transfo_xl.py"
+            ],
+            "spans": {
+              "src/transformers/modeling_tf_transfo_xl.py": [
+                {
+                  "start": 840,
+                  "end": 860
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_modeling_transfo_xl.py"
+            ],
+            "spans": {
+              "tests/test_modeling_transfo_xl.py": [
+                {
+                  "start": 246,
+                  "end": 255
+                }
+              ]
+            },
+            "symbols": {}
           }
         ],
         "predFiles": [
-          "<worktree>/src/transformers/modeling_tf_transfo_xl.py",
-          "<worktree>/src/transformers/modeling_transfo_xl.py",
-          "<worktree>/tests/test_modeling_tf_transfo_xl.py",
-          "<worktree>/tests/test_modeling_transfo_xl.py",
-          "src/transformers/__init__.py",
-          "src/transformers/activations.py",
-          "src/transformers/benchmark_utils.py",
-          "src/transformers/commands/__init__.py",
-          "src/transformers/commands/convert.py",
-          "src/transformers/commands/download.py",
-          "src/transformers/commands/env.py",
-          "src/transformers/commands/run.py",
-          "src/transformers/commands/serving.py",
-          "src/transformers/commands/train.py",
-          "src/transformers/commands/user.py",
-          "src/transformers/configuration_albert.py",
-          "src/transformers/configuration_auto.py",
-          "src/transformers/configuration_bart.py",
-          "src/transformers/configuration_bert.py",
-          "src/transformers/configuration_camembert.py",
-          "src/transformers/configuration_ctrl.py",
-          "src/transformers/configuration_distilbert.py",
-          "src/transformers/configuration_electra.py",
-          "src/transformers/configuration_flaubert.py",
-          "src/transformers/configuration_gpt2.py",
-          "src/transformers/configuration_mmbt.py",
-          "src/transformers/configuration_openai.py",
-          "src/transformers/configuration_roberta.py",
-          "src/transformers/configuration_t5.py",
-          "src/transformers/configuration_transfo_xl.py",
-          "src/transformers/configuration_utils.py",
-          "src/transformers/configuration_xlm.py",
-          "src/transformers/configuration_xlm_roberta.py",
-          "src/transformers/configuration_xlnet.py",
-          "src/transformers/convert_albert_original_tf_checkpoint_to_pytorch.py",
-          "src/transformers/convert_bart_original_pytorch_checkpoint_to_pytorch.py",
-          "src/transformers/convert_bert_original_tf_checkpoint_to_pytorch.py",
-          "src/transformers/convert_bert_pytorch_checkpoint_to_original_tf.py",
-          "src/transformers/convert_dialogpt_original_pytorch_checkpoint_to_pytorch.py",
-          "src/transformers/convert_electra_original_tf_checkpoint_to_pytorch.py",
-          "src/transformers/convert_gpt2_original_tf_checkpoint_to_pytorch.py",
-          "src/transformers/convert_openai_original_tf_checkpoint_to_pytorch.py",
-          "src/transformers/convert_pytorch_checkpoint_to_tf2.py",
-          "src/transformers/convert_roberta_original_pytorch_checkpoint_to_pytorch.py",
-          "src/transformers/convert_t5_original_tf_checkpoint_to_pytorch.py",
-          "src/transformers/convert_transfo_xl_original_tf_checkpoint_to_pytorch.py",
-          "src/transformers/convert_xlm_original_pytorch_checkpoint_to_pytorch.py",
-          "src/transformers/convert_xlnet_original_tf_checkpoint_to_pytorch.py",
-          "src/transformers/data/__init__.py",
-          "src/transformers/data/metrics/__init__.py",
-          "src/transformers/data/metrics/squad_metrics.py",
-          "src/transformers/data/processors/__init__.py",
-          "src/transformers/data/processors/glue.py",
-          "src/transformers/data/processors/squad.py",
-          "src/transformers/data/processors/utils.py",
-          "src/transformers/data/processors/xnli.py",
-          "src/transformers/file_utils.py",
-          "src/transformers/hf_api.py",
-          "src/transformers/modelcard.py",
-          "src/transformers/modeling_albert.py",
-          "src/transformers/modeling_auto.py",
-          "src/transformers/modeling_bart.py",
-          "src/transformers/modeling_bert.py",
-          "src/transformers/modeling_camembert.py",
-          "src/transformers/modeling_ctrl.py",
-          "src/transformers/modeling_distilbert.py",
-          "src/transformers/modeling_electra.py",
-          "src/transformers/modeling_encoder_decoder.py",
-          "src/transformers/modeling_flaubert.py",
-          "src/transformers/modeling_gpt2.py",
-          "src/transformers/modeling_mmbt.py",
-          "src/transformers/modeling_openai.py",
-          "src/transformers/modeling_roberta.py",
-          "src/transformers/modeling_t5.py",
-          "src/transformers/modeling_tf_albert.py",
-          "src/transformers/modeling_tf_auto.py",
-          "src/transformers/modeling_tf_bert.py",
-          "src/transformers/modeling_tf_camembert.py",
-          "src/transformers/modeling_tf_ctrl.py",
-          "src/transformers/modeling_tf_distilbert.py",
-          "src/transformers/modeling_tf_electra.py",
-          "src/transformers/modeling_tf_flaubert.py",
-          "src/transformers/modeling_tf_gpt2.py",
-          "src/transformers/modeling_tf_openai.py",
-          "src/transformers/modeling_tf_pytorch_utils.py",
-          "src/transformers/modeling_tf_roberta.py",
-          "src/transformers/modeling_tf_t5.py",
           "src/transformers/modeling_tf_transfo_xl.py",
-          "src/transformers/modeling_tf_transfo_xl_utilities.py",
-          "src/transformers/modeling_tf_utils.py",
-          "src/transformers/modeling_tf_xlm.py",
-          "src/transformers/modeling_tf_xlm_roberta.py",
-          "src/transformers/modeling_tf_xlnet.py",
           "src/transformers/modeling_transfo_xl.py",
-          "src/transformers/modeling_transfo_xl_utilities.py",
-          "src/transformers/modeling_utils.py",
-          "src/transformers/modeling_xlm.py",
-          "src/transformers/modeling_xlm_roberta.py",
-          "src/transformers/modeling_xlnet.py",
-          "src/transformers/optimization.py",
-          "src/transformers/optimization_tf.py",
-          "src/transformers/pipelines.py",
-          "src/transformers/tokenization_albert.py",
-          "src/transformers/tokenization_auto.py",
-          "src/transformers/tokenization_bart.py",
-          "src/transformers/tokenization_bert.py",
-          "src/transformers/tokenization_bert_japanese.py",
-          "src/transformers/tokenization_camembert.py",
-          "src/transformers/tokenization_ctrl.py",
-          "src/transformers/tokenization_distilbert.py",
-          "src/transformers/tokenization_electra.py",
-          "src/transformers/tokenization_flaubert.py",
-          "src/transformers/tokenization_gpt2.py",
-          "src/transformers/tokenization_openai.py",
-          "src/transformers/tokenization_roberta.py",
-          "src/transformers/tokenization_t5.py",
-          "src/transformers/tokenization_transfo_xl.py",
-          "src/transformers/tokenization_utils.py",
-          "src/transformers/tokenization_xlm.py",
-          "src/transformers/tokenization_xlm_roberta.py",
-          "src/transformers/tokenization_xlnet.py",
-          "src/transformers/utils_encoder_decoder.py",
-          "tests/test_modeling_common.py",
-          "tests/test_modeling_tf_common.py",
           "tests/test_modeling_tf_transfo_xl.py",
-          "tests/test_modeling_transfo_xl.py",
-          "tests/test_modeling_xlnet.py",
-          "tests/test_tokenization_transfo_xl.py"
+          "tests/test_modeling_transfo_xl.py"
         ],
         "predSpans": {
-          "src/transformers/modeling_transfo_xl_utilities.py": [
-            {
-              "start": 86,
-              "end": 86
-            },
-            {
-              "start": 90,
-              "end": 90
-            },
-            {
-              "start": 92,
-              "end": 92
-            },
-            {
-              "start": 101,
-              "end": 101
-            },
-            {
-              "start": 102,
-              "end": 102
-            },
-            {
-              "start": 103,
-              "end": 103
-            },
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 108,
-              "end": 108
-            },
-            {
-              "start": 109,
-              "end": 109
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 139,
-              "end": 139
-            },
-            {
-              "start": 146,
-              "end": 146
-            },
-            {
-              "start": 147,
-              "end": 147
-            },
-            {
-              "start": 153,
-              "end": 153
-            },
-            {
-              "start": 160,
-              "end": 160
-            },
-            {
-              "start": 170,
-              "end": 170
-            },
-            {
-              "start": 178,
-              "end": 178
-            }
-          ],
-          "src/transformers/modeling_tf_transfo_xl_utilities.py": [
-            {
-              "start": 123,
-              "end": 123
-            }
-          ],
-          "src/transformers/modeling_tf_transfo_xl.py": [
-            {
-              "start": 788,
-              "end": 788
-            },
-            {
-              "start": 827,
-              "end": 827
-            },
-            {
-              "start": 834,
-              "end": 834
-            },
-            {
-              "start": 850,
-              "end": 850
-            }
-          ],
           "src/transformers/modeling_transfo_xl.py": [
-            {
-              "start": 175,
-              "end": 175
-            },
-            {
-              "start": 205,
-              "end": 205
-            },
-            {
-              "start": 280,
-              "end": 280
-            },
-            {
-              "start": 380,
-              "end": 380
-            },
-            {
-              "start": 418,
-              "end": 418
-            },
-            {
-              "start": 673,
-              "end": 673
-            },
-            {
-              "start": 807,
-              "end": 807
-            },
-            {
-              "start": 851,
-              "end": 851
-            },
-            {
-              "start": 853,
-              "end": 853
-            },
-            {
-              "start": 855,
-              "end": 855
-            },
-            {
-              "start": 856,
-              "end": 856
-            },
-            {
-              "start": 857,
-              "end": 857
-            },
-            {
-              "start": 858,
-              "end": 858
-            },
-            {
-              "start": 862,
-              "end": 862
-            },
-            {
-              "start": 907,
-              "end": 907
-            },
-            {
-              "start": 908,
-              "end": 908
-            },
-            {
-              "start": 915,
-              "end": 915
-            }
-          ],
-          "src/transformers/modeling_xlm.py": [
-            {
-              "start": 659,
-              "end": 659
-            },
-            {
-              "start": 803,
-              "end": 803
-            },
-            {
-              "start": 917,
-              "end": 917
-            },
-            {
-              "start": 1124,
-              "end": 1124
-            }
-          ],
-          "src/transformers/modeling_xlnet.py": [
-            {
-              "start": 1061,
-              "end": 1061
-            },
-            {
-              "start": 1165,
-              "end": 1165
-            },
-            {
-              "start": 1263,
-              "end": 1263
-            },
-            {
-              "start": 1383,
-              "end": 1383
-            },
-            {
-              "start": 1502,
-              "end": 1502
-            },
-            {
-              "start": 1634,
-              "end": 1634
-            }
-          ],
-          "src/transformers/modeling_tf_xlnet.py": [
-            {
-              "start": 1192,
-              "end": 1192
-            }
-          ],
-          "src/transformers/modeling_utils.py": [
-            {
-              "start": 1780,
-              "end": 1780
-            }
-          ],
-          "src/transformers/modeling_mmbt.py": [
-            {
-              "start": 415,
-              "end": 415
-            }
-          ],
-          "src/transformers/modeling_openai.py": [
-            {
-              "start": 511,
-              "end": 511
-            },
-            {
-              "start": 564,
-              "end": 564
-            },
-            {
-              "start": 565,
-              "end": 565
-            },
-            {
-              "start": 567,
-              "end": 567
-            },
-            {
-              "start": 568,
-              "end": 568
-            },
-            {
-              "start": 615,
-              "end": 615
-            },
-            {
-              "start": 683,
-              "end": 683
-            },
-            {
-              "start": 687,
-              "end": 687
-            },
-            {
-              "start": 688,
-              "end": 688
-            },
-            {
-              "start": 689,
-              "end": 689
-            },
-            {
-              "start": 690,
-              "end": 690
-            }
-          ],
-          "src/transformers/modeling_gpt2.py": [
-            {
-              "start": 555,
-              "end": 555
-            },
-            {
-              "start": 611,
-              "end": 611
-            },
-            {
-              "start": 612,
-              "end": 612
-            },
-            {
-              "start": 614,
-              "end": 614
-            },
-            {
-              "start": 615,
-              "end": 615
-            },
-            {
-              "start": 662,
-              "end": 662
-            },
-            {
-              "start": 738,
-              "end": 738
-            },
-            {
-              "start": 742,
-              "end": 742
-            },
-            {
-              "start": 743,
-              "end": 743
-            },
-            {
-              "start": 744,
-              "end": 744
-            },
-            {
-              "start": 745,
-              "end": 745
-            }
-          ],
-          "src/transformers/modeling_roberta.py": [
-            {
-              "start": 240,
-              "end": 240
-            },
-            {
-              "start": 356,
-              "end": 356
-            },
-            {
-              "start": 455,
-              "end": 455
-            },
-            {
-              "start": 547,
-              "end": 547
-            },
-            {
-              "start": 691,
-              "end": 691
-            }
-          ],
-          "src/transformers/modeling_ctrl.py": [
-            {
-              "start": 482,
-              "end": 482
-            },
-            {
-              "start": 540,
-              "end": 540
-            },
-            {
-              "start": 541,
-              "end": 541
-            },
-            {
-              "start": 543,
-              "end": 543
-            },
-            {
-              "start": 544,
-              "end": 544
-            }
-          ],
-          "src/transformers/modeling_t5.py": [
-            {
-              "start": 969,
-              "end": 969
-            }
-          ],
-          "src/transformers/modeling_distilbert.py": [
-            {
-              "start": 506,
-              "end": 506
-            },
-            {
-              "start": 642,
-              "end": 642
-            },
-            {
-              "start": 742,
-              "end": 742
-            },
-            {
-              "start": 817,
-              "end": 817
-            }
-          ],
-          "src/transformers/modeling_bart.py": [
-            {
-              "start": 899,
-              "end": 899
-            }
-          ],
-          "src/transformers/modeling_electra.py": [
-            {
-              "start": 571,
-              "end": 571
-            },
-            {
-              "start": 657,
-              "end": 657
-            }
-          ],
-          "src/transformers/modeling_albert.py": [
-            {
-              "start": 689,
-              "end": 689
-            },
-            {
-              "start": 784,
-              "end": 784
-            },
-            {
-              "start": 874,
-              "end": 874
-            },
-            {
-              "start": 989,
-              "end": 989
-            }
-          ],
-          "src/transformers/modeling_bert.py": [
-            {
-              "start": 896,
-              "end": 896
-            },
-            {
-              "start": 1002,
-              "end": 1002
-            },
-            {
-              "start": 1010,
-              "end": 1010
-            },
-            {
-              "start": 1095,
-              "end": 1095
-            },
-            {
-              "start": 1192,
-              "end": 1192
-            },
-            {
-              "start": 1292,
-              "end": 1292
-            },
-            {
-              "start": 1381,
-              "end": 1381
-            },
-            {
-              "start": 1502,
-              "end": 1502
-            }
-          ],
-          "tests/test_modeling_tf_common.py": [
-            {
-              "start": 132,
-              "end": 132
-            },
-            {
-              "start": 133,
-              "end": 133
-            },
-            {
-              "start": 175,
-              "end": 175
-            },
-            {
-              "start": 176,
-              "end": 176
-            },
-            {
-              "start": 217,
-              "end": 217
-            },
-            {
-              "start": 218,
-              "end": 218
-            },
-            {
-              "start": 376,
-              "end": 376
-            },
-            {
-              "start": 377,
-              "end": 377
-            }
-          ],
-          "tests/test_modeling_xlnet.py": [
-            {
-              "start": 267,
-              "end": 267
-            },
-            {
-              "start": 276,
-              "end": 276
-            },
-            {
-              "start": 284,
-              "end": 284
-            }
-          ],
-          "tests/test_modeling_transfo_xl.py": [
-            {
-              "start": 152,
-              "end": 152
-            },
-            {
-              "start": 157,
-              "end": 157
-            },
-            {
-              "start": 167,
-              "end": 167
-            }
-          ],
-          "tests/test_modeling_common.py": [
-            {
-              "start": 74,
-              "end": 74
-            },
-            {
-              "start": 85,
-              "end": 85
-            },
-            {
-              "start": 115,
-              "end": 115
-            },
-            {
-              "start": 116,
-              "end": 116
-            },
-            {
-              "start": 289,
-              "end": 289
-            },
-            {
-              "start": 292,
-              "end": 292
-            }
-          ],
-          "<worktree>/src/transformers/modeling_transfo_xl.py": [
             {
               "start": 851,
               "end": 919
             }
           ],
-          "<worktree>/src/transformers/modeling_tf_transfo_xl.py": [
+          "src/transformers/modeling_tf_transfo_xl.py": [
             {
               "start": 844,
               "end": 857
             }
           ],
-          "<worktree>/tests/test_modeling_transfo_xl.py": [
+          "tests/test_modeling_transfo_xl.py": [
             {
               "start": 166,
               "end": 251
             }
           ],
-          "<worktree>/tests/test_modeling_tf_transfo_xl.py": [
+          "tests/test_modeling_tf_transfo_xl.py": [
             {
               "start": 207,
               "end": 246
@@ -1569,16 +374,16 @@
           ]
         },
         "predSymbols": {
-          "<worktree>/src/transformers/modeling_transfo_xl.py": [
+          "src/transformers/modeling_transfo_xl.py": [
             "TransfoXLLMHeadModel.forward"
           ],
-          "<worktree>/src/transformers/modeling_tf_transfo_xl.py": [
+          "src/transformers/modeling_tf_transfo_xl.py": [
             "TFTransfoXLLMHeadModel.call"
           ],
-          "<worktree>/tests/test_modeling_transfo_xl.py": [
+          "tests/test_modeling_transfo_xl.py": [
             "TransfoXLModelTest.test_transfo_xl_lm_head_labels_are_shifted"
           ],
-          "<worktree>/tests/test_modeling_tf_transfo_xl.py": [
+          "tests/test_modeling_tf_transfo_xl.py": [
             "TFTransfoXLModelTest.test_transfo_xl_lm_head_labels_are_shifted"
           ]
         }
@@ -1588,132 +393,159 @@
           {
             "step": 1,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.6,
+              "span": 0.5419283339490211,
+              "line": 0.5185185185185185
             }
           },
           {
             "step": 2,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "file": 0.5,
+              "symbol": 0.6,
+              "span": 0.5419283339490211,
+              "line": 0.5185185185185185
             }
           },
           {
             "step": 3,
             "coverage": {
-              "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "file": 0.5,
+              "symbol": 0.6,
+              "span": 0.5419283339490211,
+              "line": 0.5185185185185185
             }
           },
           {
             "step": 4,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 5,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 6,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 14,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 15,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 16,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 1.0,
-          "symbol": 0.7384615384615384,
-          "span": 0.298030746497684,
-          "line": 0.22222222222222227
+          "file": 0.90625,
+          "symbol": 0.925,
+          "span": 0.9141115626154415,
+          "line": 0.9097222222222222
         },
         "redundancy": {
-          "file": 0.19480519480519476,
-          "symbol": 0.03305785123966942,
-          "span": 0.02409329744969879,
-          "line": 0.015873015873015928
+          "file": 0.5294117647058824,
+          "symbol": 0.32608695652173914,
+          "span": 0.19412374697545798,
+          "line": 0.19266055045871555
         }
       },
       "fixOverlap": {
@@ -1837,12 +669,38 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/modeling_tf_transfo_xl.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/src/transformers/modeling_transfo_xl.py",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/modeling_transfo_xl.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/tests/test_modeling_tf_transfo_xl.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/tests/test_modeling_transfo_xl.py",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "command_execution",
@@ -1965,7 +823,18 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/test_modeling_tf_transfo_xl.py",
+                "kind": "update"
+              },
+              {
+                "path": "<worktree>/tests/test_modeling_transfo_xl.py",
+                "kind": "update"
+              }
+            ]
+          }
         },
         {
           "kind": "command_execution",
@@ -2070,9 +939,24 @@
       "status": "completed",
       "evaluationStatus": "valid",
       "resolutionStatus": "unresolved",
+      "predictedContextPathDiagnostics": {
+        "missingFinalPaths": [],
+        "missingTrajectoryPaths": [],
+        "missingFinalPathCount": 0,
+        "missingTrajectoryPathCount": 0
+      },
       "startedAt": "2026-05-02T09:08:08Z",
       "completedAt": "2026-05-02T09:14:04Z",
       "durationMs": 355816,
+      "durationStatus": "available",
+      "retry": {
+        "attempts": 1,
+        "maxAttempts": 1,
+        "retried": false,
+        "suppressed": false,
+        "suppressionReason": null,
+        "events": []
+      },
       "tokenUsage": {
         "source": "codex.turn.completed",
         "input_tokens": 1688862,
@@ -2081,6 +965,28 @@
         "total_tokens": 1704265,
         "cache_read_input_tokens": 1595520
       },
+      "traceCounters": {
+        "toolCalls": 0,
+        "mcpToolCalls": 0,
+        "successfulMcpToolCalls": 0,
+        "commandExecutions": 53,
+        "readToolCalls": 0,
+        "editToolCalls": 3
+      },
+      "mcpUse": {
+        "availableTools": [],
+        "toolCalls": 0,
+        "successfulToolCalls": 0,
+        "callsWithResults": 0,
+        "meaningfulCalls": 0,
+        "callsWithFinalContextOverlap": 0,
+        "callsWithPatchOverlap": 0,
+        "callsWithFollowupOnReturnedPath": 0,
+        "returnedPathCount": 0,
+        "byTool": [],
+        "calls": []
+      },
+      "persistedToolResults": [],
       "modelPatch": "diff --git a/src/transformers/modeling_transfo_xl.py b/src/transformers/modeling_transfo_xl.py\nindex 1ed8408966..2033a8ca08 100644\n--- a/src/transformers/modeling_transfo_xl.py\n+++ b/src/transformers/modeling_transfo_xl.py\n@@ -859,7 +859,7 @@ class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):\n \n     Return:\n         :obj:`tuple(torch.FloatTensor)` comprising various elements depending on the configuration (:class:`~transformers.TransfoXLConfig`) and inputs:\n-        loss (:obj:`torch.FloatTensor` of shape `(batch_size, sequence_length)`, `optional`, returned when ``labels`` is provided)\n+        loss (:obj:`torch.FloatTensor` of shape `(batch_size, sequence_length - 1)`, `optional`, returned when ``labels`` is provided)\n             Language modeling loss.\n         prediction_scores (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, config.vocab_size)`):\n             Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).\n@@ -904,12 +904,16 @@ class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):\n         pred_hid = last_hidden[:, -tgt_len:]\n         outputs = transformer_outputs[1:]\n \n+        if labels is not None:\n+            labels = labels[:, 1:].contiguous()\n+            pred_hid = pred_hid[:, :-1].contiguous()\n+\n         softmax_output = self.crit(pred_hid.view(-1, pred_hid.size(-1)), labels)\n         if labels is None:\n             softmax_output = softmax_output.view(bsz, tgt_len, -1)\n             outputs = [softmax_output] + outputs\n         else:\n-            softmax_output = softmax_output.view(bsz, tgt_len)\n+            softmax_output = softmax_output.view(bsz, tgt_len - 1)\n             outputs = [softmax_output, None] + outputs\n \n         return outputs  # (loss), logits or None if labels is not None (speed up adaptive softmax), new_mems, (all hidden states), (all attentions)\ndiff --git a/tests/test_modeling_transfo_xl.py b/tests/test_modeling_transfo_xl.py\nindex 18212c8828..b9b9db8ce3 100644\n--- a/tests/test_modeling_transfo_xl.py\n+++ b/tests/test_modeling_transfo_xl.py\n@@ -164,7 +164,7 @@ class TransfoXLModelTest(ModelTesterMixin, unittest.TestCase):\n             return outputs\n \n         def check_transfo_xl_lm_head_output(self, result):\n-            self.parent.assertListEqual(list(result[\"loss_1\"].size()), [self.batch_size, self.seq_length])\n+            self.parent.assertListEqual(list(result[\"loss_1\"].size()), [self.batch_size, self.seq_length - 1])\n             self.parent.assertListEqual(\n                 list(result[\"lm_logits_1\"].size()), [self.batch_size, self.seq_length, self.vocab_size],\n             )\n@@ -173,7 +173,7 @@ class TransfoXLModelTest(ModelTesterMixin, unittest.TestCase):\n                 [[self.mem_len, self.batch_size, self.hidden_size]] * self.num_hidden_layers,\n             )\n \n-            self.parent.assertListEqual(list(result[\"loss_2\"].size()), [self.batch_size, self.seq_length])\n+            self.parent.assertListEqual(list(result[\"loss_2\"].size()), [self.batch_size, self.seq_length - 1])\n             self.parent.assertListEqual(\n                 list(result[\"lm_logits_2\"].size()), [self.batch_size, self.seq_length, self.vocab_size],\n             )\n@@ -207,6 +207,29 @@ class TransfoXLModelTest(ModelTesterMixin, unittest.TestCase):\n         output_result = self.model_tester.create_transfo_xl_lm_head(*config_and_inputs)\n         self.model_tester.check_transfo_xl_lm_head_output(output_result)\n \n+    def test_transfo_xl_lm_head_labels_are_shifted(self):\n+        config = TransfoXLConfig(\n+            vocab_size=99,\n+            mem_len=0,\n+            cutoffs=[10, 50, 80],\n+            d_model=8,\n+            d_embed=8,\n+            n_head=2,\n+            d_head=4,\n+            d_inner=32,\n+            div_val=1,\n+            n_layer=2,\n+            eos_token_id=0,\n+        )\n+        model = TransfoXLLMHeadModel(config)\n+        model.to(torch_device)\n+        model.eval()\n+\n+        input_ids = torch.tensor([[0]], dtype=torch.long, device=torch_device)\n+        loss = model(input_ids, labels=input_ids)[0]\n+\n+        self.assertListEqual(list(loss.size()), [1, 0])\n+\n     @slow\n     def test_model_from_pretrained(self):\n         for model_name in list(TRANSFO_XL_PRETRAINED_MODEL_ARCHIVE_MAP.keys())[:1]:\n",
       "finalOutput": {
         "status": "completed",
@@ -2127,405 +1033,13 @@
         "predSteps": [
           {
             "files": [
-              "README.md",
-              "docs/README.md",
-              "examples/README.md",
-              "examples/contrib/README.md",
-              "examples/distillation/README.md",
-              "examples/glue/README.md",
-              "examples/ner/README.md",
-              "examples/pplm/README.md",
-              "examples/summarization/bart/README.md",
-              "examples/summarization/bertabs/README.md",
-              "examples/summarization/t5/README.md",
-              "examples/translation/t5/README.md",
-              "model_cards/DeepPavlov/bert-base-bg-cs-pl-ru-cased/README.md",
-              "model_cards/DeepPavlov/bert-base-cased-conversational/README.md",
-              "model_cards/DeepPavlov/bert-base-multilingual-cased-sentence/README.md",
-              "model_cards/DeepPavlov/rubert-base-cased-conversational/README.md",
-              "model_cards/DeepPavlov/rubert-base-cased-sentence/README.md",
-              "model_cards/DeepPavlov/rubert-base-cased/README.md",
-              "model_cards/KB/albert-base-swedish-cased-alpha/README.md",
-              "model_cards/KB/bert-base-swedish-cased-ner/README.md",
-              "model_cards/KB/bert-base-swedish-cased/README.md",
-              "model_cards/Musixmatch/umberto-commoncrawl-cased-v1/README.md",
-              "model_cards/Musixmatch/umberto-wikipedia-uncased-v1/README.md",
-              "model_cards/NLP4H/ms_bert/README.md",
-              "model_cards/TurkuNLP/bert-base-finnish-cased-v1/README.md",
-              "model_cards/TurkuNLP/bert-base-finnish-uncased-v1/README.md",
-              "model_cards/ahotrod/albert_xxlargev1_squad2_512/README.md",
-              "model_cards/ahotrod/roberta_large_squad2/README.md",
-              "model_cards/ahotrod/xlnet_large_squad2_512/README.md",
-              "model_cards/allenai/biomed_roberta_base/README.md",
-              "model_cards/allenai/scibert_scivocab_cased/README.md",
-              "model_cards/allenai/scibert_scivocab_uncased/README.md",
-              "model_cards/asafaya/bert-base-arabic/README.md",
-              "model_cards/aubmindlab/bert-base-arabert/README.md",
-              "model_cards/aubmindlab/bert-base-arabertv01/README.md",
-              "model_cards/bart-large-cnn/README.md",
-              "model_cards/bart-large-xsum/README.md",
-              "model_cards/binwang/xlnet-base-cased/README.md",
-              "model_cards/canwenxu/BERT-of-Theseus-MNLI/README.md",
-              "model_cards/clue/albert_chinese_small/README.md",
-              "model_cards/clue/albert_chinese_tiny/README.md",
-              "model_cards/clue/roberta_chinese_3L312_clue_tiny/README.md",
-              "model_cards/clue/roberta_chinese_base/README.md",
-              "model_cards/dbmdz/bert-base-german-cased/README.md",
-              "model_cards/dbmdz/bert-base-german-europeana-cased/README.md",
-              "model_cards/dbmdz/bert-base-german-europeana-uncased/README.md",
-              "model_cards/dbmdz/bert-base-german-uncased/README.md",
-              "model_cards/dbmdz/bert-base-italian-cased/README.md",
-              "model_cards/dbmdz/bert-base-italian-uncased/README.md",
-              "model_cards/dbmdz/bert-base-italian-xxl-cased/README.md",
-              "model_cards/dbmdz/bert-base-italian-xxl-uncased/README.md",
-              "model_cards/dbmdz/bert-base-turkish-128k-cased/README.md",
-              "model_cards/dbmdz/bert-base-turkish-128k-uncased/README.md",
-              "model_cards/dbmdz/bert-base-turkish-cased/README.md",
-              "model_cards/dbmdz/bert-base-turkish-uncased/README.md",
-              "model_cards/dbmdz/distilbert-base-turkish-cased/README.md",
-              "model_cards/deepset/quora_dedup_bert_base/README.md",
-              "model_cards/deepset/roberta-base-squad2/README.md",
-              "model_cards/deepset/sentence_bert/README.md",
-              "model_cards/djstrong/bg_cs_pl_ru_cased_L-12_H-768_A-12/README.md",
-              "model_cards/dkleczek/bert-base-polish-uncased-v1/README.md",
-              "model_cards/elgeish/cs224n-squad2.0-albert-base-v2/README.md",
-              "model_cards/elgeish/cs224n-squad2.0-albert-large-v2/README.md",
-              "model_cards/elgeish/cs224n-squad2.0-albert-xxlarge-v1/README.md",
-              "model_cards/elgeish/cs224n-squad2.0-distilbert-base-uncased/README.md",
-              "model_cards/elgeish/cs224n-squad2.0-roberta-base/README.md",
-              "model_cards/emilyalsentzer/Bio_ClinicalBERT/README.md",
-              "model_cards/emilyalsentzer/Bio_Discharge_Summary_BERT/README.md",
-              "model_cards/fmikaelian/camembert-base-fquad/README.md",
-              "model_cards/fmikaelian/camembert-base-squad/README.md",
-              "model_cards/fmikaelian/flaubert-base-uncased-squad/README.md",
-              "model_cards/google/electra-base-discriminator/README.md",
-              "model_cards/google/electra-base-generator/README.md",
-              "model_cards/google/electra-large-discriminator/README.md",
-              "model_cards/google/electra-large-generator/README.md",
-              "model_cards/google/electra-small-discriminator/README.md",
-              "model_cards/google/electra-small-generator/README.md",
-              "model_cards/gsarti/biobert-nli/README.md",
-              "model_cards/gsarti/covidbert-nli/README.md",
-              "model_cards/gsarti/scibert-nli/README.md",
-              "model_cards/henryk/bert-base-multilingual-cased-finetuned-dutch-squad2/README.md",
-              "model_cards/henryk/bert-base-multilingual-cased-finetuned-polish-squad1/README.md",
-              "model_cards/henryk/bert-base-multilingual-cased-finetuned-polish-squad2/README.md",
-              "model_cards/huggingface/CodeBERTa-language-id/README.md",
-              "model_cards/huggingface/CodeBERTa-small-v1/README.md",
-              "model_cards/huseinzol05/albert-base-bahasa-cased/README.md",
-              "model_cards/huseinzol05/bert-base-bahasa-cased/README.md",
-              "model_cards/huseinzol05/tiny-bert-bahasa-cased/README.md",
-              "model_cards/huseinzol05/xlnet-base-bahasa-cased/README.md",
-              "model_cards/iuliaturc/bert_uncased_L-2_H-128_A-2/README.md",
-              "model_cards/ixa-ehu/berteus-base-cased/README.md",
-              "model_cards/jannesg/bertsson/README.md",
-              "model_cards/jplu/tf-camembert-base/README.md",
-              "model_cards/jplu/tf-xlm-roberta-base/README.md",
-              "model_cards/jplu/tf-xlm-roberta-large/README.md",
-              "model_cards/julien-c/EsperBERTo-small-pos/README.md",
-              "model_cards/julien-c/EsperBERTo-small/README.md",
-              "model_cards/julien-c/bert-xsmall-dummy/README.md",
-              "model_cards/julien-c/dummy-unknown/README.md",
-              "model_cards/ktrapeznikov/albert-xlarge-v2-squad-v2/README.md",
-              "model_cards/ktrapeznikov/biobert_v1.1_pubmed_squad_v2/README.md",
-              "model_cards/ktrapeznikov/scibert_scivocab_uncased_squad_v2/README.md",
-              "model_cards/lvwerra/bert-imdb/README.md",
-              "model_cards/lvwerra/gpt2-imdb-pos/README.md",
-              "model_cards/lvwerra/gpt2-imdb/README.md",
-              "model_cards/lvwerra/gpt2-medium-taboo/README.md",
-              "model_cards/lysandre/arxiv-nlp/README.md",
-              "model_cards/lysandre/arxiv/README.md",
-              "model_cards/microsoft/DialoGPT-large/README.md",
-              "model_cards/microsoft/DialoGPT-medium/README.md",
-              "model_cards/microsoft/DialoGPT-small/README.md",
-              "model_cards/mrm8488/CodeBERTaPy/README.md",
-              "model_cards/mrm8488/GPT-2-finetuned-CORD19/README.md",
-              "model_cards/mrm8488/GPT-2-finetuned-covid-bio-medrxiv/README.md",
-              "model_cards/mrm8488/bert-base-spanish-wwm-cased-finetuned-spa-squad2-es/README.md",
-              "model_cards/mrm8488/bert-medium-finetuned-squadv2/README.md",
-              "model_cards/mrm8488/bert-mini-finetuned-squadv2/README.md",
-              "model_cards/mrm8488/bert-multi-cased-finedtuned-xquad-tydiqa-goldp/README.md",
-              "model_cards/mrm8488/bert-multi-cased-finetuned-xquadv1/README.md",
-              "model_cards/mrm8488/bert-multi-uncased-finetuned-xquadv1/README.md",
-              "model_cards/mrm8488/bert-small-finetuned-squadv2/README.md",
-              "model_cards/mrm8488/bert-spanish-cased-finetuned-ner/README.md",
-              "model_cards/mrm8488/bert-spanish-cased-finetuned-pos-syntax/README.md",
-              "model_cards/mrm8488/bert-spanish-cased-finetuned-pos/README.md",
-              "model_cards/mrm8488/bert-tiny-finetuned-squadv2/README.md",
-              "model_cards/mrm8488/bert-uncased-finetuned-qnli/README.md",
-              "model_cards/mrm8488/codeBERTaJS/README.md",
-              "model_cards/mrm8488/distilbert-multi-finetuned-for-xqua-on-tydiqa/README.md",
-              "model_cards/mrm8488/distill-bert-base-spanish-wwm-cased-finetuned-spa-squad2-es/README.md",
-              "model_cards/mrm8488/gpt2-imdb-neg/README.md",
-              "model_cards/mrm8488/spanbert-base-finetuned-squadv1/README.md",
-              "model_cards/mrm8488/spanbert-base-finetuned-squadv2/README.md",
-              "model_cards/mrm8488/spanbert-base-finetuned-tacred/README.md",
-              "model_cards/mrm8488/spanbert-finetuned-squadv1/README.md",
-              "model_cards/mrm8488/spanbert-finetuned-squadv2/README.md",
-              "model_cards/mrm8488/spanbert-large-finetuned-squadv1/README.md",
-              "model_cards/mrm8488/spanbert-large-finetuned-squadv2/README.md",
-              "model_cards/mrm8488/spanbert-large-finetuned-tacred/README.md",
-              "model_cards/mrm8488/xlm-multi-finetuned-xquadv1/README.md",
-              "model_cards/nlpaueb/bert-base-greek-uncased-v1/README.md",
-              "model_cards/nlptown/bert-base-multilingual-uncased-sentiment/README.md",
-              "model_cards/redewiedergabe/bert-base-historical-german-rw-cased/README.md",
-              "model_cards/severinsimmler/literary-german-bert/README.md",
-              "model_cards/seyonec/ChemBERTa-zinc-base-v1/README.md",
-              "model_cards/shoarora/alectra-small-owt/README.md",
-              "model_cards/shoarora/electra-small-owt/README.md",
-              "model_cards/twmkn9/albert-base-v2-squad2/README.md",
-              "model_cards/twmkn9/bert-base-uncased-squad2/README.md",
-              "model_cards/twmkn9/distilbert-base-uncased-squad2/README.md",
-              "model_cards/twmkn9/distilroberta-base-squad2/README.md",
-              "model_cards/voidful/albert_chinese_base/README.md",
-              "model_cards/voidful/albert_chinese_large/README.md",
-              "model_cards/voidful/albert_chinese_small/README.md",
-              "model_cards/voidful/albert_chinese_tiny/README.md",
-              "model_cards/voidful/albert_chinese_xlarge/README.md",
-              "model_cards/voidful/albert_chinese_xxlarge/README.md",
-              "notebooks/README.md",
-              "templates/adding_a_new_example_script/README.md",
-              "templates/adding_a_new_model/README.md"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "src/transformers/modeling_tf_transfo_xl.py",
-              "src/transformers/modeling_tf_transfo_xl_utilities.py",
-              "src/transformers/modeling_transfo_xl.py",
-              "src/transformers/modeling_transfo_xl_utilities.py",
-              "tests/test_modeling_tf_transfo_xl.py",
               "tests/test_modeling_transfo_xl.py"
             ],
             "spans": {
               "tests/test_modeling_transfo_xl.py": [
                 {
-                  "start": 51,
-                  "end": 51
-                },
-                {
-                  "start": 72,
-                  "end": 72
-                },
-                {
-                  "start": 90,
-                  "end": 90
-                },
-                {
-                  "start": 91,
-                  "end": 91
-                },
-                {
-                  "start": 92,
-                  "end": 92
-                },
-                {
-                  "start": 109,
-                  "end": 109
-                },
-                {
-                  "start": 115,
-                  "end": 115
-                },
-                {
-                  "start": 146,
-                  "end": 146
-                },
-                {
-                  "start": 152,
-                  "end": 152
-                },
-                {
-                  "start": 154,
-                  "end": 154
-                },
-                {
-                  "start": 187,
-                  "end": 187
-                }
-              ],
-              "tests/test_modeling_tf_transfo_xl.py": [
-                {
-                  "start": 55,
-                  "end": 55
-                },
-                {
-                  "start": 76,
-                  "end": 76
-                },
-                {
-                  "start": 94,
-                  "end": 94
-                },
-                {
-                  "start": 95,
-                  "end": 95
-                },
-                {
-                  "start": 96,
-                  "end": 96
-                },
-                {
-                  "start": 113,
-                  "end": 113
-                },
-                {
-                  "start": 119,
-                  "end": 119
-                },
-                {
-                  "start": 150,
-                  "end": 150
-                },
-                {
-                  "start": 155,
-                  "end": 155
-                },
-                {
-                  "start": 160,
-                  "end": 160
-                },
-                {
-                  "start": 189,
-                  "end": 189
-                }
-              ],
-              "src/transformers/modeling_transfo_xl.py": [
-                {
-                  "start": 807,
-                  "end": 807
-                },
-                {
-                  "start": 851,
-                  "end": 851
-                },
-                {
-                  "start": 853,
-                  "end": 853
-                },
-                {
-                  "start": 855,
-                  "end": 855
-                },
-                {
-                  "start": 857,
-                  "end": 857
-                },
-                {
-                  "start": 858,
-                  "end": 858
-                },
-                {
-                  "start": 862,
-                  "end": 862
-                },
-                {
-                  "start": 907,
-                  "end": 907
-                },
-                {
-                  "start": 908,
-                  "end": 908
-                },
-                {
-                  "start": 915,
-                  "end": 915
-                }
-              ],
-              "src/transformers/modeling_tf_transfo_xl_utilities.py": [
-                {
-                  "start": 123,
-                  "end": 123
-                }
-              ],
-              "src/transformers/modeling_transfo_xl_utilities.py": [
-                {
-                  "start": 86,
-                  "end": 86
-                },
-                {
-                  "start": 90,
-                  "end": 90
-                },
-                {
-                  "start": 92,
-                  "end": 92
-                },
-                {
-                  "start": 101,
-                  "end": 101
-                },
-                {
-                  "start": 102,
-                  "end": 102
-                },
-                {
-                  "start": 103,
-                  "end": 103
-                },
-                {
-                  "start": 104,
-                  "end": 104
-                },
-                {
-                  "start": 108,
-                  "end": 108
-                },
-                {
-                  "start": 109,
-                  "end": 109
-                },
-                {
-                  "start": 136,
-                  "end": 136
-                },
-                {
-                  "start": 139,
-                  "end": 139
-                },
-                {
-                  "start": 146,
-                  "end": 146
-                },
-                {
-                  "start": 147,
-                  "end": 147
-                },
-                {
-                  "start": 153,
-                  "end": 153
-                },
-                {
-                  "start": 160,
-                  "end": 160
-                },
-                {
-                  "start": 170,
-                  "end": 170
-                },
-                {
-                  "start": 178,
-                  "end": 178
-                }
-              ],
-              "src/transformers/modeling_tf_transfo_xl.py": [
-                {
-                  "start": 788,
-                  "end": 788
-                },
-                {
-                  "start": 827,
-                  "end": 827
-                },
-                {
-                  "start": 834,
-                  "end": 834
-                },
-                {
-                  "start": 850,
-                  "end": 850
+                  "start": 140,
+                  "end": 185
                 }
               ]
             },
@@ -2533,9 +1047,72 @@
           },
           {
             "files": [
-              "tests/test_modeling_transfo_xl.py"
+              "src/transformers/modeling_gpt2.py"
             ],
-            "spans": {},
+            "spans": {
+              "src/transformers/modeling_gpt2.py": [
+                {
+                  "start": 170,
+                  "end": 235
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/modeling_transfo_xl.py"
+            ],
+            "spans": {
+              "src/transformers/modeling_transfo_xl.py": [
+                {
+                  "start": 830,
+                  "end": 925
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/modeling_gpt2.py"
+            ],
+            "spans": {
+              "src/transformers/modeling_gpt2.py": [
+                {
+                  "start": 690,
+                  "end": 760
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/modeling_tf_transfo_xl.py"
+            ],
+            "spans": {
+              "src/transformers/modeling_tf_transfo_xl.py": [
+                {
+                  "start": 788,
+                  "end": 860
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/modeling_transfo_xl_utilities.py"
+            ],
+            "spans": {
+              "src/transformers/modeling_transfo_xl_utilities.py": [
+                {
+                  "start": 80,
+                  "end": 120
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -2547,9 +1124,100 @@
           },
           {
             "files": [
-              "src/transformers/modeling_transfo_xl.py"
+              "tests/test_modeling_tf_transfo_xl.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/test_modeling_tf_transfo_xl.py": [
+                {
+                  "start": 140,
+                  "end": 185
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_modeling_transfo_xl.py"
+            ],
+            "spans": {
+              "tests/test_modeling_transfo_xl.py": [
+                {
+                  "start": 1,
+                  "end": 140
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/modeling_transfo_xl_utilities.py"
+            ],
+            "spans": {
+              "src/transformers/modeling_transfo_xl_utilities.py": [
+                {
+                  "start": 100,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "README.md"
+            ],
+            "spans": {
+              "README.md": [
+                {
+                  "start": 1,
+                  "end": 220
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_modeling_tf_transfo_xl.py"
+            ],
+            "spans": {
+              "tests/test_modeling_tf_transfo_xl.py": [
+                {
+                  "start": 1,
+                  "end": 260
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_modeling_transfo_xl.py"
+            ],
+            "spans": {
+              "tests/test_modeling_transfo_xl.py": [
+                {
+                  "start": 185,
+                  "end": 320
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/modeling_tf_transfo_xl.py"
+            ],
+            "spans": {
+              "src/transformers/modeling_tf_transfo_xl.py": [
+                {
+                  "start": 740,
+                  "end": 825
+                }
+              ]
+            },
             "symbols": {}
           },
           {
@@ -2561,50 +1229,27 @@
           },
           {
             "files": [
-              "src/transformers/modeling_transfo_xl_utilities.py"
+              "tests/utils.py"
             ],
-            "spans": {},
+            "spans": {
+              "tests/utils.py": [
+                {
+                  "start": 60,
+                  "end": 95
+                }
+              ]
+            },
             "symbols": {}
           },
           {
             "files": [
-              "tests/test_modeling_tf_transfo_xl.py"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/test_modeling_transfo_xl.py",
-              "tests/test_modeling_xlnet.py"
+              "tests/test_modeling_transfo_xl.py"
             ],
             "spans": {
               "tests/test_modeling_transfo_xl.py": [
                 {
-                  "start": 152,
-                  "end": 152
-                },
-                {
-                  "start": 157,
-                  "end": 157
-                },
-                {
-                  "start": 167,
-                  "end": 167
-                }
-              ],
-              "tests/test_modeling_xlnet.py": [
-                {
-                  "start": 267,
-                  "end": 267
-                },
-                {
-                  "start": 276,
-                  "end": 276
-                },
-                {
-                  "start": 284,
-                  "end": 284
+                  "start": 140,
+                  "end": 235
                 }
               ]
             },
@@ -2612,34 +1257,16 @@
           },
           {
             "files": [
-              "src/transformers/modeling_tf_xlnet.py"
+              "src/transformers/modeling_tf_gpt2.py"
             ],
             "spans": {
-              "src/transformers/modeling_tf_xlnet.py": [
+              "src/transformers/modeling_tf_gpt2.py": [
                 {
-                  "start": 860,
-                  "end": 860
-                },
-                {
-                  "start": 865,
-                  "end": 865
+                  "start": 630,
+                  "end": 705
                 }
               ]
             },
-            "symbols": {}
-          },
-          {
-            "files": [
-              "README.md"
-            ],
-            "spans": {},
-            "symbols": {}
-          },
-          {
-            "files": [
-              "tests/utils.py"
-            ],
-            "spans": {},
             "symbols": {}
           },
           {
@@ -2648,447 +1275,52 @@
             ],
             "spans": {},
             "symbols": {}
+          },
+          {
+            "files": [
+              "src/transformers/modeling_transfo_xl.py"
+            ],
+            "spans": {
+              "src/transformers/modeling_transfo_xl.py": [
+                {
+                  "start": 850,
+                  "end": 920
+                }
+              ]
+            },
+            "symbols": {}
+          },
+          {
+            "files": [
+              "tests/test_modeling_transfo_xl.py"
+            ],
+            "spans": {
+              "tests/test_modeling_transfo_xl.py": [
+                {
+                  "start": 160,
+                  "end": 230
+                }
+              ]
+            },
+            "symbols": {}
           }
         ],
         "predFiles": [
-          "README.md",
-          "docs/README.md",
-          "examples/README.md",
-          "examples/contrib/README.md",
-          "examples/distillation/README.md",
-          "examples/glue/README.md",
-          "examples/ner/README.md",
-          "examples/pplm/README.md",
-          "examples/summarization/bart/README.md",
-          "examples/summarization/bertabs/README.md",
-          "examples/summarization/t5/README.md",
-          "examples/translation/t5/README.md",
-          "model_cards/DeepPavlov/bert-base-bg-cs-pl-ru-cased/README.md",
-          "model_cards/DeepPavlov/bert-base-cased-conversational/README.md",
-          "model_cards/DeepPavlov/bert-base-multilingual-cased-sentence/README.md",
-          "model_cards/DeepPavlov/rubert-base-cased-conversational/README.md",
-          "model_cards/DeepPavlov/rubert-base-cased-sentence/README.md",
-          "model_cards/DeepPavlov/rubert-base-cased/README.md",
-          "model_cards/KB/albert-base-swedish-cased-alpha/README.md",
-          "model_cards/KB/bert-base-swedish-cased-ner/README.md",
-          "model_cards/KB/bert-base-swedish-cased/README.md",
-          "model_cards/Musixmatch/umberto-commoncrawl-cased-v1/README.md",
-          "model_cards/Musixmatch/umberto-wikipedia-uncased-v1/README.md",
-          "model_cards/NLP4H/ms_bert/README.md",
-          "model_cards/TurkuNLP/bert-base-finnish-cased-v1/README.md",
-          "model_cards/TurkuNLP/bert-base-finnish-uncased-v1/README.md",
-          "model_cards/ahotrod/albert_xxlargev1_squad2_512/README.md",
-          "model_cards/ahotrod/roberta_large_squad2/README.md",
-          "model_cards/ahotrod/xlnet_large_squad2_512/README.md",
-          "model_cards/allenai/biomed_roberta_base/README.md",
-          "model_cards/allenai/scibert_scivocab_cased/README.md",
-          "model_cards/allenai/scibert_scivocab_uncased/README.md",
-          "model_cards/asafaya/bert-base-arabic/README.md",
-          "model_cards/aubmindlab/bert-base-arabert/README.md",
-          "model_cards/aubmindlab/bert-base-arabertv01/README.md",
-          "model_cards/bart-large-cnn/README.md",
-          "model_cards/bart-large-xsum/README.md",
-          "model_cards/binwang/xlnet-base-cased/README.md",
-          "model_cards/canwenxu/BERT-of-Theseus-MNLI/README.md",
-          "model_cards/clue/albert_chinese_small/README.md",
-          "model_cards/clue/albert_chinese_tiny/README.md",
-          "model_cards/clue/roberta_chinese_3L312_clue_tiny/README.md",
-          "model_cards/clue/roberta_chinese_base/README.md",
-          "model_cards/dbmdz/bert-base-german-cased/README.md",
-          "model_cards/dbmdz/bert-base-german-europeana-cased/README.md",
-          "model_cards/dbmdz/bert-base-german-europeana-uncased/README.md",
-          "model_cards/dbmdz/bert-base-german-uncased/README.md",
-          "model_cards/dbmdz/bert-base-italian-cased/README.md",
-          "model_cards/dbmdz/bert-base-italian-uncased/README.md",
-          "model_cards/dbmdz/bert-base-italian-xxl-cased/README.md",
-          "model_cards/dbmdz/bert-base-italian-xxl-uncased/README.md",
-          "model_cards/dbmdz/bert-base-turkish-128k-cased/README.md",
-          "model_cards/dbmdz/bert-base-turkish-128k-uncased/README.md",
-          "model_cards/dbmdz/bert-base-turkish-cased/README.md",
-          "model_cards/dbmdz/bert-base-turkish-uncased/README.md",
-          "model_cards/dbmdz/distilbert-base-turkish-cased/README.md",
-          "model_cards/deepset/quora_dedup_bert_base/README.md",
-          "model_cards/deepset/roberta-base-squad2/README.md",
-          "model_cards/deepset/sentence_bert/README.md",
-          "model_cards/djstrong/bg_cs_pl_ru_cased_L-12_H-768_A-12/README.md",
-          "model_cards/dkleczek/bert-base-polish-uncased-v1/README.md",
-          "model_cards/elgeish/cs224n-squad2.0-albert-base-v2/README.md",
-          "model_cards/elgeish/cs224n-squad2.0-albert-large-v2/README.md",
-          "model_cards/elgeish/cs224n-squad2.0-albert-xxlarge-v1/README.md",
-          "model_cards/elgeish/cs224n-squad2.0-distilbert-base-uncased/README.md",
-          "model_cards/elgeish/cs224n-squad2.0-roberta-base/README.md",
-          "model_cards/emilyalsentzer/Bio_ClinicalBERT/README.md",
-          "model_cards/emilyalsentzer/Bio_Discharge_Summary_BERT/README.md",
-          "model_cards/fmikaelian/camembert-base-fquad/README.md",
-          "model_cards/fmikaelian/camembert-base-squad/README.md",
-          "model_cards/fmikaelian/flaubert-base-uncased-squad/README.md",
-          "model_cards/google/electra-base-discriminator/README.md",
-          "model_cards/google/electra-base-generator/README.md",
-          "model_cards/google/electra-large-discriminator/README.md",
-          "model_cards/google/electra-large-generator/README.md",
-          "model_cards/google/electra-small-discriminator/README.md",
-          "model_cards/google/electra-small-generator/README.md",
-          "model_cards/gsarti/biobert-nli/README.md",
-          "model_cards/gsarti/covidbert-nli/README.md",
-          "model_cards/gsarti/scibert-nli/README.md",
-          "model_cards/henryk/bert-base-multilingual-cased-finetuned-dutch-squad2/README.md",
-          "model_cards/henryk/bert-base-multilingual-cased-finetuned-polish-squad1/README.md",
-          "model_cards/henryk/bert-base-multilingual-cased-finetuned-polish-squad2/README.md",
-          "model_cards/huggingface/CodeBERTa-language-id/README.md",
-          "model_cards/huggingface/CodeBERTa-small-v1/README.md",
-          "model_cards/huseinzol05/albert-base-bahasa-cased/README.md",
-          "model_cards/huseinzol05/bert-base-bahasa-cased/README.md",
-          "model_cards/huseinzol05/tiny-bert-bahasa-cased/README.md",
-          "model_cards/huseinzol05/xlnet-base-bahasa-cased/README.md",
-          "model_cards/iuliaturc/bert_uncased_L-2_H-128_A-2/README.md",
-          "model_cards/ixa-ehu/berteus-base-cased/README.md",
-          "model_cards/jannesg/bertsson/README.md",
-          "model_cards/jplu/tf-camembert-base/README.md",
-          "model_cards/jplu/tf-xlm-roberta-base/README.md",
-          "model_cards/jplu/tf-xlm-roberta-large/README.md",
-          "model_cards/julien-c/EsperBERTo-small-pos/README.md",
-          "model_cards/julien-c/EsperBERTo-small/README.md",
-          "model_cards/julien-c/bert-xsmall-dummy/README.md",
-          "model_cards/julien-c/dummy-unknown/README.md",
-          "model_cards/ktrapeznikov/albert-xlarge-v2-squad-v2/README.md",
-          "model_cards/ktrapeznikov/biobert_v1.1_pubmed_squad_v2/README.md",
-          "model_cards/ktrapeznikov/scibert_scivocab_uncased_squad_v2/README.md",
-          "model_cards/lvwerra/bert-imdb/README.md",
-          "model_cards/lvwerra/gpt2-imdb-pos/README.md",
-          "model_cards/lvwerra/gpt2-imdb/README.md",
-          "model_cards/lvwerra/gpt2-medium-taboo/README.md",
-          "model_cards/lysandre/arxiv-nlp/README.md",
-          "model_cards/lysandre/arxiv/README.md",
-          "model_cards/microsoft/DialoGPT-large/README.md",
-          "model_cards/microsoft/DialoGPT-medium/README.md",
-          "model_cards/microsoft/DialoGPT-small/README.md",
-          "model_cards/mrm8488/CodeBERTaPy/README.md",
-          "model_cards/mrm8488/GPT-2-finetuned-CORD19/README.md",
-          "model_cards/mrm8488/GPT-2-finetuned-covid-bio-medrxiv/README.md",
-          "model_cards/mrm8488/bert-base-spanish-wwm-cased-finetuned-spa-squad2-es/README.md",
-          "model_cards/mrm8488/bert-medium-finetuned-squadv2/README.md",
-          "model_cards/mrm8488/bert-mini-finetuned-squadv2/README.md",
-          "model_cards/mrm8488/bert-multi-cased-finedtuned-xquad-tydiqa-goldp/README.md",
-          "model_cards/mrm8488/bert-multi-cased-finetuned-xquadv1/README.md",
-          "model_cards/mrm8488/bert-multi-uncased-finetuned-xquadv1/README.md",
-          "model_cards/mrm8488/bert-small-finetuned-squadv2/README.md",
-          "model_cards/mrm8488/bert-spanish-cased-finetuned-ner/README.md",
-          "model_cards/mrm8488/bert-spanish-cased-finetuned-pos-syntax/README.md",
-          "model_cards/mrm8488/bert-spanish-cased-finetuned-pos/README.md",
-          "model_cards/mrm8488/bert-tiny-finetuned-squadv2/README.md",
-          "model_cards/mrm8488/bert-uncased-finetuned-qnli/README.md",
-          "model_cards/mrm8488/codeBERTaJS/README.md",
-          "model_cards/mrm8488/distilbert-multi-finetuned-for-xqua-on-tydiqa/README.md",
-          "model_cards/mrm8488/distill-bert-base-spanish-wwm-cased-finetuned-spa-squad2-es/README.md",
-          "model_cards/mrm8488/gpt2-imdb-neg/README.md",
-          "model_cards/mrm8488/spanbert-base-finetuned-squadv1/README.md",
-          "model_cards/mrm8488/spanbert-base-finetuned-squadv2/README.md",
-          "model_cards/mrm8488/spanbert-base-finetuned-tacred/README.md",
-          "model_cards/mrm8488/spanbert-finetuned-squadv1/README.md",
-          "model_cards/mrm8488/spanbert-finetuned-squadv2/README.md",
-          "model_cards/mrm8488/spanbert-large-finetuned-squadv1/README.md",
-          "model_cards/mrm8488/spanbert-large-finetuned-squadv2/README.md",
-          "model_cards/mrm8488/spanbert-large-finetuned-tacred/README.md",
-          "model_cards/mrm8488/xlm-multi-finetuned-xquadv1/README.md",
-          "model_cards/nlpaueb/bert-base-greek-uncased-v1/README.md",
-          "model_cards/nlptown/bert-base-multilingual-uncased-sentiment/README.md",
-          "model_cards/redewiedergabe/bert-base-historical-german-rw-cased/README.md",
-          "model_cards/severinsimmler/literary-german-bert/README.md",
-          "model_cards/seyonec/ChemBERTa-zinc-base-v1/README.md",
-          "model_cards/shoarora/alectra-small-owt/README.md",
-          "model_cards/shoarora/electra-small-owt/README.md",
-          "model_cards/twmkn9/albert-base-v2-squad2/README.md",
-          "model_cards/twmkn9/bert-base-uncased-squad2/README.md",
-          "model_cards/twmkn9/distilbert-base-uncased-squad2/README.md",
-          "model_cards/twmkn9/distilroberta-base-squad2/README.md",
-          "model_cards/voidful/albert_chinese_base/README.md",
-          "model_cards/voidful/albert_chinese_large/README.md",
-          "model_cards/voidful/albert_chinese_small/README.md",
-          "model_cards/voidful/albert_chinese_tiny/README.md",
-          "model_cards/voidful/albert_chinese_xlarge/README.md",
-          "model_cards/voidful/albert_chinese_xxlarge/README.md",
-          "notebooks/README.md",
           "src/transformers/modeling_gpt2.py",
-          "src/transformers/modeling_tf_gpt2.py",
-          "src/transformers/modeling_tf_transfo_xl.py",
-          "src/transformers/modeling_tf_transfo_xl_utilities.py",
-          "src/transformers/modeling_tf_xlnet.py",
           "src/transformers/modeling_transfo_xl.py",
-          "src/transformers/modeling_transfo_xl_utilities.py",
-          "templates/adding_a_new_example_script/README.md",
-          "templates/adding_a_new_model/README.md",
-          "tests/test_modeling_tf_transfo_xl.py",
-          "tests/test_modeling_transfo_xl.py",
-          "tests/test_modeling_xlnet.py",
-          "tests/utils.py"
+          "tests/test_modeling_transfo_xl.py"
         ],
         "predSpans": {
-          "tests/test_modeling_transfo_xl.py": [
-            {
-              "start": 51,
-              "end": 51
-            },
-            {
-              "start": 72,
-              "end": 72
-            },
-            {
-              "start": 90,
-              "end": 90
-            },
-            {
-              "start": 91,
-              "end": 91
-            },
-            {
-              "start": 92,
-              "end": 92
-            },
-            {
-              "start": 109,
-              "end": 109
-            },
-            {
-              "start": 115,
-              "end": 115
-            },
-            {
-              "start": 146,
-              "end": 146
-            },
-            {
-              "start": 146,
-              "end": 228
-            },
-            {
-              "start": 152,
-              "end": 152
-            },
-            {
-              "start": 154,
-              "end": 154
-            },
-            {
-              "start": 157,
-              "end": 157
-            },
-            {
-              "start": 167,
-              "end": 167
-            },
-            {
-              "start": 187,
-              "end": 187
-            }
-          ],
-          "tests/test_modeling_tf_transfo_xl.py": [
-            {
-              "start": 55,
-              "end": 55
-            },
-            {
-              "start": 76,
-              "end": 76
-            },
-            {
-              "start": 94,
-              "end": 94
-            },
-            {
-              "start": 95,
-              "end": 95
-            },
-            {
-              "start": 96,
-              "end": 96
-            },
-            {
-              "start": 113,
-              "end": 113
-            },
-            {
-              "start": 119,
-              "end": 119
-            },
-            {
-              "start": 150,
-              "end": 150
-            },
-            {
-              "start": 155,
-              "end": 155
-            },
-            {
-              "start": 160,
-              "end": 160
-            },
-            {
-              "start": 189,
-              "end": 189
-            }
-          ],
           "src/transformers/modeling_transfo_xl.py": [
-            {
-              "start": 807,
-              "end": 807
-            },
-            {
-              "start": 851,
-              "end": 851
-            },
             {
               "start": 851,
               "end": 919
-            },
-            {
-              "start": 853,
-              "end": 853
-            },
-            {
-              "start": 855,
-              "end": 855
-            },
-            {
-              "start": 857,
-              "end": 857
-            },
-            {
-              "start": 858,
-              "end": 858
-            },
-            {
-              "start": 862,
-              "end": 862
-            },
-            {
-              "start": 907,
-              "end": 907
-            },
-            {
-              "start": 908,
-              "end": 908
-            },
-            {
-              "start": 915,
-              "end": 915
             }
           ],
-          "src/transformers/modeling_tf_transfo_xl_utilities.py": [
-            {
-              "start": 123,
-              "end": 123
-            }
-          ],
-          "src/transformers/modeling_transfo_xl_utilities.py": [
-            {
-              "start": 86,
-              "end": 86
-            },
-            {
-              "start": 90,
-              "end": 90
-            },
-            {
-              "start": 92,
-              "end": 92
-            },
-            {
-              "start": 101,
-              "end": 101
-            },
-            {
-              "start": 102,
-              "end": 102
-            },
-            {
-              "start": 103,
-              "end": 103
-            },
-            {
-              "start": 104,
-              "end": 104
-            },
-            {
-              "start": 108,
-              "end": 108
-            },
-            {
-              "start": 109,
-              "end": 109
-            },
-            {
-              "start": 136,
-              "end": 136
-            },
-            {
-              "start": 139,
-              "end": 139
-            },
+          "tests/test_modeling_transfo_xl.py": [
             {
               "start": 146,
-              "end": 146
-            },
-            {
-              "start": 147,
-              "end": 147
-            },
-            {
-              "start": 153,
-              "end": 153
-            },
-            {
-              "start": 160,
-              "end": 160
-            },
-            {
-              "start": 170,
-              "end": 170
-            },
-            {
-              "start": 178,
-              "end": 178
-            }
-          ],
-          "src/transformers/modeling_tf_transfo_xl.py": [
-            {
-              "start": 788,
-              "end": 788
-            },
-            {
-              "start": 827,
-              "end": 827
-            },
-            {
-              "start": 834,
-              "end": 834
-            },
-            {
-              "start": 850,
-              "end": 850
-            }
-          ],
-          "tests/test_modeling_xlnet.py": [
-            {
-              "start": 267,
-              "end": 267
-            },
-            {
-              "start": 276,
-              "end": 276
-            },
-            {
-              "start": 284,
-              "end": 284
-            }
-          ],
-          "src/transformers/modeling_tf_xlnet.py": [
-            {
-              "start": 860,
-              "end": 860
-            },
-            {
-              "start": 865,
-              "end": 865
+              "end": 228
             }
           ],
           "src/transformers/modeling_gpt2.py": [
@@ -3131,168 +1363,186 @@
           {
             "step": 3,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.6,
+              "span": 0.5419283339490211,
+              "line": 0.5185185185185185
             }
           },
           {
             "step": 4,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.6,
+              "span": 0.5419283339490211,
+              "line": 0.5185185185185185
             }
           },
           {
             "step": 5,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 0.5,
+              "symbol": 0.6,
+              "span": 0.5419283339490211,
+              "line": 0.5185185185185185
             }
           },
           {
             "step": 6,
             "coverage": {
-              "file": 0.0,
-              "symbol": 0.0,
-              "span": 0.0,
-              "line": 0.0
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 7,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 8,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 9,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 10,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 11,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 12,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 13,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 14,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 15,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 16,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 17,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 18,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           },
           {
             "step": 19,
             "coverage": {
               "file": 1.0,
-              "symbol": 0.8,
-              "span": 0.3228666420391577,
-              "line": 0.24074074074074073
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 20,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
+            }
+          },
+          {
+            "step": 21,
+            "coverage": {
+              "file": 1.0,
+              "symbol": 1.0,
+              "span": 1.0,
+              "line": 1.0
             }
           }
         ],
         "aucCoverage": {
-          "file": 0.6842105263157895,
-          "symbol": 0.5473684210526316,
-          "span": 0.22090875507942367,
-          "line": 0.16471734892787526
+          "file": 0.8333333333333334,
+          "symbol": 0.8476190476190476,
+          "span": 0.8393230953260506,
+          "line": 0.835978835978836
         },
         "redundancy": {
-          "file": 0.039548022598870025,
-          "symbol": 0.09677419354838712,
-          "span": 0.016163035839775075,
-          "line": 0.016129032258064502
+          "file": 0.5714285714285714,
+          "symbol": 0.368421052631579,
+          "span": 0.19859949658224674,
+          "line": 0.19691780821917804
         }
       },
       "fixOverlap": {
@@ -3311,35 +1561,35 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5b0fc10c7749d5337641/home/.agents/skills/superpowers/verification-before-completion/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: verification-before-completion\ndescription: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always\n---\n\n# Verification Before Completion\n\n## Overview\n\nClaiming work is complete without verification is dishonesty, not efficiency.\n\n**Core principle:** Evidence before claims, always.\n\n**Violating the letter of this rule is violating the spirit of this rule.**\n\n## The Iron Law\n\n```\nNO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE\n```\n\nIf you haven't run the verification command in this message, you cannot claim it passes.\n\n## The Gate Function\n\n```\nBEFORE claiming any status or expressing satisfaction:\n\n1. IDENTIFY: What command proves this claim?\n2. RUN: Execute the FULL command (fresh, complete)\n3. READ: Full output, check exit code, count failures\n4. VERIFY: Does output confirm the claim?\n   - If NO: State actual status with evidence\n   - If YES: State claim WITH evidence\n5. ONLY THEN: Make the claim\n\nSkip any step = lying, not verifying\n```\n\n## Common Failures\n\n| Claim | Requires | Not Sufficient |\n|-------|----------|----------------|\n| Tests pass | Test command output: 0 failures | Previous run, \"should pass\" |\n| Linter clean | Linter output: 0 errors | Partial check, extrapolation |\n| Build succeeds | Build command: exit 0 | Linter passing, logs look good |\n| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |\n| Regression test works | Red-green cycle verified | Test passes once |\n| Agent completed | VCS diff shows changes | Agent reports \"success\" |\n| Requirements met | Line-by-line checklist | Tests passing |\n\n## Red Flags - STOP\n\n- Using \"should\", \"probably\", \"seems to\"\n- Expressing satisfaction before verification (\"Great!\", \"Perfect!\", \"Done!\", etc.)\n- About to commit/push/PR without verification\n- Trusting agent success reports\n- Relying on partial verification\n- Thinking \"just this once\"\n- Tired and wanting work over\n- **ANY wording implying success without having run verification**\n\n## Rationalization Prevention\n\n| Excuse | Reality |\n|--------|---------|\n| \"Should work now\" | RUN the verification |\n| \"I'm confident\" | Confidence \u2260 evidence |\n| \"Just this once\" | No exceptions |\n| \"Linter passed\" | Linter \u2260 compiler |\n| \"Agent said success\" | Verify independently |\n| \"I'm tired\" | Exhaustion \u2260 excuse |\n| \"Partial check is enough\" | Partial proves nothing |\n| \"Different words so rule doesn't apply\" | Spirit over letter |\n\n## Key Patterns\n\n**Tests:**\n```\n\u2705 [Run test command] [See: 34/34 pass] \"All tests pass\"\n\u274c \"Should pass now\" / \"Looks correct\"\n```\n\n**Regression tests (TDD Red-Green):**\n```\n\u2705 Write \u2192 Run (pass) \u2192 Revert fix \u2192 Run (MUST FAIL) \u2192 Restore \u2192 Run (pass)\n\u274c \"I've written a regression test\" (without red-green verification)\n```\n\n**Build:**\n```\n\u2705 [Run build] [See: exit 0] \"Build passes\"\n\u274c \"Linter passed\" (linter doesn't check compilation)\n```\n\n**Requirements:**\n```\n\u2705 Re-read plan \u2192 Create checklist \u2192 Verify each \u2192 Report gaps or completion\n\u274c \"Tests pass, phase complete\"\n```\n\n**Agent delegation:**\n```\n\u2705 Agent reports success \u2192 Check VCS diff \u2192 Verify changes \u2192 Report actual state\n\u274c Trust agent report\n```\n\n## Why This Matters\n\nFrom 24 failure memories:\n- your human partner said \"I don't believe you\" - trust broken\n- Undefined functions shipped - would crash\n- Missing requirements shipped - incomplete features\n- Time wasted on false completion \u2192 redirect \u2192 rework\n- Violates: \"Honesty is a core value. If you lie, you'll be replaced.\"\n\n## When To Apply\n\n**ALWAYS before:**\n- ANY variation of success/completion claims\n- ANY expression of satisfaction\n- ANY positive statement about work state\n- Committing, PR creation, task completion\n- Moving to next task\n- Delegating to agents\n\n**Rule applies to:**\n- Exact phrases\n- Paraphrases and synonyms\n- Implications of success\n- ANY communication suggesting completion/co\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5b0fc10c7749d5337641/home/.agents/skills/superpowers/using-superpowers/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: using-superpowers\ndescription: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions\n---\n\n<SUBAGENT-STOP>\nIf you were dispatched as a subagent to execute a specific task, skip this skill.\n</SUBAGENT-STOP>\n\n<EXTREMELY-IMPORTANT>\nIf you think there is even a 1% chance a skill might apply to what you are doing, you ABSOLUTELY MUST invoke the skill.\n\nIF A SKILL APPLIES TO YOUR TASK, YOU DO NOT HAVE A CHOICE. YOU MUST USE IT.\n\nThis is not negotiable. This is not optional. You cannot rationalize your way out of this.\n</EXTREMELY-IMPORTANT>\n\n## Instruction Priority\n\nSuperpowers skills override default system prompt behavior, but **user instructions always take precedence**:\n\n1. **User's explicit instructions** (CLAUDE.md, GEMINI.md, AGENTS.md, direct requests) \u2014 highest priority\n2. **Superpowers skills** \u2014 override default system behavior where they conflict\n3. **Default system prompt** \u2014 lowest priority\n\nIf CLAUDE.md, GEMINI.md, or AGENTS.md says \"don't use TDD\" and a skill says \"always use TDD,\" follow the user's instructions. The user is in control.\n\n## How to Access Skills\n\n**In Claude Code:** Use the `Skill` tool. When you invoke a skill, its content is loaded and presented to you\u2014follow it directly. Never use the Read tool on skill files.\n\n**In Gemini CLI:** Skills activate via the `activate_skill` tool. Gemini loads skill metadata at session start and activates the full content on demand.\n\n**In other environments:** Check your platform's documentation for how skills are loaded.\n\n## Platform Adaptation\n\nSkills use Claude Code tool names. Non-CC platforms: see `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.\n\n# Using Skills\n\n## The Rule\n\n**Invoke relevant or requested skills BEFORE any response or action.** Even a 1% chance a skill might apply means that you should invoke the skill to check. If an invoked skill turns out to be wrong for the situation, you don't need to use it.\n\n```dot\ndigraph skill_flow {\n    \"User message received\" [shape=doublecircle];\n    \"About to EnterPlanMode?\" [shape=doublecircle];\n    \"Already brainstormed?\" [shape=diamond];\n    \"Invoke brainstorming skill\" [shape=box];\n    \"Might any skill apply?\" [shape=diamond];\n    \"Invoke Skill tool\" [shape=box];\n    \"Announce: 'Using [skill] to [purpose]'\" [shape=box];\n    \"Has checklist?\" [shape=diamond];\n    \"Create TodoWrite todo per item\" [shape=box];\n    \"Follow skill exactly\" [shape=box];\n    \"Respond (including clarifications)\" [shape=doublecircle];\n\n    \"About to EnterPlanMode?\" -> \"Already brainstormed?\";\n    \"Already brainstormed?\" -> \"Invoke brainstorming skill\" [label=\"no\"];\n    \"Already brainstormed?\" -> \"Might any skill apply?\" [label=\"yes\"];\n    \"Invoke brainstorming skill\" -> \"Might any skill apply?\";\n\n    \"User message received\" -> \"Might any skill apply?\";\n    \"Might any skill apply?\" -> \"Invoke Skill tool\" [label=\"yes, even 1%\"];\n    \"Might any skill apply?\" -> \"Respond (including clarifications)\" [label=\"definitely not\"];\n    \"Invoke Skill tool\" -> \"Announce: 'Using [skill] to [purpose]'\";\n    \"Announce: 'Using [skill] to [purpose]'\" -> \"Has checklist?\";\n    \"Has checklist?\" -> \"Create TodoWrite todo per item\" [label=\"yes\"];\n    \"Has checklist?\" -> \"Follow skill exactly\" [label=\"no\"];\n    \"Create TodoWrite todo per item\" -> \"Follow skill exactly\";\n}\n```\n\n## Red Flags\n\nThese thoughts mean STOP\u2014you're rationalizing:\n\n| Thought | Reality |\n|---------|---------|\n| \"This is just a simple question\" | Questions are tasks. Check for skills. |\n| \"I need more context first\" | Skill check comes BEFORE clarifying questions. |\n| \"Let me explore the codebase first\" | Skills tell you HOW to explore. Check first. |\n| \"I can check git/files quickly\" | Files lack conversation context. Check for skills. |\n| \"Let me gather information first\" | Skills tell you HOW to gat\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5b0fc10c7749d5337641/home/.agents/skills/superpowers/test-driven-development/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: test-driven-development\ndescription: Use when implementing any feature or bugfix, before writing implementation code\n---\n\n# Test-Driven Development (TDD)\n\n## Overview\n\nWrite the test first. Watch it fail. Write minimal code to pass.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n**Violating the letter of the rules is violating the spirit of the rules.**\n\n## When to Use\n\n**Always:**\n- New features\n- Bug fixes\n- Refactoring\n- Behavior changes\n\n**Exceptions (ask your human partner):**\n- Throwaway prototypes\n- Generated code\n- Configuration files\n\nThinking \"skip TDD just this once\"? Stop. That's rationalization.\n\n## The Iron Law\n\n```\nNO PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrite code before the test? Delete it. Start over.\n\n**No exceptions:**\n- Don't keep it as \"reference\"\n- Don't \"adapt\" it while writing tests\n- Don't look at it\n- Delete means delete\n\nImplement fresh from tests. Period.\n\n## Red-Green-Refactor\n\n```dot\ndigraph tdd_cycle {\n    rankdir=LR;\n    red [label=\"RED\\nWrite failing test\", shape=box, style=filled, fillcolor=\"#ffcccc\"];\n    verify_red [label=\"Verify fails\\ncorrectly\", shape=diamond];\n    green [label=\"GREEN\\nMinimal code\", shape=box, style=filled, fillcolor=\"#ccffcc\"];\n    verify_green [label=\"Verify passes\\nAll green\", shape=diamond];\n    refactor [label=\"REFACTOR\\nClean up\", shape=box, style=filled, fillcolor=\"#ccccff\"];\n    next [label=\"Next\", shape=ellipse];\n\n    red -> verify_red;\n    verify_red -> green [label=\"yes\"];\n    verify_red -> red [label=\"wrong\\nfailure\"];\n    green -> verify_green;\n    verify_green -> refactor [label=\"yes\"];\n    verify_green -> green [label=\"no\"];\n    refactor -> verify_green [label=\"stay\\ngreen\"];\n    verify_green -> next;\n    next -> red;\n}\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test showing what should happen.\n\n<Good>\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\nClear name, tests real behavior, one thing\n</Good>\n\n<Bad>\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\nVague name, tests mock not code\n</Bad>\n\n**Requirements:**\n- One behavior\n- Clear name\n- Real code (no mocks unless unavoidable)\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test fails (not errors)\n- Failure message is expected\n- Fails because feature missing (not typos)\n\n**Test passes?** You're testing existing behavior. Fix test.\n\n**Test errors?** Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n<Good>\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\nJust enough to pass\n</Good>\n\n<Bad>\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: {\n    maxRetries?: number;\n    backoff?: 'linear' | 'exponential';\n    onRetry?: (attempt: number) => void;\n  }\n): Promise<T> {\n  // YAGNI\n}\n```\nOver-engineered\n</Bad>\n\nDon't add features, refactor other code, or \"improve\" beyond the test.\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm:\n- Test passes\n- Other tests still pass\n- Output pristine (no errors, warnings)\n\n**Test fails?** Fix code, not test.\n\n**Other tests fail?** Fix now.\n\n### REFACTOR - Clean Up\n\nAfter green only:\n- Remove du\u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5b0fc10c7749d5337641/home/.agents/skills/superpowers/systematic-debugging/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: systematic-debugging\ndescription: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes\n---\n\n# Systematic Debugging\n\n## Overview\n\nRandom fixes waste time and create new bugs. Quick patches mask underlying issues.\n\n**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.\n\n**Violating the letter of this process is violating the spirit of debugging.**\n\n## The Iron Law\n\n```\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST\n```\n\nIf you haven't completed Phase 1, you cannot propose fixes.\n\n## When to Use\n\nUse for ANY technical issue:\n- Test failures\n- Bugs in production\n- Unexpected behavior\n- Performance problems\n- Build failures\n- Integration issues\n\n**Use this ESPECIALLY when:**\n- Under time pressure (emergencies make guessing tempting)\n- \"Just one quick fix\" seems obvious\n- You've already tried multiple fixes\n- Previous fix didn't work\n- You don't fully understand the issue\n\n**Don't skip when:**\n- Issue seems simple (simple bugs have root causes too)\n- You're in a hurry (rushing guarantees rework)\n- Manager wants it fixed NOW (systematic is faster than thrashing)\n\n## The Four Phases\n\nYou MUST complete each phase before proceeding to the next.\n\n### Phase 1: Root Cause Investigation\n\n**BEFORE attempting ANY fix:**\n\n1. **Read Error Messages Carefully**\n   - Don't skip past errors or warnings\n   - They often contain the exact solution\n   - Read stack traces completely\n   - Note line numbers, file paths, error codes\n\n2. **Reproduce Consistently**\n   - Can you trigger it reliably?\n   - What are the exact steps?\n   - Does it happen every time?\n   - If not reproducible \u2192 gather more data, don't guess\n\n3. **Check Recent Changes**\n   - What changed that could cause this?\n   - Git diff, recent commits\n   - New dependencies, config changes\n   - Environmental differences\n\n4. **Gather Evidence in Multi-Component Systems**\n\n   **WHEN system has multiple components (CI \u2192 build \u2192 signing, API \u2192 service \u2192 database):**\n\n   **BEFORE proposing fixes, add diagnostic instrumentation:**\n   ```\n   For EACH component boundary:\n     - Log what data enters component\n     - Log what data exits component\n     - Verify environment/config propagation\n     - Check state at each layer\n\n   Run once to gather evidence showing WHERE it breaks\n   THEN analyze evidence to identify failing component\n   THEN investigate that specific component\n   ```\n\n   **Example (multi-layer system):**\n   ```bash\n   # Layer 1: Workflow\n   echo \"=== Secrets available in workflow: ===\"\n   echo \"IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}\"\n\n   # Layer 2: Build script\n   echo \"=== Env vars in build script: ===\"\n   env | grep IDENTITY || echo \"IDENTITY not in environment\"\n\n   # Layer 3: Signing script\n   echo \"=== Keychain state: ===\"\n   security list-keychains\n   security find-identity -v\n\n   # Layer 4: Actual signing\n   codesign --sign \"$IDENTITY\" --verbose=4 \"$APP\"\n   ```\n\n   **This reveals:** Which layer fails (secrets \u2192 workflow \u2713, workflow \u2192 build \u2717)\n\n5. **Trace Data Flow**\n\n   **WHEN error is deep in call stack:**\n\n   See `root-cause-tracing.md` in this directory for the complete backward tracing technique.\n\n   **Quick version:**\n   - Where does bad value originate?\n   - What called this with bad value?\n   - Keep tracing up until you find the source\n   - Fix at source, not at symptom\n\n### Phase 2: Pattern Analysis\n\n**Find the pattern before fixing:**\n\n1. **Find Working Examples**\n   - Locate similar working code in same codebase\n   - What works that's similar to what's broken?\n\n2. **Compare Against References**\n   - If implementing pattern, read reference implementation COMPLETELY\n   - Don't skim - read every line\n   - Understand the pattern fully before applying\n\n3. **Identify Differences**\n   - What's different between working and broken?\n   - List every difference, however small\n   - Don't assume \"that can't matter\"\n\n4. **Understand Dependencies**\n   - What other components does this need?\n   - \u2026",
           "exitCode": 0
         },
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5b0fc10c7749d5337641/home/.agents/skills/superpowers/brainstorming/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: brainstorming\ndescription: \"You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.\"\n---\n\n# Brainstorming Ideas Into Designs\n\nHelp turn ideas into fully formed designs and specs through natural collaborative dialogue.\n\nStart by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.\n\n<HARD-GATE>\nDo NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.\n</HARD-GATE>\n\n## Anti-Pattern: \"This Is Too Simple To Need A Design\"\n\nEvery project goes through this process. A todo list, a single-function utility, a config change \u2014 all of them. \"Simple\" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.\n\n## Checklist\n\nYou MUST create a task for each of these items and complete them in order:\n\n1. **Explore project context** \u2014 check files, docs, recent commits\n2. **Offer visual companion** (if topic will involve visual questions) \u2014 this is its own message, not combined with a clarifying question. See the Visual Companion section below.\n3. **Ask clarifying questions** \u2014 one at a time, understand purpose/constraints/success criteria\n4. **Propose 2-3 approaches** \u2014 with trade-offs and your recommendation\n5. **Present design** \u2014 in sections scaled to their complexity, get user approval after each section\n6. **Write design doc** \u2014 save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit\n7. **Spec review loop** \u2014 dispatch spec-document-reviewer subagent with precisely crafted review context (never your session history); fix issues and re-dispatch until approved (max 3 iterations, then surface to human)\n8. **User reviews written spec** \u2014 ask user to review the spec file before proceeding\n9. **Transition to implementation** \u2014 invoke writing-plans skill to create implementation plan\n\n## Process Flow\n\n```dot\ndigraph brainstorming {\n    \"Explore project context\" [shape=box];\n    \"Visual questions ahead?\" [shape=diamond];\n    \"Offer Visual Companion\\n(own message, no other content)\" [shape=box];\n    \"Ask clarifying questions\" [shape=box];\n    \"Propose 2-3 approaches\" [shape=box];\n    \"Present design sections\" [shape=box];\n    \"User approves design?\" [shape=diamond];\n    \"Write design doc\" [shape=box];\n    \"Spec review loop\" [shape=box];\n    \"Spec review passed?\" [shape=diamond];\n    \"User reviews spec?\" [shape=diamond];\n    \"Invoke writing-plans skill\" [shape=doublecircle];\n\n    \"Explore project context\" -> \"Visual questions ahead?\";\n    \"Visual questions ahead?\" -> \"Offer Visual Companion\\n(own message, no other content)\" [label=\"yes\"];\n    \"Visual questions ahead?\" -> \"Ask clarifying questions\" [label=\"no\"];\n    \"Offer Visual Companion\\n(own message, no other content)\" -> \"Ask clarifying questions\";\n    \"Ask clarifying questions\" -> \"Propose 2-3 approaches\";\n    \"Propose 2-3 approaches\" -> \"Present design sections\";\n    \"Present design sections\" -> \"User approves design?\";\n    \"User approves design?\" -> \"Present design sections\" [label=\"no, revise\"];\n    \"User approves design?\" -> \"Write design doc\" [label=\"yes\"];\n    \"Write design doc\" -> \"Spec review loop\";\n    \"Spec review loop\" -> \"Spec review passed?\";\n    \"Spec review passed?\" -> \"Spec review loop\" [label=\"issues found,\\nfix and re-dispatch\"];\n    \"Spec review passed?\" -> \"User reviews spec?\" [label=\"approved\"];\n    \"User reviews spec?\" -> \"Write design doc\" [label=\"changes requested\"];\n    \"User reviews spec?\" -> \"Invoke writing-plans skill\" [label=\"approved\"];\n}\n```\n\n**The terminal state is invoking\u2026",
           "exitCode": 0
         },
@@ -3500,7 +1750,7 @@
         {
           "kind": "command_execution",
           "status": "completed",
-          "command": "/bin/bash -lc \"sed -n '1,220p' <contextbench-root>/.cache/agent-runtimes/codex/5b0fc10c7749d5337641/home/.agents/skills/superpowers/writing-plans/SKILL.md\"",
+          "command": "/bin/bash -lc \"sed -n '1,220p' <agent-runtime>\"",
           "output": "---\nname: writing-plans\ndescription: Use when you have a spec or requirements for a multi-step task, before touching code\n---\n\n# Writing Plans\n\n## Overview\n\nWrite comprehensive implementation plans assuming the engineer has zero context for our codebase and questionable taste. Document everything they need to know: which files to touch for each task, code, testing, docs they might need to check, how to test it. Give them the whole plan as bite-sized tasks. DRY. YAGNI. TDD. Frequent commits.\n\nAssume they are a skilled developer, but know almost nothing about our toolset or problem domain. Assume they don't know good test design very well.\n\n**Announce at start:** \"I'm using the writing-plans skill to create the implementation plan.\"\n\n**Context:** This should be run in a dedicated worktree (created by brainstorming skill).\n\n**Save plans to:** `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`\n- (User preferences for plan location override this default)\n\n## Scope Check\n\nIf the spec covers multiple independent subsystems, it should have been broken into sub-project specs during brainstorming. If it wasn't, suggest breaking this into separate plans \u2014 one per subsystem. Each plan should produce working, testable software on its own.\n\n## File Structure\n\nBefore defining tasks, map out which files will be created or modified and what each one is responsible for. This is where decomposition decisions get locked in.\n\n- Design units with clear boundaries and well-defined interfaces. Each file should have one clear responsibility.\n- You reason best about code you can hold in context at once, and your edits are more reliable when files are focused. Prefer smaller, focused files over large ones that do too much.\n- Files that change together should live together. Split by responsibility, not by technical layer.\n- In existing codebases, follow established patterns. If the codebase uses large files, don't unilaterally restructure - but if a file you're modifying has grown unwieldy, including a split in the plan is reasonable.\n\nThis structure informs the task decomposition. Each task should produce self-contained changes that make sense independently.\n\n## Bite-Sized Task Granularity\n\n**Each step is one action (2-5 minutes):**\n- \"Write the failing test\" - step\n- \"Run it to make sure it fails\" - step\n- \"Implement the minimal code to make the test pass\" - step\n- \"Run the tests and make sure they pass\" - step\n- \"Commit\" - step\n\n## Plan Document Header\n\n**Every plan MUST start with this header:**\n\n```markdown\n# [Feature Name] Implementation Plan\n\n> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.\n\n**Goal:** [One sentence describing what this builds]\n\n**Architecture:** [2-3 sentences about approach]\n\n**Tech Stack:** [Key technologies/libraries]\n\n---\n```\n\n## Task Structure\n\n````markdown\n### Task N: [Component Name]\n\n**Files:**\n- Create: `exact/path/to/file.py`\n- Modify: `exact/path/to/existing.py:123-145`\n- Test: `tests/exact/path/to/test.py`\n\n- [ ] **Step 1: Write the failing test**\n\n```python\ndef test_specific_behavior():\n    result = function(input)\n    assert result == expected\n```\n\n- [ ] **Step 2: Run test to verify it fails**\n\nRun: `pytest tests/path/test.py::test_name -v`\nExpected: FAIL with \"function not defined\"\n\n- [ ] **Step 3: Write minimal implementation**\n\n```python\ndef function(input):\n    return expected\n```\n\n- [ ] **Step 4: Run test to verify it passes**\n\nRun: `pytest tests/path/test.py::test_name -v`\nExpected: PASS\n\n- [ ] **Step 5: Commit**\n\n```bash\ngit add tests/path/test.py src/path/file.py\ngit commit -m \"feat: add specific feature\"\n```\n````\n\n## Remember\n- Exact file paths always\n- Complete code in plan (not \"add validation\")\n- Exact commands with expected output\n- Reference relevant skills with @ syntax\n- DRY, YAGNI, TDD, frequent commits\n\n## Plan Review Loop\n\nA\u2026",
           "exitCode": 0
         },
@@ -3591,7 +1841,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/test_modeling_transfo_xl.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/test_modeling_transfo_xl.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
@@ -3617,7 +1876,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/src/transformers/modeling_transfo_xl.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/src/transformers/modeling_transfo_xl.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "todo_list",
@@ -3681,7 +1949,16 @@
         {
           "kind": "file_change",
           "status": "completed",
-          "payload": {}
+          "payload": {
+            "changes": [
+              {
+                "path": "<worktree>/tests/test_modeling_transfo_xl.py",
+                "kind": "update"
+              }
+            ],
+            "path": "<worktree>/tests/test_modeling_transfo_xl.py",
+            "kind": "update"
+          }
         },
         {
           "kind": "command_execution",
