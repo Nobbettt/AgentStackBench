@@ -12,7 +12,10 @@ from ..adapter_base import (
     BaseCodingAgentAdapter,
     CodingAgentInvocationResult,
     PreparedCodingAgentRuntime,
+    expose_workspace_bin_on_path,
 )
+from ..codex.tool_bundle import CodexToolBundleSupportMixin
+from ..runtime_lifecycle import RuntimeRootLifecycleMixin
 from .parser import CodexOtelV2AgentParser
 from .prompting import build_prompt
 
@@ -32,7 +35,7 @@ _SUPPORTED_RUNTIME_TARGET_ROOTS = frozenset(
 )
 
 
-class CodexOtelV2Adapter(BaseCodingAgentAdapter):
+class CodexOtelV2Adapter(CodexToolBundleSupportMixin, RuntimeRootLifecycleMixin, BaseCodingAgentAdapter):
     name = "codex-otel-v2"
     aliases = ("codex_v2", "codex-otel")
     record_suffix = "codex-otel-v2"
@@ -47,6 +50,11 @@ class CodexOtelV2Adapter(BaseCodingAgentAdapter):
 
     def create_parser(self) -> CodexOtelV2AgentParser:
         return CodexOtelV2AgentParser()
+
+    def runtime_root(self, task_dir: Path) -> Path:
+        from .runtime import runtime_root
+
+        return runtime_root(task_dir)
 
     def prepare_runtime(
         self,
@@ -63,9 +71,11 @@ class CodexOtelV2Adapter(BaseCodingAgentAdapter):
         env = prepare_runtime_env(
             task_dir,
             include_host_env=runtime_backend != "docker",
+            runtime_env=runtime_env,
         )
         if env_overrides:
             env.update(env_overrides)
+        expose_workspace_bin_on_path(env, env_overrides)
         env.pop("OTEL_SDK_DISABLED", None)
         template_env = {
             **dict(runtime_env or {}),

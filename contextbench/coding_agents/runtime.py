@@ -23,19 +23,14 @@ from ..agents.claude.runtime import (
     prepare_runtime_env as prepare_claude_runtime_env,
     prepare_runtime_files as prepare_claude_runtime_files,
     run_invocation as _run_claude_invocation,
-    runtime_root as claude_runtime_root,
     validate_auth as validate_claude_auth,
     validate_isolation as validate_claude_isolation,
 )
-from ..agents.claude_otel.runtime import runtime_root as claude_otel_runtime_root
 from ..agents.codex.runtime import (
     build_command as build_codex_command,
-    codex_tool_bundle_root,
     prepare_runtime_env as prepare_codex_runtime_env,
     run_invocation as _run_codex_invocation,
-    runtime_root as codex_runtime_root,
 )
-from ..agents.codex_otel_v2.runtime import runtime_root as codex_otel_v2_runtime_root
 from ..agents.registry import get_coding_agent_adapter
 from .constants import DEFAULT_AGENT_RUNTIME_IMAGES
 from ..core import checkout
@@ -443,20 +438,6 @@ def build_setup_contamination_record(
     return record
 
 
-def scrub_runtime_secrets(*, agent: str, task_dir: Path) -> None:
-    if agent == "codex":
-        shutil.rmtree(codex_runtime_root(task_dir), ignore_errors=True)
-        return
-    if agent == "codex-otel-v2":
-        shutil.rmtree(codex_otel_v2_runtime_root(task_dir), ignore_errors=True)
-        return
-    if agent == "claude":
-        shutil.rmtree(claude_runtime_root(task_dir), ignore_errors=True)
-        return
-    if agent == "claude-otel":
-        shutil.rmtree(claude_otel_runtime_root(task_dir), ignore_errors=True)
-
-
 def _runtime_failure_metadata(
     *,
     phase: str,
@@ -711,28 +692,8 @@ def run_coding_agent_task(
 
     task_dir = (output_dir / safe_path_component(task.get("instance_id") or task.get("original_inst_id") or "task")).resolve()
     ensure_dir(task_dir)
-    extra_runtime_mounts: list[Path] = []
+    extra_runtime_mounts = list(adapter.prepare_runtime_writable_mounts(task_dir=task_dir))
     extra_runtime_readonly_mounts: list[Path] = []
-    if agent == "codex":
-        codex_runtime_dir = codex_runtime_root(task_dir)
-        shutil.rmtree(codex_runtime_dir, ignore_errors=True)
-        ensure_dir(codex_runtime_dir)
-        extra_runtime_mounts.append(codex_runtime_dir)
-    elif agent == "codex-otel-v2":
-        codex_runtime_dir = codex_otel_v2_runtime_root(task_dir)
-        shutil.rmtree(codex_runtime_dir, ignore_errors=True)
-        ensure_dir(codex_runtime_dir)
-        extra_runtime_mounts.append(codex_runtime_dir)
-    elif agent == "claude":
-        claude_runtime_dir = claude_runtime_root(task_dir)
-        shutil.rmtree(claude_runtime_dir, ignore_errors=True)
-        ensure_dir(claude_runtime_dir)
-        extra_runtime_mounts.append(claude_runtime_dir)
-    elif agent == "claude-otel":
-        claude_otel_runtime_dir = claude_otel_runtime_root(task_dir)
-        shutil.rmtree(claude_otel_runtime_dir, ignore_errors=True)
-        ensure_dir(claude_otel_runtime_dir)
-        extra_runtime_mounts.append(claude_otel_runtime_dir)
 
     runtime_env_template_env = {
         **dict(runtime_config.env or {}),
@@ -744,10 +705,12 @@ def run_coding_agent_task(
         runtime_config,
         env={str(key): str(value) for key, value in dict(expanded_runtime_env).items()},
     )
-    if agent == "codex" and runtime_config.backend == "docker":
-        bundle_root = codex_tool_bundle_root(runtime_config.env)
-        if bundle_root is not None:
-            extra_runtime_readonly_mounts.append(bundle_root)
+    extra_runtime_readonly_mounts.extend(
+        adapter.extra_runtime_readonly_mounts(
+            runtime_backend=runtime_config.backend,
+            runtime_env=runtime_config.env,
+        )
+    )
 
     prompt = build_prompt(task, agent)
     if prompt_preamble:
@@ -1217,4 +1180,4 @@ def run_coding_agent_task(
     finally:
         if not runtime_closed:
             task_runtime.close(success=runtime_success)
-        scrub_runtime_secrets(agent=agent, task_dir=task_dir)
+        adapter.scrub_runtime_secrets(task_dir=task_dir)

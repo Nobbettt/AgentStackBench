@@ -1,4 +1,6 @@
 
+# SPDX-License-Identifier: Apache-2.0
+
 """Claude coding-agent adapter registration."""
 
 from __future__ import annotations
@@ -14,11 +16,12 @@ from ..adapter_base import (
     expose_workspace_bin_on_path,
 )
 from ...coding_agents.constants import CLAUDE_OUTPUT_SCHEMA_PATH
+from ..runtime_lifecycle import RuntimeRootLifecycleMixin
 from .parser import ClaudeAgentParser
 from .prompting import build_prompt
 
 
-class ClaudeAdapter(BaseCodingAgentAdapter):
+class ClaudeAdapter(RuntimeRootLifecycleMixin, BaseCodingAgentAdapter):
     name = "claude"
     aliases = ("claude-code",)
     record_suffix = "claude"
@@ -42,6 +45,11 @@ class ClaudeAdapter(BaseCodingAgentAdapter):
 
     def create_parser(self) -> ClaudeAgentParser:
         return ClaudeAgentParser()
+
+    def runtime_root(self, task_dir: Path) -> Path:
+        from .runtime import runtime_root
+
+        return runtime_root(task_dir)
 
     def prepare_runtime(
         self,

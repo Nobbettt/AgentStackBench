@@ -24,9 +24,9 @@ from pathlib import Path
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+from ..agents.adapter_base import RuntimePreflightContext
 from ..agents.registry import get_coding_agent_adapter
 from ..agents.claude.runtime import claude_portable_auth_sources
-from ..agents.codex.runtime import codex_tool_bundle_root
 from ..artifact_sanitization import (
     SanitizationContext,
     assert_no_private_paths,
@@ -788,36 +788,28 @@ class RunSuiteRunner:
             "duration_ms": int((time.monotonic() - started) * 1000),
         }
 
-    def _validate_resolution_runtime_tool_bundles(self, variants: list[EffectiveVariantConfig]) -> None:
+    def _validate_adapter_runtime_preflight(self, variants: list[EffectiveVariantConfig]) -> None:
         failures: list[dict[str, object]] = []
         for variant in variants:
-            if variant.runtime_backend != "docker" or variant.runtime_image_source != "resolution":
-                continue
-            if variant.agent != "codex":
-                continue
-            try:
-                bundle_root = codex_tool_bundle_root(variant.runtime_env)
-            except Exception as exc:
-                failures.append({"variant": variant.name, "agent": variant.agent, "error": str(exc)})
-                continue
-            if bundle_root is None:
-                failures.append(
-                    {
-                        "variant": variant.name,
-                        "agent": variant.agent,
-                        "error": (
-                            "Codex resolution-image runtimes require a repo-local Codex tool bundle. "
-                            "Run 'python3 -m contextbench.run_suites_setup codex-tool-bundle'."
-                        ),
-                    }
+            adapter = get_coding_agent_adapter(variant.agent)
+            failures.extend(
+                failure.to_json()
+                for failure in adapter.runtime_preflight_failures(
+                    context=RuntimePreflightContext(
+                        variant_name=variant.name,
+                        runtime_backend=variant.runtime_backend,
+                        runtime_image_source=variant.runtime_image_source,
+                        runtime_env=variant.runtime_env,
+                    )
                 )
+            )
         if not failures:
             return
         proof_path = self._write_failure_proof(
-            name="runtime-tool-bundles",
+            name="adapter-runtime-preflight",
             payload={"failures": failures},
         )
-        raise RuntimeError(f"Run-suite runtime tool-bundle preflight failed; proof written to {proof_path}")
+        raise RuntimeError(f"Run-suite adapter runtime preflight failed; proof written to {proof_path}")
 
     def _validate_preflight(
         self,
@@ -2646,7 +2638,7 @@ class RunSuiteRunner:
             raise RuntimeError("No enabled variants remain after config filtering")
 
         ensure_dir(self.experiment_dir)
-        self._validate_resolution_runtime_tool_bundles(effective_variants)
+        self._validate_adapter_runtime_preflight(effective_variants)
         effective_variants = self._prepare_runtime_prebuilds(effective_variants, tasks)
         self._prepare_resolution_runtime_images(effective_variants, tasks)
         write_json(

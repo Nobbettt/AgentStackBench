@@ -296,7 +296,7 @@ def test_run_suite_runner_uses_resolution_images_as_agent_runtime(tmp_path, monk
     def fake_image_available(image: str) -> bool:
         return str(image).startswith("sweb.eval.x86_64.psf__requests-")
 
-    monkeypatch.setattr("contextbench.run_suites_core.runner.codex_tool_bundle_root", lambda runtime_env=None: bundle_root)
+    monkeypatch.setattr("contextbench.agents.codex.tool_bundle.codex_tool_bundle_root", lambda runtime_env=None: bundle_root)
     monkeypatch.setattr("contextbench.run_suites_core.runner._docker_available", lambda: True)
     monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_available", fake_image_available)
     monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_platform", lambda image: "linux/amd64")

@@ -185,7 +185,15 @@ class ClaudeOtelRawResponse(TypedDict):
     command_result: NotRequired[CommandResult]
 
 
-CodingAgentRawResponse = CodexRawResponse | ClaudeRawResponse | ClaudeOtelRawResponse
+class CodexOtelRawResponse(TypedDict):
+    agent: str
+    response_format: str
+    otel: dict[str, object]
+    final_message: NotRequired[object]
+    otel_config_path: NotRequired[str]
+
+
+CodingAgentRawResponse = CodexRawResponse | CodexOtelRawResponse | ClaudeRawResponse | ClaudeOtelRawResponse
 
 
 class SetupRunRecord(TypedDict):

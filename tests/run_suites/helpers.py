@@ -19,6 +19,7 @@ from contextbench.coding_agents.constants import (
     CODEX_OUTPUT_SCHEMA_PATH,
     DEFAULT_CODEX_RUNTIME_IMAGE,
 )
+from contextbench.agents.registry import get_coding_agent_adapter
 from contextbench.run_suites_core.postprocess import (
     ResolutionCommandError,
     describe_resolution_backend_support,
@@ -203,7 +204,7 @@ def _fake_run_coding_agent_task(call_log: list[dict[str, object]]):
         prompt_text = (prompt_preamble or "") + "\nFix prompt"
         (task_dir / "prompt.txt").write_text(prompt_text, encoding="utf-8")
         record = _make_fake_agent_record(task=task, agent=agent, task_dir=task_dir, workspace_path=workspace_path)
-        suffix = "codex" if agent == "codex" else "claude"
+        suffix = get_coding_agent_adapter(agent).record_suffix
         record_path = task_dir / f"{task_id}.{suffix}-record.json"
         record_path.write_text(json.dumps(record), encoding="utf-8")
         call_log.append(

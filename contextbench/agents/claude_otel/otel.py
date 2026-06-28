@@ -7,9 +7,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ...coding_agents.inference_limits import MAX_COMMAND_OUTPUT_CHARS
 from ...coding_agents.files import read_jsonl_values
+from ...coding_agents.trace_inference import tool_result_text_from_value
 
 _MINIMAL_STRUCTURED_OUTPUT_KEYS = ("status", "final_answer", "notes")
+_COMPACT_TOOL_RESULT_CONTENT_CHARS = MAX_COMMAND_OUTPUT_CHARS
 
 
 def _minimal_structured_output(value: object) -> dict[str, object] | None:
@@ -404,7 +407,19 @@ def _tool_uses_from_response_body(body: object) -> list[dict[str, object]]:
     return tool_uses
 
 
-def _tool_results_from_request_body(body: object) -> list[dict[str, object]]:
+def _compact_tool_result_content(value: object) -> tuple[str, int, bool]:
+    text = tool_result_text_from_value(value)
+    original_chars = len(text)
+    if original_chars <= _COMPACT_TOOL_RESULT_CONTENT_CHARS:
+        return text, original_chars, False
+    return text[:_COMPACT_TOOL_RESULT_CONTENT_CHARS], original_chars, True
+
+
+def _tool_results_from_request_body(
+    body: object,
+    *,
+    seen_tool_use_ids: set[str] | None = None,
+) -> list[dict[str, object]]:
     if not isinstance(body, dict):
         return []
     messages = body.get("messages")
@@ -412,6 +427,7 @@ def _tool_results_from_request_body(body: object) -> list[dict[str, object]]:
         return []
     results: list[dict[str, object]] = []
     seen: set[str] = set()
+    global_seen = seen_tool_use_ids if seen_tool_use_ids is not None else set()
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -424,14 +440,20 @@ def _tool_results_from_request_body(body: object) -> list[dict[str, object]]:
             tool_use_id = str(item.get("tool_use_id") or "").strip()
             if not tool_use_id or tool_use_id in seen:
                 continue
+            if tool_use_id in global_seen:
+                continue
             seen.add(tool_use_id)
-            results.append(
-                {
-                    "tool_use_id": tool_use_id,
-                    "content": item.get("content"),
-                    "is_error": item.get("is_error"),
-                }
-            )
+            global_seen.add(tool_use_id)
+            content, original_chars, truncated = _compact_tool_result_content(item.get("content"))
+            result = {
+                "tool_use_id": tool_use_id,
+                "content": content,
+                "content_chars": len(content),
+                "original_content_chars": original_chars,
+                "content_truncated": truncated,
+                "is_error": item.get("is_error"),
+            }
+            results.append(result)
     return results
 
 
@@ -439,6 +461,7 @@ def _api_request_body_summaries_from_records(
     records: list[dict[str, object]], *, body_ref_root: Path
 ) -> list[dict[str, object]]:
     summaries: list[dict[str, object]] = []
+    seen_tool_result_ids: set[str] = set()
     for log, body in _api_body_logs_from_records(
         records, "claude_code.api_request_body", body_ref_root=body_ref_root
     ):
@@ -457,7 +480,10 @@ def _api_request_body_summaries_from_records(
                 "model": attrs.get("model") or (body.get("model") if isinstance(body, dict) else None),
                 "tool_names": tools,
                 "tool_count": len(tools),
-                "tool_results": _tool_results_from_request_body(body),
+                "tool_results": _tool_results_from_request_body(
+                    body,
+                    seen_tool_use_ids=seen_tool_result_ids,
+                ),
             }
         )
     return summaries

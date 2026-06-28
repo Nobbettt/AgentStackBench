@@ -96,6 +96,17 @@ def _bounded_tool_output_text(text: str, *, meta: TraceInferenceMeta) -> str:
     return ""
 
 
+def _bounded_tool_result_output(info: dict[str, object], *, meta: TraceInferenceMeta) -> str:
+    if _bool_value(info.get("content_truncated")) is True:
+        meta["dropped_large_command_outputs"] = int(meta.get("dropped_large_command_outputs", 0) or 0) + 1
+        return ""
+    original_chars = _int_value(info.get("original_content_chars"))
+    if original_chars > MAX_COMMAND_OUTPUT_CHARS:
+        meta["dropped_large_command_outputs"] = int(meta.get("dropped_large_command_outputs", 0) or 0) + 1
+        return ""
+    return _bounded_tool_output_text(str(info.get("text") or ""), meta=meta)
+
+
 def _merge_server_tool_use(target: dict[str, int], value: object) -> None:
     if not isinstance(value, dict):
         return
@@ -403,10 +414,6 @@ class ClaudeOtelAgentParser(BaseOtelAgentParser):
         steps = []
         meta: TraceInferenceMeta = {}
         tool_result_info_by_id = self._successful_tool_result_info_by_id(raw_response)
-        tool_result_by_id = {
-            tool_use_id: str(info.get("text") or "")
-            for tool_use_id, info in tool_result_info_by_id.items()
-        }
 
         for call in self.extract_tool_calls(raw_response):
             if call.get("source") == "claude.otel.server_tool_use":
@@ -419,15 +426,14 @@ class ClaudeOtelAgentParser(BaseOtelAgentParser):
             tool_use_id = str(payload.get("id") or "")
             if tool_use_id not in tool_result_info_by_id:
                 continue
-            output_text = tool_result_by_id.get(tool_use_id, "")
+            result_info = tool_result_info_by_id[tool_use_id]
+            output_text = _bounded_tool_result_output(result_info, meta=meta)
             if tool_name == "Read":
-                output_text = _bounded_tool_output_text(output_text, meta=meta)
                 file_path = str(tool_input.get("file_path") or "").strip()
                 if file_path:
                     steps.append(infer_read_step(file_path, output_text=output_text, workspace_path=workspace_path))
                 continue
             if tool_name == "Bash":
-                output_text = _bounded_tool_output_text(output_text, meta=meta)
                 command = str(tool_input.get("command") or "").strip()
                 step = infer_retrieval_step_from_command(
                     command,
@@ -439,7 +445,6 @@ class ClaudeOtelAgentParser(BaseOtelAgentParser):
                     steps.append(step)
                 continue
             if tool_name == "Grep":
-                output_text = _bounded_tool_output_text(output_text, meta=meta)
                 step = infer_search_file_step_from_path(
                     str(tool_input.get("path") or ""),
                     output_text=output_text,
@@ -481,6 +486,9 @@ class ClaudeOtelAgentParser(BaseOtelAgentParser):
             text = tool_result_text_from_value(result.get("content"))
             result_by_id[tool_use_id] = {
                 "text": text,
+                "content_chars": _int_value(result.get("content_chars")) or len(text),
+                "original_content_chars": _int_value(result.get("original_content_chars")) or len(text),
+                "content_truncated": _bool_value(result.get("content_truncated")) is True,
                 "is_error": result.get("is_error"),
             }
         return result_by_id

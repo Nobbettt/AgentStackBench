@@ -13,13 +13,15 @@ from ..adapter_base import (
     BaseCodingAgentAdapter,
     CodingAgentInvocationResult,
     PreparedCodingAgentRuntime,
+    expose_workspace_bin_on_path,
 )
 from ...coding_agents.constants import CLAUDE_OTEL_OUTPUT_SCHEMA_PATH
+from ..runtime_lifecycle import RuntimeRootLifecycleMixin
 from .parser import ClaudeOtelAgentParser
 from .prompting import build_prompt
 
 
-class ClaudeOtelAdapter(BaseCodingAgentAdapter):
+class ClaudeOtelAdapter(RuntimeRootLifecycleMixin, BaseCodingAgentAdapter):
     name = "claude-otel"
     aliases = ("claude-v2", "claude-otel-v2", "claude-code-otel")
     record_suffix = "claude-otel"
@@ -46,6 +48,11 @@ class ClaudeOtelAdapter(BaseCodingAgentAdapter):
     def build_prompt(self, task: dict[str, object]) -> str:
         return build_prompt(task)
 
+    def runtime_root(self, task_dir: Path) -> Path:
+        from .runtime import runtime_root
+
+        return runtime_root(task_dir)
+
     def prepare_runtime(
         self,
         *,
@@ -66,6 +73,7 @@ class ClaudeOtelAdapter(BaseCodingAgentAdapter):
         )
         if env_overrides:
             command_env.update(env_overrides)
+        expose_workspace_bin_on_path(command_env, env_overrides)
         template_env = {
             **dict(runtime_env or {}),
             **dict(env_overrides or {}),

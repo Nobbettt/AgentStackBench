@@ -9,7 +9,7 @@ import json
 import os
 import shutil
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Callable
 
@@ -22,7 +22,7 @@ from ...coding_agents.runtime_common import (
 )
 from ...coding_agents.types import CommandResult
 from ..adapter_base import CodingAgentInvocationResult
-from ..codex.runtime import validate_auth_file
+from ..codex.runtime import codex_tool_bundle_root, validate_auth_file
 from ..otel_common import (
     OtelScoredRunPolicy,
     append_diagnostic_note,
@@ -124,6 +124,7 @@ def prepare_runtime_env(
     source_codex_dir: Path | None = None,
     *,
     include_host_env: bool = True,
+    runtime_env: Mapping[str, str] | None = None,
     materialized_files: Sequence[dict[str, object]] | None = None,
     copy_paths: Sequence[dict[str, object]] | None = None,
 ) -> dict[str, str]:
@@ -141,25 +142,33 @@ def prepare_runtime_env(
     xdg_cache_home = roots["xdg_cache_home"]
     local_bin = home_dir / ".local" / "bin"
     runtime_bin = roots["runtime_root"] / "bin"
+    npm_global = roots["runtime_root"] / "npm-global"
+    npm_global_bin = npm_global / "bin"
+    tool_bundle = codex_tool_bundle_root(runtime_env=runtime_env)
 
-    for path in (codex_home, xdg_config_home, xdg_data_home, xdg_cache_home, local_bin, runtime_bin):
+    for path in (codex_home, xdg_config_home, xdg_data_home, xdg_cache_home, local_bin, runtime_bin, npm_global_bin):
         ensure_dir(path)
 
     shutil.copy2(auth_path, codex_home / "auth.json")
     apply_runtime_setup_files(task_dir, materialized_files=materialized_files, copy_paths=copy_paths)
     env = os.environ.copy() if include_host_env else {}
     if not include_host_env:
-        env["PATH"] = ":".join(
-            [
-                str(local_bin),
-                str(runtime_bin),
-                _CONTAINER_DEFAULT_PATH,
-            ]
-        )
+        path_entries = [
+            str(local_bin),
+            str(runtime_bin),
+            str(npm_global_bin),
+        ]
+        if tool_bundle is not None:
+            path_entries.append(str(tool_bundle / "usr-local" / "bin"))
+        path_entries.append(_CONTAINER_DEFAULT_PATH)
+        env["PATH"] = ":".join(path_entries)
     env.update(
         {
             "HOME": str(home_dir),
             "CODEX_HOME": str(codex_home),
+            "CONTEXTBENCH_RUNTIME_ROOT": str(roots["runtime_root"]),
+            "CONTEXTBENCH_RUNTIME_BIN": str(runtime_bin),
+            "NPM_CONFIG_PREFIX": str(npm_global),
             "XDG_CONFIG_HOME": str(xdg_config_home),
             "XDG_DATA_HOME": str(xdg_data_home),
             "XDG_CACHE_HOME": str(xdg_cache_home),
