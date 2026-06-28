@@ -467,7 +467,7 @@ class RunSuiteConfig(BaseModel):
         return self
 
     def _validate_agent_specific_setup(self, setup: VariantSetupConfig, *, location: str) -> None:
-        if self.agent == "claude":
+        if self.agent in {"claude", "claude-otel"}:
             return
         invalid_entries = []
         if setup.claude_settings_overrides:

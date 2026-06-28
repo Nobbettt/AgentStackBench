@@ -12,13 +12,20 @@ from contextbench.coding_agents.runtime import (
     prepare_codex_runtime_env,
 )
 from contextbench.coding_agents.runtime_common import expand_runtime_templates
+from contextbench.agents.adapter_base import RuntimePreflightContext
 from contextbench.agents.claude.runtime import (
     runtime_root as claude_runtime_root,
     validate_auth_in_runtime,
 )
 from contextbench.agents.codex.runtime import runtime_root as codex_runtime_root
 from contextbench.agents.claude.adapter import ClaudeAdapter
+from contextbench.agents.claude_otel.adapter import ClaudeOtelAdapter
 from contextbench.agents.codex.adapter import CodexAdapter
+from contextbench.agents.codex_otel_v2.adapter import CodexOtelV2Adapter
+from contextbench.agents.codex_otel_v2.runtime import (
+    prepare_runtime_env as prepare_codex_otel_v2_runtime_env,
+    runtime_root as codex_otel_v2_runtime_root,
+)
 
 
 def test_prepare_codex_runtime_env_copies_auth_only(tmp_path) -> None:
@@ -98,6 +105,71 @@ def test_prepare_codex_runtime_env_exposes_explicit_tool_bundle_for_docker(tmp_p
     assert "/host-only/bin" not in path_parts
 
 
+def test_prepare_codex_otel_v2_runtime_env_matches_codex_docker_tool_paths_without_disabling_otel(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source_codex_dir = tmp_path / "source-codex"
+    source_codex_dir.mkdir()
+    (source_codex_dir / "auth.json").write_text('{"token":"host"}', encoding="utf-8")
+    bundle_root = tmp_path / "bundle"
+    (bundle_root / "usr-local" / "bin").mkdir(parents=True)
+    (bundle_root / "usr-local" / "lib" / "node_modules").mkdir(parents=True)
+    monkeypatch.setenv("PATH", "/host-only/bin")
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+
+    env = prepare_codex_otel_v2_runtime_env(
+        tmp_path / "task",
+        source_codex_dir=source_codex_dir,
+        include_host_env=False,
+        runtime_env={"CONTEXTBENCH_CODEX_TOOL_BUNDLE": str(bundle_root)},
+    )
+
+    path_parts = env["PATH"].split(":")
+    assert path_parts[0] == str(Path(env["HOME"]) / ".local" / "bin")
+    assert path_parts[1] == str(codex_otel_v2_runtime_root(tmp_path / "task") / "bin")
+    assert path_parts[2] == str(codex_otel_v2_runtime_root(tmp_path / "task") / "npm-global" / "bin")
+    assert str(bundle_root / "usr-local" / "bin") in path_parts
+    assert "/host-only/bin" not in path_parts
+    assert env["CONTEXTBENCH_RUNTIME_ROOT"] == str(codex_otel_v2_runtime_root(tmp_path / "task"))
+    assert env["CONTEXTBENCH_RUNTIME_BIN"] == str(codex_otel_v2_runtime_root(tmp_path / "task") / "bin")
+    assert env["NPM_CONFIG_PREFIX"] == str(codex_otel_v2_runtime_root(tmp_path / "task") / "npm-global")
+    assert "OTEL_SDK_DISABLED" not in env
+
+
+def test_codex_otel_v2_adapter_uses_codex_tool_bundle_mount_and_preflight(tmp_path, monkeypatch) -> None:
+    bundle_root = tmp_path / "bundle"
+    (bundle_root / "usr-local" / "bin").mkdir(parents=True)
+    (bundle_root / "usr-local" / "lib" / "node_modules").mkdir(parents=True)
+    adapter = CodexOtelV2Adapter()
+
+    assert adapter.extra_runtime_readonly_mounts(
+        runtime_backend="docker",
+        runtime_env={"CONTEXTBENCH_CODEX_TOOL_BUNDLE": str(bundle_root)},
+    ) == (bundle_root,)
+
+    monkeypatch.setattr("contextbench.agents.codex.tool_bundle.codex_tool_bundle_root", lambda runtime_env=None: None)
+    failures = adapter.runtime_preflight_failures(
+        context=RuntimePreflightContext(
+            variant_name="treatment",
+            runtime_backend="docker",
+            runtime_image_source="resolution",
+            runtime_env={},
+        )
+    )
+
+    assert [failure.to_json() for failure in failures] == [
+        {
+            "variant": "treatment",
+            "agent": "codex-otel-v2",
+            "error": (
+                "Codex resolution-image runtimes require a repo-local Codex tool bundle. "
+                "Run 'python3 -m contextbench.run_suites_setup codex-tool-bundle'."
+            ),
+        }
+    ]
+
+
 def test_codex_prepare_runtime_uses_host_auth_without_host_env_for_docker_backend(tmp_path, monkeypatch) -> None:
     host_home = tmp_path / "host-home"
     source_codex_dir = host_home / ".codex"
@@ -147,6 +219,12 @@ def test_agent_docker_runtime_path_exposes_workspace_bin_without_shadowing_tools
         env_overrides=env_overrides,
         runtime_backend="docker",
     )
+    codex_otel = CodexOtelV2Adapter().prepare_runtime(
+        task_dir=tmp_path / "codex-otel-task",
+        setup={},
+        env_overrides=env_overrides,
+        runtime_backend="docker",
+    )
     claude = ClaudeAdapter().prepare_runtime(
         task_dir=tmp_path / "claude-task",
         setup={},
@@ -154,8 +232,15 @@ def test_agent_docker_runtime_path_exposes_workspace_bin_without_shadowing_tools
         runtime_backend="docker",
         runtime_env={"ANTHROPIC_API_KEY": "test-key"},
     )
+    claude_otel = ClaudeOtelAdapter().prepare_runtime(
+        task_dir=tmp_path / "claude-otel-task",
+        setup={},
+        env_overrides=env_overrides,
+        runtime_backend="docker",
+        runtime_env={"ANTHROPIC_API_KEY": "test-key"},
+    )
 
-    for prepared in (codex, claude):
+    for prepared in (codex, codex_otel, claude, claude_otel):
         assert prepared.env is not None
         path_parts = prepared.env["PATH"].split(":")
         assert path_parts[-1] == str(workspace_path / "bin")
@@ -294,325 +379,3 @@ def test_expand_runtime_templates_does_not_read_host_environment(monkeypatch) ->
         "explicit": "from-runtime",
         "host": "${HOST_ONLY_TEMPLATE_SECRET}",
     }
-
-
-def test_prepare_claude_runtime_files_applies_overrides_and_materialized_files(tmp_path) -> None:
-    settings_path, mcp_config_path = prepare_claude_runtime_files(
-        tmp_path,
-        settings_overrides={"permissions": {"allow": ["Read"]}},
-        mcp_config_overrides={"mcpServers": {"demo": {"command": "demo-mcp"}}},
-        materialized_files=[
-            {
-                "path": "notes/setup.txt",
-                "content": "variant setup",
-                "format": "text",
-                "target_root": "task_dir",
-            }
-        ],
-    )
-
-    assert json.loads(settings_path.read_text(encoding="utf-8")) == {"permissions": {"allow": ["Read"]}}
-    assert json.loads(mcp_config_path.read_text(encoding="utf-8")) == {
-        "mcpServers": {"demo": {"command": "demo-mcp"}}
-    }
-    assert (tmp_path / "notes" / "setup.txt").read_text(encoding="utf-8") == "variant setup"
-
-def test_prepare_claude_runtime_env_copies_auth_and_isolates_home(tmp_path, monkeypatch) -> None:
-    source_claude_dir = tmp_path / "source-claude"
-    source_claude_dir.mkdir()
-    (source_claude_dir / ".credentials.json").write_text('{"token":"abc"}', encoding="utf-8")
-    (source_claude_dir / "settings.json").write_text('{"should":"not-copy"}', encoding="utf-8")
-    monkeypatch.setenv("SECRET_SHOULD_NOT_LEAK", "1")
-    monkeypatch.setenv("PATH", "/host/bin")
-    monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
-
-    env = prepare_claude_runtime_env(
-        tmp_path / "task",
-        source_claude_dir=source_claude_dir,
-        include_host_env=False,
-    )
-
-    isolated_home = Path(env["HOME"]) / ".claude"
-    assert (isolated_home / ".credentials.json").exists()
-    assert not (isolated_home / "settings.json").exists()
-    assert "SECRET_SHOULD_NOT_LEAK" not in env
-    assert "/host/bin" not in env["PATH"]
-    assert str(Path(env["HOME"]) / ".local" / "bin") in env["PATH"].split(":")
-    assert str(claude_runtime_root(tmp_path / "task") / "bin") in env["PATH"].split(":")
-    assert "/usr/local/bin" in env["PATH"].split(":")
-    assert env["HOME"].endswith("/home")
-    assert env["CONTEXTBENCH_RUNTIME_ROOT"] == str(claude_runtime_root(tmp_path / "task"))
-    assert env["CONTEXTBENCH_RUNTIME_BIN"] == str(claude_runtime_root(tmp_path / "task") / "bin")
-    assert env["OTEL_SDK_DISABLED"] == "true"
-
-
-def test_prepare_claude_runtime_env_rejects_home_root_claude_json_as_portable_auth(tmp_path, monkeypatch) -> None:
-    host_home = tmp_path / "host-home"
-    (host_home / ".claude").mkdir(parents=True)
-    (host_home / ".claude.json").write_text('{"oauth":"host-root"}', encoding="utf-8")
-    monkeypatch.setenv("HOME", str(host_home))
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
-        monkeypatch.delenv(key, raising=False)
-
-    with pytest.raises(RuntimeError, match="Claude portable auth is unavailable"):
-        prepare_claude_runtime_env(
-            tmp_path / "task",
-            include_host_env=False,
-        )
-
-
-def test_prepare_claude_runtime_env_fails_with_explicit_auth_locations(tmp_path, monkeypatch) -> None:
-    host_home = tmp_path / "host-home"
-    (host_home / ".claude").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(host_home))
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
-        monkeypatch.delenv(key, raising=False)
-
-    with pytest.raises(RuntimeError, match="Claude portable auth is unavailable"):
-        prepare_claude_runtime_env(
-            tmp_path / "task",
-            include_host_env=False,
-        )
-
-
-def test_prepare_claude_runtime_env_prepends_isolated_tool_bins_to_path(tmp_path, monkeypatch) -> None:
-    source_claude_dir = tmp_path / "source-claude"
-    source_claude_dir.mkdir()
-    (source_claude_dir / ".credentials.json").write_text('{"token":"abc"}', encoding="utf-8")
-    monkeypatch.setenv("PATH", "/host/bin")
-    monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
-
-    env = prepare_claude_runtime_env(
-        tmp_path / "task",
-        source_claude_dir=source_claude_dir,
-    )
-
-    path_parts = env["PATH"].split(":")
-    assert path_parts[0] == str(Path(env["HOME"]) / ".local" / "bin")
-    assert path_parts[1] == str(claude_runtime_root(tmp_path / "task") / "bin")
-    assert path_parts[2] == "/host/bin"
-
-
-def test_prepare_claude_runtime_files_supports_home_and_xdg_roots(tmp_path) -> None:
-    source_dir = tmp_path / "variant-files"
-    source_dir.mkdir()
-    (source_dir / "skill.md").write_text("skill", encoding="utf-8")
-
-    prepare_claude_runtime_files(
-        tmp_path / "task",
-        copy_paths=[
-            {
-                "source": str(source_dir),
-                "destination": "skills/demo",
-                "target_root": "claude_home",
-            }
-        ],
-        materialized_files=[
-            {
-                "path": "claude/variant.json",
-                "content": {"enabled": True},
-                "format": "json",
-                "target_root": "xdg_config_home",
-            }
-        ],
-    )
-
-    root = claude_runtime_root(tmp_path / "task")
-    assert (root / "home" / ".claude" / "skills" / "demo" / "skill.md").exists()
-    assert json.loads((root / "xdg-config" / "claude" / "variant.json").read_text(encoding="utf-8")) == {
-        "enabled": True
-    }
-
-
-def test_claude_prepare_runtime_uses_container_env_for_docker_backend(tmp_path, monkeypatch) -> None:
-    source_claude_dir = tmp_path / "source-claude"
-    source_claude_dir.mkdir()
-    (source_claude_dir / ".credentials.json").write_text('{"token":"host"}', encoding="utf-8")
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(source_claude_dir))
-    monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
-    monkeypatch.setenv("SECRET_SHOULD_NOT_LEAK", "1")
-    monkeypatch.setenv("PATH", "/host-only/bin")
-
-    prepared = ClaudeAdapter().prepare_runtime(
-        task_dir=tmp_path / "task",
-        setup={},
-        env_overrides=None,
-        runtime_backend="docker",
-    )
-
-    assert prepared.env is not None
-    assert "SECRET_SHOULD_NOT_LEAK" not in prepared.env
-    assert "/host-only/bin" not in prepared.env["PATH"]
-    assert "/usr/local/bin" in prepared.env["PATH"].split(":")
-    assert "/.cache/agent-runtimes/claude/" in prepared.env["HOME"]
-    assert prepared.env["HOME"].endswith("/home")
-    assert json.loads((Path(prepared.env["HOME"]) / ".claude" / ".credentials.json").read_text(encoding="utf-8")) == {
-        "token": "host"
-    }
-    assert (tmp_path / "task" / "claude.settings.json").exists()
-    assert (tmp_path / "task" / "claude.mcp.json").exists()
-
-
-def test_claude_prepare_runtime_accepts_configured_auth_env_without_host_auth_files(tmp_path, monkeypatch) -> None:
-    source_claude_dir = tmp_path / "empty-claude"
-    source_claude_dir.mkdir()
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(source_claude_dir))
-    monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
-
-    prepared = ClaudeAdapter().prepare_runtime(
-        task_dir=tmp_path / "task",
-        setup={},
-        env_overrides=None,
-        runtime_backend="docker",
-        runtime_env={"ANTHROPIC_API_KEY": "configured-key"},
-    )
-
-    assert prepared.env is not None
-    assert prepared.env["ANTHROPIC_API_KEY"] == "configured-key"
-    assert not (Path(prepared.env["HOME"]) / ".claude" / ".credentials.json").exists()
-
-
-def test_claude_prepare_runtime_can_source_auth_from_configured_claude_config_dir(tmp_path, monkeypatch) -> None:
-    source_claude_dir = tmp_path / "portable-claude-auth"
-    source_claude_dir.mkdir()
-    (source_claude_dir / ".credentials.json").write_text('{"token":"from-runtime-env"}', encoding="utf-8")
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
-
-    prepared = ClaudeAdapter().prepare_runtime(
-        task_dir=tmp_path / "task",
-        setup={},
-        env_overrides=None,
-        runtime_backend="docker",
-        runtime_env={"CLAUDE_CONFIG_DIR": str(source_claude_dir)},
-    )
-
-    assert prepared.env is not None
-    copied = Path(prepared.env["HOME"]) / ".claude" / ".credentials.json"
-    assert json.loads(copied.read_text(encoding="utf-8")) == {"token": "from-runtime-env"}
-
-
-def test_claude_prepare_runtime_expands_runtime_env_in_setup_files(tmp_path, monkeypatch) -> None:
-    source_claude_dir = tmp_path / "empty-claude"
-    source_claude_dir.mkdir()
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(source_claude_dir))
-    monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
-
-    ClaudeAdapter().prepare_runtime(
-        task_dir=tmp_path / "task",
-        setup={
-            "files_to_materialize": [
-                {
-                    "path": "${VARIANT_NAME}/settings.txt",
-                    "content": "${RUNTIME_VALUE}",
-                    "format": "text",
-                    "target_root": "task_dir",
-                }
-            ]
-        },
-        env_overrides=None,
-        runtime_backend="docker",
-        runtime_env={
-            "ANTHROPIC_API_KEY": "configured-key",
-            "VARIANT_NAME": "variant",
-            "RUNTIME_VALUE": "from-runtime",
-        },
-    )
-
-    assert (tmp_path / "task" / "variant" / "settings.txt").read_text(encoding="utf-8") == "from-runtime"
-
-
-def test_validate_claude_auth_in_runtime_rejects_logged_out_status(tmp_path) -> None:
-    workspace_path = tmp_path / "workspace"
-    workspace_path.mkdir()
-    calls: list[dict[str, object]] = []
-
-    class FakeRuntime:
-        def run_command(self, command, *, cwd, stdin_text, stdout_path, stderr_path, timeout, env=None, host_runner=None):
-            del host_runner
-            calls.append(
-                {
-                    "command": list(command),
-                    "cwd": cwd,
-                    "stdin_text": stdin_text,
-                    "timeout": timeout,
-                    "env": dict(env or {}),
-                }
-            )
-            stdout_path.write_text(
-                '{"loggedIn":false,"email":"person@example.com","orgId":"org-secret","orgName":"Secret Org","subscriptionType":"team"}\n',
-                encoding="utf-8",
-            )
-            stderr_path.write_text("person@example.com orgName=SecretOrg\n", encoding="utf-8")
-            return {"ok": True, "exit_code": 0, "signal": None, "timeout": False}
-
-    failure = validate_auth_in_runtime(
-        runtime=FakeRuntime(),
-        task_dir=tmp_path,
-        workspace_path=workspace_path,
-        timeout=300,
-        env={"HOME": "/runtime-home"},
-    )
-
-    assert failure is not None
-    assert failure.command_result["ok"] is False
-    assert failure.command == "claude auth status --json"
-    assert calls == [
-        {
-            "command": ["claude", "auth", "status", "--json"],
-            "cwd": workspace_path,
-            "stdin_text": None,
-            "timeout": 30,
-            "env": {"HOME": "/runtime-home"},
-        }
-    ]
-    assert "loggedIn=false" in failure.stderr_path.read_text(encoding="utf-8")
-    assert "person@example.com" not in failure.stderr_path.read_text(encoding="utf-8")
-    assert "SecretOrg" not in failure.stderr_path.read_text(encoding="utf-8")
-    stdout_text = failure.stdout_path.read_text(encoding="utf-8")
-    assert "person@example.com" not in stdout_text
-    assert "org-secret" not in stdout_text
-    assert json.loads(stdout_text) == {"loggedIn": False, "status": "redacted"}
-
-
-def test_validate_claude_auth_in_runtime_redacts_successful_status_artifact(tmp_path) -> None:
-    workspace_path = tmp_path / "workspace"
-    workspace_path.mkdir()
-
-    class FakeRuntime:
-        def run_command(self, command, *, cwd, stdin_text, stdout_path, stderr_path, timeout, env=None, host_runner=None):
-            del command, cwd, stdin_text, timeout, env, host_runner
-            stdout_path.write_text(
-                json.dumps(
-                    {
-                        "loggedIn": True,
-                        "authMethod": "claude.ai",
-                        "apiProvider": "firstParty",
-                        "email": "person@example.com",
-                        "orgId": "org-secret",
-                        "orgName": "Secret Org",
-                        "subscriptionType": "team",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            stderr_path.write_text("", encoding="utf-8")
-            return {"ok": True, "exit_code": 0, "signal": None, "timeout": False}
-
-    failure = validate_auth_in_runtime(
-        runtime=FakeRuntime(),
-        task_dir=tmp_path,
-        workspace_path=workspace_path,
-        timeout=300,
-        env={"HOME": "/runtime-home"},
-    )
-
-    assert failure is None
-    stdout_text = (tmp_path / "claude-auth-status.stdout.log").read_text(encoding="utf-8")
-    assert "person@example.com" not in stdout_text
-    assert "org-secret" not in stdout_text
-    assert "Secret Org" not in stdout_text
-    assert "subscriptionType" not in stdout_text
-    assert json.loads(stdout_text) == {"loggedIn": True, "status": "redacted"}

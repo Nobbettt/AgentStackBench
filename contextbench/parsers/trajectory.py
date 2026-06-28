@@ -11,12 +11,42 @@ import os
 from pathlib import Path
 from typing import List, Tuple, Optional
 
+from ..agents.registry import iter_coding_agent_adapters
+
+
 class Step:
     """One retrieval step."""
     def __init__(self, files=None, spans=None, symbols=None):
         self.files = files or []
         self.spans = spans or []  # [{file, start_line, end_line}]
         self.symbols = symbols or {}  # {file: [symbolName, ...]}
+
+
+def _coding_agent_record_suffix(path: str) -> str | None:
+    for adapter in iter_coding_agent_adapters():
+        suffix = f".{adapter.record_suffix}-record.json"
+        if path.endswith(suffix):
+            return suffix
+    return None
+
+
+def _is_coding_agent_record_path(path: str) -> bool:
+    return _coding_agent_record_suffix(path) is not None
+
+
+def _load_coding_agent_record_metadata(traj_file: str, basename: str, suffix: str) -> tuple[str, str]:
+    instance_id = basename[: -len(suffix)]
+    model_patch = ""
+    try:
+        with open(traj_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                if data.get("instance_id"):
+                    instance_id = data.get("instance_id")
+                model_patch = data.get("model_patch", "") or ""
+    except Exception:
+        pass
+    return instance_id, model_patch
 
 
 def _append_file(bucket: list[str], raw_path: object) -> None:
@@ -200,28 +230,8 @@ def load_traj_file(traj_file: str) -> dict:
             pass
     elif basename.endswith('.log'):
         instance_id = basename.replace('.log', '')
-    elif basename.endswith('.codex-record.json'):
-        instance_id = basename.replace('.codex-record.json', '')
-        try:
-            with open(traj_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    if data.get("instance_id"):
-                        instance_id = data.get("instance_id")
-                    model_patch = data.get("model_patch", "") or ""
-        except Exception:
-            pass
-    elif basename.endswith('.claude-record.json'):
-        instance_id = basename.replace('.claude-record.json', '')
-        try:
-            with open(traj_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    if data.get("instance_id"):
-                        instance_id = data.get("instance_id")
-                    model_patch = data.get("model_patch", "") or ""
-        except Exception:
-            pass
+    elif record_suffix := _coding_agent_record_suffix(basename):
+        instance_id, model_patch = _load_coding_agent_record_metadata(traj_file, basename, record_suffix)
     else:
         instance_id = basename
     
@@ -311,8 +321,7 @@ def load_pred(path: str) -> List[dict]:
         or path.endswith('.checkpoints.jsonl')
         or path.endswith('_traj.json')
         or path.endswith('.log')
-        or path.endswith('.codex-record.json')
-        or path.endswith('.claude-record.json')
+        or _is_coding_agent_record_path(path)
         or path.endswith('.context.json')
         or path.endswith('patch_context.txt')
         or path.endswith('.traj')

@@ -1,7 +1,6 @@
-
 # SPDX-License-Identifier: Apache-2.0
 
-"""Claude coding-agent adapter registration."""
+"""Claude v2 coding-agent adapter using OpenTelemetry capture."""
 
 from __future__ import annotations
 
@@ -10,24 +9,27 @@ from pathlib import Path
 from typing import Callable
 
 from ..adapter_base import (
+    OTEL_TOOL_RESULTS_CONTEXT_SOURCE,
     BaseCodingAgentAdapter,
     CodingAgentInvocationResult,
     PreparedCodingAgentRuntime,
     expose_workspace_bin_on_path,
 )
-from ...coding_agents.constants import CLAUDE_OUTPUT_SCHEMA_PATH
+from ...coding_agents.constants import CLAUDE_OTEL_OUTPUT_SCHEMA_PATH
 from ..runtime_lifecycle import RuntimeRootLifecycleMixin
-from .parser import ClaudeAgentParser
+from .parser import ClaudeOtelAgentParser
 from .prompting import build_prompt
 
 
-class ClaudeAdapter(RuntimeRootLifecycleMixin, BaseCodingAgentAdapter):
-    name = "claude"
-    aliases = ("claude-code",)
-    record_suffix = "claude"
-    output_schema_path = CLAUDE_OUTPUT_SCHEMA_PATH
+class ClaudeOtelAdapter(RuntimeRootLifecycleMixin, BaseCodingAgentAdapter):
+    name = "claude-otel"
+    aliases = ("claude-v2", "claude-otel-v2", "claude-code-otel")
+    record_suffix = "claude-otel"
+    output_schema_path = CLAUDE_OTEL_OUTPUT_SCHEMA_PATH
     supported_reasoning_efforts = frozenset({"low", "medium", "high", "xhigh"})
     supports_available_tools = True
+    scored_context_source = OTEL_TOOL_RESULTS_CONTEXT_SOURCE
+    score_inferred_context = True
     supported_runtime_target_roots = frozenset(
         {
             "task_dir",
@@ -40,11 +42,11 @@ class ClaudeAdapter(RuntimeRootLifecycleMixin, BaseCodingAgentAdapter):
         }
     )
 
+    def create_parser(self) -> ClaudeOtelAgentParser:
+        return ClaudeOtelAgentParser()
+
     def build_prompt(self, task: dict[str, object]) -> str:
         return build_prompt(task)
-
-    def create_parser(self) -> ClaudeAgentParser:
-        return ClaudeAgentParser()
 
     def runtime_root(self, task_dir: Path) -> Path:
         from .runtime import runtime_root
@@ -115,6 +117,7 @@ class ClaudeAdapter(RuntimeRootLifecycleMixin, BaseCodingAgentAdapter):
     ):
         from .runtime import validate_auth_in_runtime
 
+        del model, reasoning_effort, extra_args
         execution_backend = prepared_runtime.execution_backend
         if execution_backend is None:
             return None
@@ -202,4 +205,4 @@ class ClaudeAdapter(RuntimeRootLifecycleMixin, BaseCodingAgentAdapter):
         )
 
 
-CODING_AGENT_ADAPTER = ClaudeAdapter()
+CODING_AGENT_ADAPTER = ClaudeOtelAdapter()

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-27 from upstream ContextBench.
+# Summary of changes: cover Docker host mapping for OTEL collector access.
 
 from __future__ import annotations
 
@@ -283,6 +286,7 @@ def test_docker_task_runtime_starts_execs_and_cleans_container(tmp_path, monkeyp
     assert stderr_path.read_text(encoding="utf-8") == "agent stderr"
     assert docker_run[:4] == ["docker", "run", "--detach", "--name"]
     assert "--workdir" in docker_run
+    assert_subsequence(docker_run, ["--add-host", "host.docker.internal:host-gateway"])
     assert_subsequence(docker_run, ["--platform", "linux/amd64"])
     assert str(workspace_path) in docker_run
     assert f"type=bind,source={workspace_path.resolve()},target={workspace_path.resolve()}" in docker_run

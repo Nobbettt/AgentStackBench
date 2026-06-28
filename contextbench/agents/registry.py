@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-23 from upstream ContextBench.
+# Summary of changes: register Codex and Claude OTEL adapters alongside v1 agents.
 
 """Registry helpers for coding-agent adapters."""
 
@@ -5,11 +8,15 @@ from __future__ import annotations
 
 from .adapter_base import BaseCodingAgentAdapter
 from .claude.adapter import CODING_AGENT_ADAPTER as CLAUDE_CODING_AGENT_ADAPTER
+from .claude_otel.adapter import CODING_AGENT_ADAPTER as CLAUDE_OTEL_CODING_AGENT_ADAPTER
 from .codex.adapter import CODING_AGENT_ADAPTER as CODEX_CODING_AGENT_ADAPTER
+from .codex_otel_v2.adapter import CODING_AGENT_ADAPTER as CODEX_OTEL_V2_CODING_AGENT_ADAPTER
 
 _REGISTERED_CODING_AGENT_ADAPTERS: tuple[BaseCodingAgentAdapter, ...] = (
     CODEX_CODING_AGENT_ADAPTER,
+    CODEX_OTEL_V2_CODING_AGENT_ADAPTER,
     CLAUDE_CODING_AGENT_ADAPTER,
+    CLAUDE_OTEL_CODING_AGENT_ADAPTER,
 )
 
 _CODING_AGENT_ADAPTERS_BY_NAME: dict[str, BaseCodingAgentAdapter] = {}

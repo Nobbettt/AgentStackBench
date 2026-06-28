@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-06-19 from upstream ContextBench.
-# Summary of changes: capture command executions in coding-agent invocation results.
+# Summary of changes: capture command executions and context-scoring policy in coding-agent invocation results.
 
 """Base interfaces for coding-agent adapter registration."""
 
@@ -14,6 +14,9 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from ..coding_agents.types import CommandExecution, CommandResult, StructuredOutput, TokenUsage, ToolCall
 
+AGENT_REPORT_CONTEXT_SOURCE = "agent_report"
+OTEL_TOOL_RESULTS_CONTEXT_SOURCE = "otel_tool_results"
+
 if TYPE_CHECKING:
     from .base import BaseCodingAgentParser
     from ..coding_agents.runtime_backends import RuntimeSetupResult
@@ -26,6 +29,28 @@ class PreparedCodingAgentRuntime:
     env: dict[str, str] | None = None
     state: dict[str, Any] = field(default_factory=dict)
     execution_backend: Any | None = None
+
+
+@dataclass(frozen=True)
+class RuntimePreflightContext:
+    """Run-suite runtime configuration visible to adapter preflight checks."""
+
+    variant_name: str
+    runtime_backend: str
+    runtime_image_source: str
+    runtime_env: dict[str, str]
+
+
+@dataclass(frozen=True)
+class RuntimePreflightFailure:
+    """Actionable adapter preflight failure reported before task execution."""
+
+    variant: str
+    agent: str
+    error: str
+
+    def to_json(self) -> dict[str, object]:
+        return {"variant": self.variant, "agent": self.agent, "error": self.error}
 
 
 def expose_workspace_bin_on_path(env: dict[str, str], env_overrides: dict[str, str] | None) -> None:
@@ -77,6 +102,40 @@ class BaseCodingAgentAdapter(ABC):
     supported_reasoning_efforts: frozenset[str] = frozenset()
     supported_runtime_target_roots: frozenset[str] = frozenset()
     supports_available_tools: bool = False
+    scored_context_source: str = AGENT_REPORT_CONTEXT_SOURCE
+    score_inferred_context: bool = False
+
+    def prepare_runtime_writable_mounts(self, *, task_dir: Path) -> tuple[Path, ...]:
+        """Prepare adapter-specific writable runtime directories for task execution."""
+
+        del task_dir
+        return ()
+
+    def extra_runtime_readonly_mounts(
+        self,
+        *,
+        runtime_backend: str,
+        runtime_env: dict[str, str],
+    ) -> tuple[Path, ...]:
+        """Return adapter-specific read-only mounts needed by the task runtime."""
+
+        del runtime_backend, runtime_env
+        return ()
+
+    def runtime_preflight_failures(
+        self,
+        *,
+        context: RuntimePreflightContext,
+    ) -> tuple[RuntimePreflightFailure, ...]:
+        """Return configuration failures that should abort before tasks start."""
+
+        del context
+        return ()
+
+    def scrub_runtime_secrets(self, *, task_dir: Path) -> None:
+        """Remove adapter-specific runtime state that may contain credentials."""
+
+        del task_dir
 
     @property
     def all_names(self) -> tuple[str, ...]:

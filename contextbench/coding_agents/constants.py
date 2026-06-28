@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-23 from upstream ContextBench.
+# Summary of changes: add OTEL-backed Codex and Claude agent constants.
 
 """Constants for coding-agent integrations."""
 
@@ -17,13 +20,16 @@ DEFAULT_CACHE_DIR = REPO_ROOT / ".cache" / "repos"
 # Built-in schemas used to constrain benchmark-facing structured agent answers.
 CODEX_OUTPUT_SCHEMA_PATH = REPO_ROOT / "contextbench" / "agents" / "codex" / "output.schema.json"
 CLAUDE_OUTPUT_SCHEMA_PATH = REPO_ROOT / "contextbench" / "agents" / "claude" / "output.schema.json"
+CLAUDE_OTEL_OUTPUT_SCHEMA_PATH = REPO_ROOT / "contextbench" / "agents" / "claude_otel" / "output.schema.json"
 # Pinned local Docker images for deterministic benchmark infrastructure.
 DEFAULT_CODEX_RUNTIME_IMAGE = "contextbench-codex-runtime:codex-cli-0.122.0"
 DEFAULT_CLAUDE_RUNTIME_IMAGE = "contextbench-claude-runtime:claude-code-2.1.126"
 DEFAULT_CLAUDE_RUNTIME_AMD64_IMAGE = "contextbench-claude-runtime:claude-code-2.1.126-linux-amd64"
 DEFAULT_AGENT_RUNTIME_IMAGES = {
     "codex": DEFAULT_CODEX_RUNTIME_IMAGE,
+    "codex-otel-v2": DEFAULT_CODEX_RUNTIME_IMAGE,
     "claude": DEFAULT_CLAUDE_RUNTIME_IMAGE,
+    "claude-otel": DEFAULT_CLAUDE_RUNTIME_IMAGE,
 }
 DEFAULT_POSTPROCESS_RUNTIME_IMAGE = "contextbench-postprocess:2026-04-23"
 

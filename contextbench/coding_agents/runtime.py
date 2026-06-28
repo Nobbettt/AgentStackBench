@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-05-20 from upstream ContextBench.
-# Summary of changes: support setup prompts and capture untracked files in benchmark patches.
+# Summary of changes: support setup prompts, OTel agent runtimes, and untracked-file patch capture.
 
 """Runtime helpers for Codex and Claude CLI execution."""
 
@@ -23,16 +23,13 @@ from ..agents.claude.runtime import (
     prepare_runtime_env as prepare_claude_runtime_env,
     prepare_runtime_files as prepare_claude_runtime_files,
     run_invocation as _run_claude_invocation,
-    runtime_root as claude_runtime_root,
     validate_auth as validate_claude_auth,
     validate_isolation as validate_claude_isolation,
 )
 from ..agents.codex.runtime import (
     build_command as build_codex_command,
-    codex_tool_bundle_root,
     prepare_runtime_env as prepare_codex_runtime_env,
     run_invocation as _run_codex_invocation,
-    runtime_root as codex_runtime_root,
 )
 from ..agents.registry import get_coding_agent_adapter
 from .constants import DEFAULT_AGENT_RUNTIME_IMAGES
@@ -274,6 +271,9 @@ def tool_call_succeeded(call: dict[str, object]) -> bool:
         return True
     if payload.get("ok") is False:
         return False
+    decision = str(payload.get("decision") or "").strip().lower()
+    if decision in {"block", "blocked", "deny", "denied", "reject", "rejected"}:
+        return False
     result = payload.get("result")
     if isinstance(result, dict) and result.get("ok") is False:
         return False
@@ -436,14 +436,6 @@ def build_setup_contamination_record(
     if untracked_files and not diff_text.strip():
         record["notes"] = "Unscored setup created untracked files before the scored prompt."
     return record
-
-
-def scrub_runtime_secrets(*, agent: str, task_dir: Path) -> None:
-    if agent == "codex":
-        shutil.rmtree(codex_runtime_root(task_dir), ignore_errors=True)
-        return
-    if agent == "claude":
-        shutil.rmtree(claude_runtime_root(task_dir), ignore_errors=True)
 
 
 def _runtime_failure_metadata(
@@ -700,18 +692,8 @@ def run_coding_agent_task(
 
     task_dir = (output_dir / safe_path_component(task.get("instance_id") or task.get("original_inst_id") or "task")).resolve()
     ensure_dir(task_dir)
-    extra_runtime_mounts: list[Path] = []
+    extra_runtime_mounts = list(adapter.prepare_runtime_writable_mounts(task_dir=task_dir))
     extra_runtime_readonly_mounts: list[Path] = []
-    if agent == "codex":
-        codex_runtime_dir = codex_runtime_root(task_dir)
-        shutil.rmtree(codex_runtime_dir, ignore_errors=True)
-        ensure_dir(codex_runtime_dir)
-        extra_runtime_mounts.append(codex_runtime_dir)
-    elif agent == "claude":
-        claude_runtime_dir = claude_runtime_root(task_dir)
-        shutil.rmtree(claude_runtime_dir, ignore_errors=True)
-        ensure_dir(claude_runtime_dir)
-        extra_runtime_mounts.append(claude_runtime_dir)
 
     runtime_env_template_env = {
         **dict(runtime_config.env or {}),
@@ -723,10 +705,12 @@ def run_coding_agent_task(
         runtime_config,
         env={str(key): str(value) for key, value in dict(expanded_runtime_env).items()},
     )
-    if agent == "codex" and runtime_config.backend == "docker":
-        bundle_root = codex_tool_bundle_root(runtime_config.env)
-        if bundle_root is not None:
-            extra_runtime_readonly_mounts.append(bundle_root)
+    extra_runtime_readonly_mounts.extend(
+        adapter.extra_runtime_readonly_mounts(
+            runtime_backend=runtime_config.backend,
+            runtime_env=runtime_config.env,
+        )
+    )
 
     prompt = build_prompt(task, agent)
     if prompt_preamble:
@@ -1122,7 +1106,8 @@ def run_coding_agent_task(
             completed_at=main_result.completed_at,
             setup_run=setup_run,
         )
-        record["available_tools"] = list(main_result.available_tools)
+        if adapter.supports_available_tools or main_result.available_tools:
+            record["available_tools"] = list(main_result.available_tools)
         record["command_executions"] = list(main_result.command_executions)
         if main_result.persisted_tool_results:
             record["persisted_tool_results"] = list(main_result.persisted_tool_results)
@@ -1195,4 +1180,4 @@ def run_coding_agent_task(
     finally:
         if not runtime_closed:
             task_runtime.close(success=runtime_success)
-        scrub_runtime_secrets(agent=agent, task_dir=task_dir)
+        adapter.scrub_runtime_secrets(task_dir=task_dir)

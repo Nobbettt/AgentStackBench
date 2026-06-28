@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-06-19 from upstream ContextBench.
-# Summary of changes: normalize command execution metadata from coding-agent responses.
+# Summary of changes: normalize command execution metadata and OTEL parser contracts from coding-agent responses.
 
 """Shared base classes for agent-specific response parsers."""
 
@@ -90,3 +90,26 @@ class BaseCodingAgentParser(ABC):
 
         record = self.normalize_record(source)
         return convert_run_record(record, parser=self)["traj_data"]
+
+
+class BaseOtelAgentParser(BaseCodingAgentParser):
+    """Parser contract for agents whose scored context is derived from OTEL data."""
+
+    @abstractmethod
+    def has_successful_tool_result_event(self, raw_response: CodingAgentRawResponse | object) -> bool:
+        """Return whether telemetry contains at least one successful tool-result event."""
+
+    @staticmethod
+    def trajectory_has_evaluable_context(trajectory: dict[str, object] | None) -> bool:
+        if not isinstance(trajectory, dict):
+            return False
+        files = trajectory.get("pred_files")
+        if isinstance(files, list) and any(str(item).strip() for item in files):
+            return True
+        spans = trajectory.get("pred_spans")
+        if isinstance(spans, dict) and any(bool(value) for value in spans.values()):
+            return True
+        symbols = trajectory.get("pred_symbols")
+        if isinstance(symbols, dict) and any(bool(value) for value in symbols.values()):
+            return True
+        return False

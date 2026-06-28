@@ -1,4 +1,6 @@
 
+# SPDX-License-Identifier: Apache-2.0
+
 """Codex coding-agent adapter registration."""
 
 from __future__ import annotations
@@ -13,8 +15,10 @@ from ..adapter_base import (
     expose_workspace_bin_on_path,
 )
 from ...coding_agents.constants import CODEX_OUTPUT_SCHEMA_PATH
+from ..runtime_lifecycle import RuntimeRootLifecycleMixin
 from .parser import CodexAgentParser
 from .prompting import build_prompt
+from .tool_bundle import CodexToolBundleSupportMixin
 
 _SUPPORTED_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
 _SUPPORTED_RUNTIME_TARGET_ROOTS = frozenset(
@@ -30,7 +34,7 @@ _SUPPORTED_RUNTIME_TARGET_ROOTS = frozenset(
 )
 
 
-class CodexAdapter(BaseCodingAgentAdapter):
+class CodexAdapter(CodexToolBundleSupportMixin, RuntimeRootLifecycleMixin, BaseCodingAgentAdapter):
     name = "codex"
     aliases = ()
     record_suffix = "codex"
@@ -43,6 +47,11 @@ class CodexAdapter(BaseCodingAgentAdapter):
 
     def create_parser(self) -> CodexAgentParser:
         return CodexAgentParser()
+
+    def runtime_root(self, task_dir: Path) -> Path:
+        from .runtime import runtime_root
+
+        return runtime_root(task_dir)
 
     def prepare_runtime(
         self,

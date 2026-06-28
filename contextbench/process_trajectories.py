@@ -233,7 +233,7 @@ def _collect_paths_by_agent(root: Path, agent: str, recursive: bool) -> List[Pat
                 out.append(d)
     else:
         raise ValueError(
-            f"Unknown agent: {agent}. Use one of: prometheus, swe-agent, mini-swe-agent, openhands, agentless, codex, claude, custom."
+            f"Unknown agent: {agent}. Use one of: prometheus, swe-agent, mini-swe-agent, openhands, agentless, codex, codex-otel-v2, claude, claude-otel, custom."
         )
     return sorted(set(out))
 
@@ -323,7 +323,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
     """Convert trajectory files to evaluation-ready JSONL."""
     if not args.agent:
         print("ERROR: convert requires --agent. Specify which agent produced the trajectories.", file=sys.stderr)
-        print("  --agent: prometheus, openhands, swe-agent, mini-swe-agent, agentless, codex, claude, custom", file=sys.stderr)
+        print("  --agent: prometheus, openhands, swe-agent, mini-swe-agent, agentless, codex, codex-otel-v2, claude, claude-otel, custom", file=sys.stderr)
         print("  Use --agent custom when format is not built-in (edit contextbench/parsers/custom_parser.py)", file=sys.stderr)
         return 2
 
@@ -548,7 +548,7 @@ def main() -> int:
     p_convert.add_argument(
         "--agent", "-a",
         required=True,
-        help="Agent that produced trajectories: prometheus, openhands, swe-agent, mini-swe-agent, agentless, codex, claude, custom (edit contextbench/parsers/custom_parser.py)",
+        help="Agent that produced trajectories: prometheus, openhands, swe-agent, mini-swe-agent, agentless, codex, codex-otel-v2, claude, claude-otel, custom (edit contextbench/parsers/custom_parser.py)",
     )
     p_convert.add_argument("-r", "--recursive", action="store_true", help="Recurse subdirectories")
     p_convert.add_argument(

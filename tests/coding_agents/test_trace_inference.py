@@ -144,7 +144,7 @@ def test_infer_retrieval_step_ignores_broad_rg_line_hits(tmp_path) -> None:
     assert step is None
 
 
-def test_infer_retrieval_step_keeps_single_file_search_file_only(tmp_path) -> None:
+def test_infer_retrieval_step_keeps_single_file_search_with_line_span(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     command = "/bin/zsh -lc 'rg -n \"target\" src/a.py'"
@@ -152,7 +152,18 @@ def test_infer_retrieval_step_keeps_single_file_search_file_only(tmp_path) -> No
 
     step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
 
-    assert step == {"files": ["src/a.py"], "spans": {}, "symbols": {}}
+    assert step == {"files": ["src/a.py"], "spans": {"src/a.py": [{"start": 10, "end": 10}]}, "symbols": {}}
+
+
+def test_infer_retrieval_step_does_not_duplicate_line_only_spans_across_search_files(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = "/bin/zsh -lc 'rg -n \"target\" src/a.py && rg -n \"target\" src/b.py'"
+    output = "10: target in a\n20: target in b\n"
+
+    step = infer_retrieval_step_from_command(command, output_text=output, workspace_path=workspace)
+
+    assert step == {"files": ["src/a.py", "src/b.py"], "spans": {}, "symbols": {}}
 
 
 def test_infer_retrieval_step_ignores_find_file_lists(tmp_path) -> None:
