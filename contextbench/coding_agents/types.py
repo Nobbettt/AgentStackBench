@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-03-22 from upstream ContextBench.
-# Summary of changes: add setup-run metadata and command-execution requirements for coding-agent records.
+# Summary of changes: add setup-run metadata, command executions, and OTEL coding-agent record fields.
 
 """Typed structures for coding-agent integration records."""
 
@@ -19,11 +19,19 @@ class TokenUsage(TypedDict):
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    cost_usd: NotRequired[float]
+    api_response_count: NotRequired[int]
     cache_read_input_tokens: NotRequired[int]
     cache_creation_input_tokens: NotRequired[int]
     cached_input_tokens: NotRequired[int]
     reasoning_tokens: NotRequired[int]
     server_tool_use: NotRequired[ServerToolUseCounts]
+    last_api_response_input_tokens: NotRequired[int]
+    last_api_response_output_tokens: NotRequired[int]
+    last_api_response_total_tokens: NotRequired[int]
+    last_api_response_cache_read_input_tokens: NotRequired[int]
+    last_api_response_cache_creation_input_tokens: NotRequired[int]
+    model_usage: NotRequired[dict[str, dict[str, int | float]]]
 
 
 class CommandResult(TypedDict):
@@ -133,10 +141,10 @@ class TraceInferenceMeta(TypedDict, total=False):
 class StructuredOutput(TypedDict, total=False):
     status: Required[str]
     final_answer: Required[str]
-    retrieved_context_files: Required[list[str]]
-    retrieved_context_spans: Required[list[StructuredContextSpan] | SpanMap]
-    retrieved_context_symbols: Required[list[StructuredContextSymbol] | SymbolMap]
-    notes: Required[str]
+    retrieved_context_files: NotRequired[list[str]]
+    retrieved_context_spans: NotRequired[list[StructuredContextSpan] | SpanMap]
+    retrieved_context_symbols: NotRequired[list[StructuredContextSymbol] | SymbolMap]
+    notes: NotRequired[str]
 
 
 class TrajectoryData(TypedDict):
@@ -150,6 +158,10 @@ class TrajectoryData(TypedDict):
     pred_files_source: NotRequired[list[str]]
     pred_spans_source: NotRequired[list[str]]
     pred_symbols_source: NotRequired[list[str]]
+    context_source: NotRequired[str]
+    context_fallback_used: NotRequired[bool]
+    structured_output_context_available: NotRequired[bool]
+    otel_context_available: NotRequired[bool]
     trace_inference_meta: NotRequired[TraceInferenceMeta]
 
 
@@ -166,7 +178,14 @@ class ClaudeRawResponse(TypedDict):
     response: object | None
 
 
-CodingAgentRawResponse = CodexRawResponse | ClaudeRawResponse
+class ClaudeOtelRawResponse(TypedDict):
+    agent: str
+    response_format: str
+    otel: dict[str, object]
+    command_result: NotRequired[CommandResult]
+
+
+CodingAgentRawResponse = CodexRawResponse | ClaudeRawResponse | ClaudeOtelRawResponse
 
 
 class SetupRunRecord(TypedDict):

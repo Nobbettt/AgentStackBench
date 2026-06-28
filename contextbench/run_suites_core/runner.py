@@ -898,7 +898,7 @@ class RunSuiteRunner:
         missing_claude_docker_auth: list[dict[str, object]] = []
         host_claude_auth_status: dict[str, object] | None = None
         for variant in variants:
-            if variant.agent != "claude" or variant.runtime_backend != "docker":
+            if variant.agent not in {"claude", "claude-otel"} or variant.runtime_backend != "docker":
                 continue
             auth_sources = claude_portable_auth_sources(
                 env={

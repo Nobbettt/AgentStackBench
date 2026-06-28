@@ -538,8 +538,10 @@ def test_codex_parser_infers_trajectory_from_command_events() -> None:
 
     assert traj is not None
     assert traj["pred_files"] == ["sklearn/impute/_iterative.py"]
-    assert traj["pred_spans"]["sklearn/impute/_iterative.py"][0]["start"] == 115
-    assert traj["pred_spans"]["sklearn/impute/_iterative.py"][-1]["end"] == 123
+    assert traj["pred_spans"]["sklearn/impute/_iterative.py"] == [
+        {"start": 115, "end": 123},
+        {"start": 120, "end": 120},
+    ]
 
 def test_claude_parser_infers_trajectory_from_verbose_tool_history() -> None:
     parser = ClaudeAgentParser()
@@ -936,4 +938,6 @@ def test_convert_run_record_keeps_inferred_codex_trajectory_out_of_empty_final_c
     assert converted["traj_data"]["pred_files"] == []
     assert converted["traj_data"]["pred_spans"] == {}
     assert converted["traj_data"]["pred_steps"][0]["files"] == ["sklearn/impute/_iterative.py"]
-    assert converted["traj_data"]["pred_steps"][0]["spans"] == {}
+    assert converted["traj_data"]["pred_steps"][0]["spans"] == {
+        "sklearn/impute/_iterative.py": [{"start": 120, "end": 120}]
+    }

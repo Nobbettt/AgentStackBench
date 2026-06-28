@@ -609,9 +609,10 @@ def _search_command_can_expose_file_content(tokens: list[str], output_text: str)
 
 
 def infer_search_file_step_from_command(command: str, *, output_text: str, workspace_path: Path) -> RetrievalStep | None:
-    """Infer a conservative file-only retrieval from a single-file grep/rg command."""
+    """Infer conservative retrieval context from a single-file grep/rg command."""
 
     files: set[str] = set()
+    spans: SpanMap = {}
     for segment in _split_command_segments(unwrap_shell_command(command)):
         tokens = _tokens_for_segment(segment)
         if not tokens or not _has_grep_like_command(segment, tokens):
@@ -623,7 +624,45 @@ def infer_search_file_step_from_command(command: str, *, output_text: str, works
             files.add(file_path)
     if not files:
         return None
-    return {"files": sorted(files), "spans": {}, "symbols": {}}
+    allow_line_only_spans = len(files) == 1
+    for file_path in sorted(files):
+        spans = merge_span_maps(
+            spans,
+            _single_file_search_spans_from_text(
+                output_text,
+                file_path,
+                workspace_path,
+                allow_line_only_spans=allow_line_only_spans,
+            ),
+        )
+    return {"files": sorted(files), "spans": spans, "symbols": {}}
+
+
+def _single_file_search_spans_from_text(
+    text: str,
+    file_path: str,
+    workspace_path: Path,
+    *,
+    allow_line_only_spans: bool,
+) -> SpanMap:
+    parsed_spans = infer_grep_spans_from_text(text, workspace_path)
+    if file_spans := parsed_spans.get(file_path):
+        return {file_path: file_spans}
+    if not allow_line_only_spans:
+        return {}
+
+    line_spans: list[dict[str, int]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or len(line) > _MAX_GREP_LINE_CHARS:
+            continue
+        line_part, _, _ = line.partition(":")
+        line_no = _coerce_positive_int(line_part)
+        if line_no is not None:
+            line_spans.append({"start": line_no, "end": line_no})
+        if len(line_spans) >= _MAX_GREP_SPAN_MATCHES:
+            break
+    return {file_path: line_spans} if line_spans else {}
 
 
 _GREP_NO_MATCH_MARKERS = ("no matches found", "no files found")
@@ -750,7 +789,10 @@ def trajectory_from_steps(steps: list[RetrievalStep]) -> TrajectoryData | None:
     }
     all_step_files = {file_path for step in steps for file_path in step.get("files", [])}
     files = sorted(grounded_files or all_step_files)
-    spans = merge_span_maps(*(step.get("spans") for step in steps))
+    spans = {
+        file_path: sorted(file_spans, key=lambda span: (span["start"], span["end"]))
+        for file_path, file_spans in merge_span_maps(*(step.get("spans") for step in steps)).items()
+    }
     symbols: SymbolMap = {}
     for step in steps:
         for file_path, names in step.get("symbols", {}).items():

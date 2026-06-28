@@ -23,8 +23,8 @@ def extract_trajectory(traj_file_or_data) -> dict:
     - Prometheus ``.log`` files
     - OpenHands ``output.jsonl`` files or pre-parsed dict payloads with
       ``history``
-    - Coding-agent run records such as ``*.codex-record.json`` and
-      ``*.claude-record.json``
+    - Registered coding-agent run records matching
+      ``*.{adapter.record_suffix}-record.json``
 
     Args:
         traj_file_or_data: File path string or pre-parsed OpenHands data.

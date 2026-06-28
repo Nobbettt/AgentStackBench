@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-06-19 from upstream ContextBench.
-# Summary of changes: capture command executions in coding-agent invocation results.
+# Summary of changes: capture command executions and context-scoring policy in coding-agent invocation results.
 
 """Base interfaces for coding-agent adapter registration."""
 
@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from ..coding_agents.types import CommandExecution, CommandResult, StructuredOutput, TokenUsage, ToolCall
+
+AGENT_REPORT_CONTEXT_SOURCE = "agent_report"
+OTEL_TOOL_RESULTS_CONTEXT_SOURCE = "otel_tool_results"
 
 if TYPE_CHECKING:
     from .base import BaseCodingAgentParser
@@ -77,6 +80,8 @@ class BaseCodingAgentAdapter(ABC):
     supported_reasoning_efforts: frozenset[str] = frozenset()
     supported_runtime_target_roots: frozenset[str] = frozenset()
     supports_available_tools: bool = False
+    scored_context_source: str = AGENT_REPORT_CONTEXT_SOURCE
+    score_inferred_context: bool = False
 
     @property
     def all_names(self) -> tuple[str, ...]:

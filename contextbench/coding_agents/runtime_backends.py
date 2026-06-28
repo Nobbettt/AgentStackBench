@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-27 from upstream ContextBench.
+# Summary of changes: add Docker host mapping for OTEL collector access.
 
 """Execution backends for coding-agent task commands."""
 
@@ -220,6 +223,8 @@ class DockerTaskRuntime(BaseTaskRuntime):
             self.container_name,
             "--workdir",
             str(self.workspace_path),
+            "--add-host",
+            "host.docker.internal:host-gateway",
         ]
         if self.config.platform:
             command.extend(["--platform", self.config.platform])

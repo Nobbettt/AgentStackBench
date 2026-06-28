@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-04-16 from upstream ContextBench.
 # Summary of changes: add regression coverage for record-path resolution and provenance-source attribution.
 
@@ -59,6 +60,54 @@ def test_convert_run_record_uses_reported_retrieval(make_final_output, make_reco
     assert converted["traj_data"]["pred_files_source"] == ["agent_report"]
     assert converted["traj_data"]["pred_spans_source"] == ["agent_report"]
     assert converted["traj_data"]["pred_symbols_source"] == ["agent_report"]
+
+
+def test_convert_run_record_scores_inferred_context_from_adapter_policy(monkeypatch) -> None:
+    class Parser:
+        def load_raw_response(self, record):
+            return record.get("raw_response")
+
+        def infer_trajectory_data(self, raw_response, *, record):
+            return {
+                "pred_steps": [{"files": ["telemetry.py"], "spans": {}, "symbols": {}}],
+                "pred_files": ["telemetry.py"],
+                "pred_spans": {},
+                "pred_symbols": {},
+            }
+
+    class Adapter:
+        scored_context_source = "custom_telemetry"
+        score_inferred_context = True
+
+        def create_parser(self):
+            return Parser()
+
+    monkeypatch.setattr("contextbench.coding_agents.conversion._adapter_for_agent", lambda agent: Adapter())
+    record = {
+        "agent": "future-agent",
+        "instance_id": "task-1",
+        "workspace_path": "/tmp/workspace",
+        "raw_response": {"events": []},
+        "final_output": {
+            "task_id": "task-1",
+            "status": "completed",
+            "final_answer": "done",
+            "retrieved_context_files": ["reported.py"],
+            "retrieved_context_spans": [],
+            "retrieved_context_symbols": [],
+        },
+    }
+
+    converted = convert_run_record(record)
+    traj = converted["traj_data"]
+
+    assert traj["pred_files"] == ["telemetry.py"]
+    assert traj["pred_files_source"] == ["custom_telemetry"]
+    assert traj["pred_files_provenance"] == {"telemetry.py": "custom_telemetry"}
+    assert traj["context_source"] == "custom_telemetry"
+    assert traj["context_fallback_used"] is False
+    assert traj["structured_output_context_available"] is False
+    assert traj["otel_context_available"] is False
 
 
 def test_convert_run_record_rejects_conflicting_agent_task_id(make_final_output, make_record) -> None:
@@ -519,6 +568,77 @@ def test_convert_records_to_jsonl_resolves_host_absolute_raw_response_sidecar(tm
     assert predictions[0]["traj_data"]["pred_files"] == []
     assert predictions[0]["traj_data"]["pred_files_source"] == []
     assert predictions[0]["traj_data"]["pred_steps"][0]["files"] == ["pkg/mod.py"]
+
+
+def test_convert_records_to_jsonl_remaps_host_absolute_record_path_in_postprocess_mount(tmp_path) -> None:
+    source_dir = tmp_path / "variants" / "codex-otel-v2" / "agent_runs" / "codex-otel-v2"
+    task_dir = source_dir / "Verified" / "task-1"
+    task_dir.mkdir(parents=True)
+    record_path = task_dir / "task.codex-otel-v2-record.json"
+    raw_response_path = task_dir / "raw-response.json"
+    raw_response_path.write_text(
+        json.dumps(
+            {
+                "agent": "codex-otel-v2",
+                "response_format": "otlp-json",
+                "otel": {
+                    "logs": [
+                        {
+                            "signal": "log",
+                            "name": "codex.tool_result",
+                            "attributes": {
+                                "tool_name": "exec_command",
+                                "arguments": "{\"cmd\":\"sed -n '1,5p' pkg/mod.py\"}",
+                                "output": "line 1\nline 2\n",
+                                "success": True,
+                            },
+                        }
+                    ],
+                    "traces": [],
+                    "metrics": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    record_path.write_text(
+        json.dumps(
+            {
+                "agent": "codex-otel-v2",
+                "instance_id": "task-1",
+                "workspace_path": "/workspaces/task-1",
+                "repo_url": "https://github.com/example/repo.git",
+                "commit": "abc123",
+                "raw_response_path": "/Users/alice/private/run/raw-response.json",
+                "model_patch": "",
+                "final_output": {
+                    "task_id": "task-1",
+                    "status": "completed",
+                    "final_answer": "done",
+                    "notes": "",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    task_results = source_dir.parent.parent / "task-results.jsonl"
+    host_record_path = (
+        "/Users/alice/private/run/variants/codex-otel-v2/agent_runs/codex-otel-v2/"
+        "Verified/task-1/task.codex-otel-v2-record.json"
+    )
+    task_results.write_text(
+        json.dumps({"instance_id": "task-1", "bench": "Verified", "record_path": host_record_path}) + "\n",
+        encoding="utf-8",
+    )
+    out_path = tmp_path / "pred.jsonl"
+
+    summary = convert_records_to_jsonl(source_dir=source_dir, expected_agent="codex-otel-v2", out_path=out_path)
+    predictions = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines()]
+
+    assert summary["prediction_count"] == 1
+    assert summary["missing_record_path_count"] == 0
+    assert summary["conversion_error_count"] == 0
+    assert predictions[0]["traj_data"]["context_source"] == "otel_tool_results"
 
 
 def test_convert_run_record_preserves_symbols_when_merging_duplicate_steps() -> None:

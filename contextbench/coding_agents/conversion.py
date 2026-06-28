@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-04-17 from upstream ContextBench.
-# Summary of changes: resolve task-result record paths robustly, tighten provenance source attribution, and keep final context scoring explicit.
+# Summary of changes: resolve task-result record paths robustly, tighten provenance source attribution, and support OTEL v2 context scoring.
 
 """Conversion helpers from coding-agent records to ContextBench trajectories."""
 
@@ -9,7 +9,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
-from ..agents.registry import get_coding_agent_adapter, normalize_coding_agent_name
+from ..agents.adapter_base import (
+    AGENT_REPORT_CONTEXT_SOURCE,
+    OTEL_TOOL_RESULTS_CONTEXT_SOURCE,
+    BaseCodingAgentAdapter,
+)
+from ..agents.registry import get_coding_agent_adapter, iter_coding_agent_adapters, normalize_coding_agent_name
 from ..parsers.trajectory import effective_file_list
 from .files import read_json, read_jsonl
 from .records import merge_span_maps, normalize_retrieval_steps, normalize_span_map, normalize_symbol_map
@@ -17,6 +22,9 @@ from .trace_inference import merge_retrieval_steps
 from .types import SpanProvenanceMap, SymbolMap, SymbolProvenanceMap, TrajectoryData
 
 _ARTIFACT_PATH_ERRORS_FIELD = "_artifact_path_errors"
+_AGENT_REPORT_SOURCE = AGENT_REPORT_CONTEXT_SOURCE
+_OTEL_TOOL_RESULTS_SOURCE = OTEL_TOOL_RESULTS_CONTEXT_SOURCE
+_TRACE_INFERENCE_SOURCE = "trace_inference"
 
 
 def _empty_conversion_summary() -> dict[str, object]:
@@ -71,11 +79,16 @@ def record_is_convertible(record: dict[str, object], expected_agent: str | None 
     return isinstance(final_output, dict)
 
 
-def _parser_for_agent(agent: str):
+def _adapter_for_agent(agent: str) -> BaseCodingAgentAdapter | None:
     try:
-        return get_coding_agent_adapter(agent).create_parser()
+        return get_coding_agent_adapter(agent)
     except ValueError:
         return None
+
+
+def _parser_for_agent(agent: str):
+    adapter = _adapter_for_agent(agent)
+    return adapter.create_parser() if adapter is not None else None
 
 
 def _find_task_results_path(source: Path) -> Path | None:
@@ -108,7 +121,16 @@ def resolve_record_path(
 
     candidate = Path(raw_path)
     if candidate.is_absolute():
-        return candidate if candidate.exists() else None
+        if candidate.exists():
+            return candidate
+        if task_results_path is not None:
+            parts = candidate.parts
+            if "agent_runs" in parts:
+                index = parts.index("agent_runs")
+                remapped = (task_results_path.parent / Path(*parts[index:])).resolve(strict=False)
+                if remapped.exists():
+                    return remapped
+        return None
 
     bases: list[Path] = []
     if task_results_path is not None:
@@ -205,6 +227,43 @@ def _merge_source_lists(*values: list[str]) -> list[str]:
             if item not in merged:
                 merged.append(item)
     return merged
+
+
+def _dedupe_spans(spans_by_file: dict[str, list[dict[str, int]]]) -> dict[str, list[dict[str, int]]]:
+    return {
+        file_path: [
+            span
+            for _, span in sorted(
+                {
+                    (span["start"], span["end"]): span
+                    for span in spans
+                }.items()
+            )
+        ]
+        for file_path, spans in spans_by_file.items()
+        if spans
+    }
+
+
+def _effective_context_files(
+    *,
+    files: list[str],
+    spans: dict[str, list[dict[str, int]]],
+    symbols: SymbolMap,
+) -> set[str]:
+    return set(effective_file_list(files=files, spans=spans, symbols=symbols))
+
+
+def _context_scoring_for_record(record: dict[str, object]) -> tuple[str, bool]:
+    raw_agent = str(record.get("agent") or "").strip().lower()
+    adapter = _adapter_for_agent(normalize_coding_agent_name(raw_agent) or raw_agent)
+    if adapter is None:
+        return _AGENT_REPORT_SOURCE, False
+    return adapter.scored_context_source, adapter.score_inferred_context
+
+
+def _registered_record_globs() -> tuple[str, ...]:
+    return tuple(f"*.{adapter.record_suffix}-record.json" for adapter in iter_coding_agent_adapters())
 
 
 class ContextPathValidationError(ValueError):
@@ -456,8 +515,9 @@ def convert_records_with_summary(
 
 def _provenance_precedence(source: str) -> int:
     order = {
-        "agent_report": 3,
-        "trace_inference": 2,
+        _OTEL_TOOL_RESULTS_SOURCE: 4,
+        _AGENT_REPORT_SOURCE: 3,
+        _TRACE_INFERENCE_SOURCE: 2,
     }
     return order.get(source, 0)
 
@@ -539,6 +599,7 @@ def convert_run_record(record: dict[str, object], parser=None) -> dict[str, obje
             reported_task_id=reported_task_id,
         )
     task_id = record_instance_id or record_original_inst_id or reported_task_id
+    scored_context_source, score_inferred_context = _context_scoring_for_record(record)
     parser = parser or _parser_for_agent(str(record.get("agent") or ""))
     workspace_path = _workspace_path_for_record(record)
     invalid_context_paths: list[str] = []
@@ -550,25 +611,25 @@ def convert_run_record(record: dict[str, object], parser=None) -> dict[str, obje
             inferred_traj = parser.infer_trajectory_data(raw_response, record=record)
 
     retrieval_steps = _normalize_context_steps(
-        final_output.get("retrieval_steps"),
+        [] if score_inferred_context else final_output.get("retrieval_steps"),
         workspace_path=workspace_path,
         invalid_paths=invalid_context_paths,
         strict=True,
     )
     retrieved_context_files = _normalize_context_file_list(
-        final_output.get("retrieved_context_files") or [],
+        [] if score_inferred_context else final_output.get("retrieved_context_files") or [],
         workspace_path=workspace_path,
         invalid_paths=invalid_context_paths,
         strict=True,
     )
     retrieved_context_spans = _normalize_context_span_map(
-        final_output.get("retrieved_context_spans"),
+        {} if score_inferred_context else final_output.get("retrieved_context_spans"),
         workspace_path=workspace_path,
         invalid_paths=invalid_context_paths,
         strict=True,
     )
     retrieved_context_symbols = _normalize_context_symbol_map(
-        final_output.get("retrieved_context_symbols"),
+        {} if score_inferred_context else final_output.get("retrieved_context_symbols"),
         workspace_path=workspace_path,
         invalid_paths=invalid_context_paths,
         strict=True,
@@ -578,6 +639,24 @@ def convert_run_record(record: dict[str, object], parser=None) -> dict[str, obje
 
     inferred_steps = _normalize_context_steps(
         inferred_traj.get("pred_steps", []) if inferred_traj else [],
+        workspace_path=workspace_path,
+        invalid_paths=invalid_context_paths,
+        strict=False,
+    )
+    inferred_context_files = _normalize_context_file_list(
+        inferred_traj.get("pred_files", []) if inferred_traj else [],
+        workspace_path=workspace_path,
+        invalid_paths=invalid_context_paths,
+        strict=False,
+    )
+    inferred_context_spans = _normalize_context_span_map(
+        inferred_traj.get("pred_spans", {}) if inferred_traj else {},
+        workspace_path=workspace_path,
+        invalid_paths=invalid_context_paths,
+        strict=False,
+    )
+    inferred_context_symbols = _normalize_context_symbol_map(
+        inferred_traj.get("pred_symbols", {}) if inferred_traj else {},
         workspace_path=workspace_path,
         invalid_paths=invalid_context_paths,
         strict=False,
@@ -603,67 +682,80 @@ def convert_run_record(record: dict[str, object], parser=None) -> dict[str, obje
         for step in pred_steps
     ]
     # Final ContextBench quality metrics are computed from traj_data.pred_*.
-    # Keep inferred/retrieval-step data in pred_steps for trajectory diagnostics, but
-    # do not promote broad trace evidence such as `rg --files` output into final
-    # scored context. This mirrors upstream MiniSWE extraction where final context
-    # is explicit PATCH_CONTEXT only and command fallback never affects final.
-    pred_spans = merge_span_maps(retrieved_context_spans)
-    pred_spans = {
-        file_path: [
-            span
-            for _, span in sorted(
-                {
-                    (span["start"], span["end"]): span
-                    for span in spans
-                }.items()
-            )
-        ]
-        for file_path, spans in pred_spans.items()
-        if spans
-    }
+    # For v1-style agents, keep inferred data in pred_steps for diagnostics only.
+    # Some adapters score context inferred from raw telemetry/tool results instead
+    # of agent-reported structured output. The adapter declares that policy.
+    inferred_scored_context_files = _effective_context_files(
+        files=inferred_context_files,
+        spans=inferred_context_spans,
+        symbols=inferred_context_symbols,
+    )
+    agent_context_files = _effective_context_files(
+        files=retrieved_context_files,
+        spans=retrieved_context_spans,
+        symbols=retrieved_context_symbols,
+    )
+    has_inferred_scored_file_context = bool(inferred_scored_context_files)
+    use_inferred_scored_context = score_inferred_context and has_inferred_scored_file_context
+
     pred_symbols: SymbolMap = {}
-    for mapping in (retrieved_context_symbols,):
+    symbol_mappings = (inferred_context_symbols,) if use_inferred_scored_context else (retrieved_context_symbols,)
+    for mapping in symbol_mappings:
         for file_path, names in mapping.items():
             pred_symbols.setdefault(file_path, []).extend(names)
     pred_symbols = {file_path: sorted(set(names)) for file_path, names in pred_symbols.items() if names}
+
+    if use_inferred_scored_context:
+        pred_spans = _dedupe_spans(inferred_context_spans)
+        pred_file_inputs = inferred_context_files
+    else:
+        pred_spans = _dedupe_spans(merge_span_maps(retrieved_context_spans))
+        pred_file_inputs = retrieved_context_files
+
     pred_files = sorted(
         effective_file_list(
-            files=retrieved_context_files,
-            spans=pred_spans,
-            symbols=pred_symbols,
-        )
-    )
-
-    final_agent_report_files = set(
-        effective_file_list(
-            files=retrieved_context_files,
+            files=pred_file_inputs,
             spans=pred_spans,
             symbols=pred_symbols,
         )
     )
 
     pred_files_provenance: dict[str, str] = {}
-    all_provenance_files = sorted(set(pred_files))
-    for file_path in all_provenance_files:
-        pred_files_provenance[file_path] = "agent_report"
+    for file_path in pred_files:
+        if use_inferred_scored_context:
+            pred_files_provenance[file_path] = scored_context_source
+        elif file_path in agent_context_files:
+            pred_files_provenance[file_path] = _AGENT_REPORT_SOURCE
 
-    pred_spans_provenance = _merge_span_provenance(
-        _spans_to_provenance(retrieved_context_spans, "agent_report"),
-    )
-    pred_symbols_provenance = _merge_symbol_provenance(
-        _symbols_to_provenance(retrieved_context_symbols, "agent_report"),
-    )
+    if use_inferred_scored_context:
+        pred_spans_provenance = _merge_span_provenance(
+            _spans_to_provenance(inferred_context_spans, scored_context_source),
+        )
+        pred_symbols_provenance = _merge_symbol_provenance(
+            _symbols_to_provenance(inferred_context_symbols, scored_context_source),
+        )
+    else:
+        pred_spans_provenance = _merge_span_provenance(
+            _spans_to_provenance(retrieved_context_spans, _AGENT_REPORT_SOURCE),
+        )
+        pred_symbols_provenance = _merge_symbol_provenance(
+            _symbols_to_provenance(retrieved_context_symbols, _AGENT_REPORT_SOURCE),
+        )
 
-    has_reported_file_context = bool(final_agent_report_files)
+    has_reported_file_context = bool(agent_context_files)
+    has_otel_file_context = use_inferred_scored_context and scored_context_source == _OTEL_TOOL_RESULTS_SOURCE
 
     pred_files_source = _merge_source_lists(
-        ["agent_report"] if has_reported_file_context else [],
+        [scored_context_source] if use_inferred_scored_context and has_inferred_scored_file_context else [],
+        [_AGENT_REPORT_SOURCE] if not use_inferred_scored_context and has_reported_file_context else [],
     )
     pred_spans_source = _merge_source_lists(
-        ["agent_report"] if retrieved_context_spans else [],
+        [scored_context_source] if use_inferred_scored_context and inferred_context_spans else [],
+        [_AGENT_REPORT_SOURCE] if not use_inferred_scored_context and retrieved_context_spans else [],
     )
     pred_symbols_source = _merge_source_lists(
-        ["agent_report"] if retrieved_context_symbols else [],
+        [scored_context_source] if use_inferred_scored_context and inferred_context_symbols else [],
+        [_AGENT_REPORT_SOURCE] if not use_inferred_scored_context and retrieved_context_symbols else [],
     )
 
     traj_data: TrajectoryData = {
@@ -677,6 +769,10 @@ def convert_run_record(record: dict[str, object], parser=None) -> dict[str, obje
         "pred_files_source": pred_files_source,
         "pred_spans_source": pred_spans_source,
         "pred_symbols_source": pred_symbols_source,
+        "context_source": scored_context_source if use_inferred_scored_context else (_AGENT_REPORT_SOURCE if has_reported_file_context else ""),
+        "context_fallback_used": False,
+        "structured_output_context_available": has_reported_file_context,
+        "otel_context_available": has_otel_file_context,
     }
     if inferred_meta:
         traj_data["trace_inference_meta"] = inferred_meta
@@ -743,8 +839,7 @@ def load_predictions_with_summary_from_path(
                 expected_agent=expected_agent,
             )
         records: list[dict[str, object]] = []
-        suffixes = ("*.codex-record.json", "*.claude-record.json")
-        for pattern in suffixes:
+        for pattern in _registered_record_globs():
             for record_path in sorted(source.rglob(pattern)):
                 records.append(record_with_resolved_artifact_paths(read_json(record_path), record_path=record_path))
         return convert_records_with_summary(records, expected_agent=expected_agent)
