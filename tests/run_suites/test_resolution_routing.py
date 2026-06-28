@@ -163,7 +163,7 @@ def test_evaluate_resolution_for_suite_preserves_successful_benches_when_one_bac
     assert summary["per_bench"]["Verified"]["prediction_ids"] == ["psf__requests-1000", "psf__requests-1001"]
     assert summary["per_bench"]["Verified"]["unknown_ids"] == []
 
-def test_evaluate_resolution_for_suite_marks_partial_when_backend_succeeds_with_missing_patches(tmp_path: Path, monkeypatch) -> None:
+def test_evaluate_resolution_for_suite_counts_missing_patches_as_unresolved(tmp_path: Path, monkeypatch) -> None:
     variant_dir = tmp_path / "variant"
     source_dir = variant_dir / "agent_runs" / "codex"
     rows: list[str] = []
@@ -220,9 +220,15 @@ def test_evaluate_resolution_for_suite_marks_partial_when_backend_succeeds_with_
         max_workers=1,
     )
 
-    assert summary["status"] == "partial"
-    assert summary["is_partial"] is True
-    assert summary["partial_benches"] == ["Verified"]
+    assert summary["status"] == "completed"
+    assert summary["is_partial"] is False
+    assert summary["partial_benches"] == []
     assert summary["coverage_of_attempted_tasks"] == 0.5
-    assert summary["evaluated_coverage_of_attempted_tasks"] == 0.5
-    assert summary["per_bench"]["Verified"]["is_partial"] is True
+    assert summary["evaluated_coverage_of_attempted_tasks"] == 1.0
+    assert summary["evaluated_task_count"] == 2
+    assert summary["resolved_count"] == 1
+    assert summary["pass_at_1"] == 0.5
+    assert summary["pass_at_1_on_evaluated"] == 0.5
+    assert summary["per_bench"]["Verified"]["is_partial"] is False
+    assert summary["per_bench"]["Verified"]["unresolved_ids"] == ["psf__requests-1001"]
+    assert summary["per_bench"]["Verified"]["no_patch_ids"] == ["psf__requests-1001"]

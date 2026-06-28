@@ -74,6 +74,8 @@ export type ComparisonInstance = {
       missingFinalPathCount?: number;
       missingTrajectoryPathCount?: number;
     };
+    verificationQuality?: VerificationQuality;
+    regressionTest?: RegressionTestDiagnostic;
   };
   quality: {
     file: {
@@ -170,6 +172,36 @@ export type ComparisonInstance = {
   mcp?: McpUseSummary;
 };
 
+export type VerificationQuality = {
+  schemaVersion?: number;
+  strongestVerification?: string | null;
+  successfulRuntimeVerification?: boolean;
+  successfulStaticVerification?: boolean;
+  syntaxOnly?: boolean;
+  dependencyBlocked?: boolean;
+  environmentLimited?: boolean;
+  environmentLimitationMatches?: string[];
+  commandsTotal?: number | null;
+  successfulCommandsTotal?: number | null;
+  failedCommandsTotal?: number | null;
+  commandCategories?: Record<string, number>;
+  successfulCommandCategories?: Record<string, number>;
+  verificationCommands?: Array<{
+    command?: string;
+    category?: string;
+    succeeded?: boolean;
+  }>;
+};
+
+export type RegressionTestDiagnostic = {
+  schemaVersion?: number;
+  addedRegressionTest?: boolean;
+  regressionTestsRun?: boolean | null;
+  addedTestFiles?: string[];
+  coveringCommands?: string[];
+  reason?: string | null;
+};
+
 export type McpToolCount = {
   name: string;
   calls: number;
@@ -178,6 +210,7 @@ export type McpToolCount = {
 
 export type McpToolCallDetail = {
   toolName: string;
+  succeeded?: boolean;
   query?: string;
   topK?: number | null;
   resultCount?: number;
@@ -232,6 +265,8 @@ export type ComparisonInstanceDetailVariant = {
     missingFinalPathCount?: number;
     missingTrajectoryPathCount?: number;
   };
+  verificationQuality?: VerificationQuality;
+  regressionTest?: RegressionTestDiagnostic;
   startedAt?: string;
   completedAt?: string;
   durationMs?: number | null;
@@ -467,6 +502,16 @@ export type ComparisonCard = {
         }>;
       };
       mcp?: McpUseSummary;
+      verification?: {
+        strongestVerificationCounts?: Record<string, number>;
+        successfulRuntimeVerificationRuns?: number;
+        syntaxOnlyRuns?: number;
+        environmentLimitedRuns?: number;
+        addedRegressionTestRuns?: number;
+        addedRegressionTestNotRunRuns?: number;
+        totalCommands?: number;
+        failedCommands?: number;
+      };
     };
     instances?: ComparisonInstance[];
   }>;

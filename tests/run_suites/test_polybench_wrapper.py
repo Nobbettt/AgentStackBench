@@ -144,6 +144,62 @@ def test_poly_wrapper_preserves_official_prebuilt_image_pull(monkeypatch, tmp_pa
     assert captured["kwargs"]["delete_image"] is False
     assert captured["kwargs"]["skip_existing"] is True
     assert captured["kwargs"]["repo_path"].endswith("repos")
+
+
+def test_poly_wrapper_prepare_images_only_uses_selected_rows(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module("contextbench/run_suites_resolution_wrappers/polybench.py", "poly_resolution_wrapper_prepare_images")
+    pred = tmp_path / "predictions.jsonl"
+    pred.write_text('{"instance_id":"task-a","model_patch":"diff"}\n', encoding="utf-8")
+    result_path = tmp_path / "evaluation_results"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        module,
+        "_load_dataset_rows",
+        lambda dataset_name: (
+            [
+                    {
+                        "instance_id": "task-a",
+                        "language": "Python",
+                        "repo": "owner/repo",
+                        "base_commit": "abc",
+                        "Dockerfile": "FROM python:3.11",
+                        "patch": "",
+                        "test_patch": "",
+                        "F2P": [],
+                        "P2P": [],
+                        "test_command": "pytest",
+                        "modified_nodes": [],
+                    }
+                ],
+            ["instance_id", "language", "repo", "base_commit", "Dockerfile"],
+        ),
+    )
+    monkeypatch.setattr(module, "_cleanup_stale_poly_containers", lambda selected_rows, client=None: None)
+
+    def fake_prepare_poly_images(*, selected_rows, work_dir, max_workers):
+        captured["selected_rows"] = selected_rows
+        captured["work_dir"] = work_dir
+        captured["max_workers"] = max_workers
+        return {"status": "completed"}
+
+    monkeypatch.setattr(module, "_prepare_poly_images", fake_prepare_poly_images)
+    monkeypatch.setattr(
+        module,
+        "parse_args",
+        lambda: types.SimpleNamespace(
+            dataset_name="AmazonScience/SWE-PolyBench",
+            predictions_path=pred,
+            result_path=result_path,
+            num_threads=3,
+            prepare_images_only=True,
+        ),
+    )
+
+    assert module.main() == 0
+    assert [row["instance_id"] for row in captured["selected_rows"]] == ["task-a"]
+    assert captured["work_dir"] == result_path.parent
+    assert captured["max_workers"] == 3
 def test_poly_wrapper_fails_clearly_when_dataset_is_missing_prediction_instance(monkeypatch, tmp_path: Path) -> None:
     module = _load_module("contextbench/run_suites_resolution_wrappers/polybench.py", "poly_resolution_wrapper_missing_instance")
 
@@ -372,7 +428,6 @@ def test_poly_wrapper_does_not_patch_docker_build_or_dockerfile_content(tmp_path
     source = Path(module.__file__).read_text(encoding="utf-8")
     assert "_install_verbose_docker_build" not in source
     assert "_patch_python_dockerfile" not in source
-    assert "try_pull_prebuilt_image" not in source
 def test_poly_wrapper_copies_nested_diagnostic_logs(tmp_path: Path) -> None:
     source_dir = tmp_path / "instances" / "task-a"
     build_log = source_dir / "build_logs" / "task-a_build.log"

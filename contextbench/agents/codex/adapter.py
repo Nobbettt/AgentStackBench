@@ -6,7 +6,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from ..adapter_base import BaseCodingAgentAdapter, CodingAgentInvocationResult, PreparedCodingAgentRuntime
+from ..adapter_base import (
+    BaseCodingAgentAdapter,
+    CodingAgentInvocationResult,
+    PreparedCodingAgentRuntime,
+    expose_workspace_bin_on_path,
+)
 from ...coding_agents.constants import CODEX_OUTPUT_SCHEMA_PATH
 from .parser import CodexAgentParser
 from .prompting import build_prompt
@@ -54,9 +59,11 @@ class CodexAdapter(BaseCodingAgentAdapter):
         env = prepare_runtime_env(
             task_dir,
             include_host_env=runtime_backend != "docker",
+            runtime_env=runtime_env,
         )
         if env_overrides:
             env.update(env_overrides)
+        expose_workspace_bin_on_path(env, env_overrides)
         template_env = {
             **dict(runtime_env or {}),
             **dict(env_overrides or {}),

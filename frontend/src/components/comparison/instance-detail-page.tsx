@@ -196,6 +196,7 @@ function renderInstanceDetailTab({
         row={row}
         instanceComparison={instanceComparison}
         viewMode={viewMode}
+        detail={detail}
       />
     );
   }
@@ -337,10 +338,12 @@ function InstanceOverview({
   row,
   instanceComparison,
   viewMode,
+  detail,
 }: {
   row: ReturnType<typeof buildInstanceRows>[number];
   instanceComparison: ComparisonCard;
   viewMode: ComparisonResultsViewMode;
+  detail: ComparisonInstanceDetail | null | undefined;
 }) {
   return (
     <section className="space-y-6">
@@ -350,6 +353,55 @@ function InstanceOverview({
         instanceComparison={instanceComparison}
         viewMode={viewMode}
       />
+      <VerificationDiagnosticsSection detail={detail} viewMode={viewMode} />
+    </section>
+  );
+}
+
+function VerificationDiagnosticsSection({
+  detail,
+  viewMode,
+}: {
+  detail: ComparisonInstanceDetail | null | undefined;
+  viewMode: ComparisonResultsViewMode;
+}) {
+  if (!detail) return null;
+  const variants = detailVariantsForViewMode(detail, viewMode);
+  return (
+    <section className="space-y-4">
+      <SectionTitleWithHelp
+        title="Verification"
+        explanation="Diagnostic-only summary of what the agent ran before finishing. These fields do not affect benchmark scoring."
+      />
+      <div className="grid gap-4 lg:grid-cols-2">
+        {variants.map((variant) => {
+          const verification = variant.verificationQuality;
+          const regression = variant.regressionTest;
+          return (
+            <div key={variant.label} className="rounded-lg bg-background p-5">
+              <div className="text-sm font-medium text-muted-foreground">{variant.name}</div>
+              <dl className="mt-4 grid gap-3 sm:grid-cols-2">
+                <SummaryCard label="Strongest Check" value={formatVerificationLevel(verification?.strongestVerification)} />
+                <SummaryCard label="Runtime Verified" value={verification?.successfulRuntimeVerification ? "Yes" : "No"} />
+                <SummaryCard label="Syntax Only" value={verification?.syntaxOnly ? "Yes" : "No"} />
+                <SummaryCard label="Environment Limited" value={verification?.environmentLimited ? "Yes" : "No"} />
+                <SummaryCard label="Commands" value={String(verification?.commandsTotal ?? 0)} />
+                <SummaryCard label="Added Test" value={formatRegressionTestStatus(regression)} />
+              </dl>
+              {verification?.environmentLimitationMatches?.length ? (
+                <div className="mt-4 text-xs text-muted-foreground">
+                  {verification.environmentLimitationMatches.slice(0, 3).join(" / ")}
+                </div>
+              ) : null}
+              {regression?.addedTestFiles?.length ? (
+                <div className="mt-3 truncate text-xs text-muted-foreground" title={regression.addedTestFiles.join(", ")}>
+                  {regression.addedTestFiles.join(", ")}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
     </section>
   );
 }
@@ -686,6 +738,24 @@ function SummaryCard({ label, value, note, className }: { label: string; value: 
       {note ? <div className="mt-1.5 break-words text-xs leading-5 text-muted-foreground">{note}</div> : null}
     </div>
   );
+}
+
+function formatVerificationLevel(level: string | null | undefined): string {
+  if (!level) return "-";
+  if (level === "repo_tests") return "Tests";
+  if (level === "targeted_runtime") return "Runtime";
+  if (level === "syntax_or_static") return "Static";
+  if (level === "dependency_install") return "Install";
+  if (level === "commands_without_successful_verification") return "Failed";
+  if (level === "no_verification") return "None";
+  return level.replace(/_/g, " ");
+}
+
+function formatRegressionTestStatus(regression: ComparisonInstanceDetail["variants"][number]["regressionTest"]): string {
+  if (!regression || !regression.addedRegressionTest) return "No";
+  if (regression.regressionTestsRun === true) return "Ran";
+  if (regression.regressionTestsRun === false) return "Not run";
+  return "Added";
 }
 
 function DetailControls({

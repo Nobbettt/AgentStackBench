@@ -195,6 +195,7 @@ const comparisonTabs: Array<{ id: ComparisonPageTab; label: string }> = [
   { id: "correlations", label: "Correlations" },
   { id: "languages", label: "Metric Breakdowns" },
   { id: "usage", label: "Skills" },
+  { id: "mcp", label: "MCP" },
   { id: "tools", label: "Tools" },
   { id: "issues", label: "All Tasks" },
 ];

@@ -33,13 +33,13 @@ import {
 } from "@/components/comparison/metric-sections";
 import { getMetricSignificance } from "@/components/comparison/significance";
 import { DeltaIndicator, HelpIcon, MetricDirectionBadge, SignificanceBadge } from "@/components/comparison/shared";
-import { comparisonHasToolUsage, SkillUsageSection, ToolUsageSection } from "@/components/comparison/usage-sections";
+import { comparisonHasMcpUsage, comparisonHasToolUsage, McpUsageSection, SkillUsageSection, ToolUsageSection } from "@/components/comparison/usage-sections";
 import type { ComparisonResultsViewMode, DeltaDisplayMode, MetricDefinition } from "@/components/comparison/types";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 
 export { ComparisonInstanceDetailPage };
 
-export type ComparisonResultsTab = "overview" | "execution" | "resolution" | "context" | "correlations" | "languages" | "resources" | "usage" | "tools" | "issues";
+export type ComparisonResultsTab = "overview" | "execution" | "resolution" | "context" | "correlations" | "languages" | "resources" | "usage" | "mcp" | "tools" | "issues";
 
 export function ComparisonResults({
   comparison,
@@ -84,13 +84,23 @@ export function ComparisonResults({
         {activeTab === "usage" ? (
           <SkillUsageSection comparison={comparison} viewMode={viewMode} deltaDisplayMode={deltaDisplayMode} />
         ) : null}
+        {activeTab === "mcp" ? (
+          comparisonHasMcpUsage(comparison) ? (
+            <McpUsageSection comparison={comparison} viewMode={viewMode} deltaDisplayMode={deltaDisplayMode} />
+          ) : (
+            <section className="rounded-lg bg-background p-5">
+              <h2 className="text-xl font-semibold tracking-tight">MCP Usage</h2>
+              <p className="mt-3 text-sm text-muted-foreground">No MCP tool-call telemetry was exported for this comparison.</p>
+            </section>
+          )
+        ) : null}
         {activeTab === "tools" ? (
           comparisonHasToolUsage(comparison) ? (
             <ToolUsageSection comparison={comparison} viewMode={viewMode} deltaDisplayMode={deltaDisplayMode} />
           ) : (
             <section className="rounded-lg bg-background p-5">
               <h2 className="text-xl font-semibold tracking-tight">Tool Usage</h2>
-              <p className="mt-3 text-sm text-muted-foreground">No tools were used.</p>
+              <p className="mt-3 text-sm text-muted-foreground">No native, non-MCP tool-call telemetry was exported for this comparison.</p>
             </section>
           )
         ) : null}

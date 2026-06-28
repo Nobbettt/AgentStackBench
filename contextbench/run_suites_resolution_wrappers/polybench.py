@@ -1,8 +1,11 @@
 
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 import importlib
 import json
@@ -269,6 +272,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--predictions-path", type=Path, required=True)
     parser.add_argument("--result-path", type=Path, required=True)
     parser.add_argument("--num-threads", type=int, default=1)
+    parser.add_argument("--prepare-images-only", action="store_true")
     return parser.parse_args()
 
 
@@ -279,9 +283,88 @@ def _load_run_evaluation_module():
     return importlib.import_module("poly_bench_evaluation.run_evaluation")
 
 
+def _prepare_poly_image(
+    *,
+    row: dict[str, object],
+    repo_path: Path,
+) -> dict[str, object]:
+    import docker
+    from poly_bench_evaluation.docker_utils import DockerManager
+    from poly_bench_evaluation.repo_utils import RepoManager
+
+    instance_id = str(row.get("instance_id") or "").strip()
+    repo = str(row.get("repo") or "").strip()
+    base_commit = str(row.get("base_commit") or "").strip()
+    language = str(row.get("language") or "").strip()
+    dockerfile = str(row.get("Dockerfile") or "")
+    if not instance_id or not repo or not base_commit or not language or not dockerfile:
+        raise RuntimeError(f"SWE-PolyBench image preparation row is incomplete: {instance_id or row!r}")
+
+    image_id = _poly_image_id(instance_id=instance_id, language=language)
+    client = docker.from_env()
+    docker_manager = DockerManager(image_id=image_id, delete_image=False, client=client)
+    if docker_manager.check_image_local(local_image_name=image_id):
+        return {"instance_id": instance_id, "image": image_id, "status": "local"}
+    if docker_manager.try_pull_prebuilt_image(instance_id):
+        return {"instance_id": instance_id, "image": image_id, "status": "pulled"}
+
+    repo_manager = RepoManager(repo_name=repo, repo_path=str(repo_path))
+    repo_manager.clone_repo()
+    try:
+        repo_manager.checkout_commit(commit_hash=base_commit)
+        if repo_manager.tmp_repo_dir is None:
+            raise RuntimeError(f"SWE-PolyBench repo checkout failed for {instance_id}")
+        build_success = docker_manager.docker_build(
+            repo_path=repo_manager.tmp_repo_dir,
+            dockerfile_content=dockerfile,
+        )
+        if build_success != 0:
+            raise RuntimeError(
+                f"SWE-PolyBench Docker build failed for {instance_id}: "
+                + "\n".join(docker_manager.build_logs[-20:])
+            )
+    finally:
+        repo_manager._cleanup()
+    return {"instance_id": instance_id, "image": image_id, "status": "built"}
+
+
+def _prepare_poly_images(
+    *,
+    selected_rows: list[dict[str, object]],
+    work_dir: Path,
+    max_workers: int,
+) -> dict[str, object]:
+    repo_path = work_dir / "repos"
+    repo_path.mkdir(parents=True, exist_ok=True)
+    worker_count = max(1, int(max_workers))
+    results: list[dict[str, object] | None] = [None] * len(selected_rows)
+    if worker_count == 1:
+        for index, row in enumerate(selected_rows):
+            results[index] = _prepare_poly_image(row=row, repo_path=repo_path)
+    else:
+        with ThreadPoolExecutor(max_workers=min(worker_count, len(selected_rows))) as executor:
+            future_map = {
+                executor.submit(_prepare_poly_image, row=row, repo_path=repo_path): index
+                for index, row in enumerate(selected_rows)
+            }
+            for future in as_completed(future_map):
+                results[future_map[future]] = future.result()
+    summary = {
+        "status": "completed",
+        "instance_count": len(selected_rows),
+        "max_workers": worker_count,
+        "images": [result for result in results if result is not None],
+    }
+    (work_dir / "image-prebuild-summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return summary
+
+
 def main() -> int:
     args = parse_args()
-    run_evaluation = _load_run_evaluation_module()
+    prepare_images_only = bool(getattr(args, "prepare_images_only", False))
 
     predictions_path = args.predictions_path.resolve()
     result_path = args.result_path.resolve()
@@ -299,7 +382,15 @@ def main() -> int:
     _write_poly_dataset_csv(rows_by_id=rows_by_id, instance_ids=instance_ids, out_path=dataset_subset_path)
     selected_rows = [rows_by_id[instance_id] for instance_id in instance_ids]
     _cleanup_stale_poly_containers(selected_rows)
+    if prepare_images_only:
+        _prepare_poly_images(
+            selected_rows=selected_rows,
+            work_dir=work_dir,
+            max_workers=args.num_threads,
+        )
+        return 0
 
+    run_evaluation = _load_run_evaluation_module()
     results: list[dict[str, object]] = []
     total = len(prediction_rows)
     for index, row in enumerate(prediction_rows, start=1):

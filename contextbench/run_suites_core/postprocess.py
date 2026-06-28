@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-05-21 from upstream ContextBench.
-# Summary of changes: add fork run-suite adapters, resolution evaluation, resilient checkpoints, and self-cleaning resolution artifacts.
+# Summary of changes: add fork run-suite adapters, parallel resolution evaluation, image prebuilds, and resilient checkpoints.
 
 """Conversion and evaluation helpers for run suites."""
 
@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -32,6 +33,7 @@ from ..coding_agents.conversion import (
     resolve_record_path,
 )
 from ..coding_agents.files import ensure_dir, read_json, read_jsonl, safe_path_component, write_json
+from ..coding_agents.verification_quality import analyze_record_quality
 from ..evaluate import GoldLoader, aggregate_results, evaluate_instance
 from ..extractors import available as treesitter_available
 from ..extractors.treesitter import DEF_NODES
@@ -189,6 +191,34 @@ class ResolutionCommandError(RuntimeError):
 
     def __str__(self) -> str:
         return self.message
+
+
+@dataclass(frozen=True)
+class _ResolutionInstanceResult:
+    index: int
+    summary: dict[str, object]
+    error: ResolutionCommandError | None = None
+
+
+def _run_resolution_instance_jobs(
+    *,
+    job_count: int,
+    max_workers: int,
+    run_one: Callable[[int], _ResolutionInstanceResult],
+) -> list[_ResolutionInstanceResult]:
+    if job_count <= 0:
+        return []
+    worker_count = max(1, min(int(max_workers or 1), job_count))
+    if worker_count == 1:
+        return [run_one(index) for index in range(job_count)]
+
+    results: list[_ResolutionInstanceResult | None] = [None] * job_count
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_map = {executor.submit(run_one, index): index for index in range(job_count)}
+        for future in as_completed(future_map):
+            index = future_map[future]
+            results[index] = future.result()
+    return [result for result in results if result is not None]
 
 
 def _run_resolution_command(
@@ -518,6 +548,8 @@ def collect_resolution_predictions(
     skipped_ineligible_count = 0
     skipped_ineligible_reasons: Counter[str] = Counter()
     predictions: list[dict[str, object]] = []
+    no_patch_ids: list[str] = []
+    selected_ids: list[str] = []
     task_results = _task_results_for_source_dir(source_dir) if source_dir.exists() else None
     for row in rows:
         record_path = resolve_record_path(
@@ -526,9 +558,17 @@ def collect_resolution_predictions(
             source_dir=source_dir,
         )
         if record_path is None:
+            skipped_ineligible_count += 1
+            skipped_ineligible_reasons["record_path_missing"] += 1
             continue
         record = read_json(record_path)
-        if not isinstance(record, dict) or not _record_matches_agent(record, expected_agent):
+        if not isinstance(record, dict):
+            skipped_ineligible_count += 1
+            skipped_ineligible_reasons["record_not_object"] += 1
+            continue
+        if not _record_matches_agent(record, expected_agent):
+            skipped_ineligible_count += 1
+            skipped_ineligible_reasons["record_agent_mismatch"] += 1
             continue
         eligibility_error = _resolution_prediction_ineligibility_reason(row=row, record=record)
         if eligibility_error is not None:
@@ -537,10 +577,14 @@ def collect_resolution_predictions(
             continue
         prediction_id = _normalize_agent_record_id(record, row)
         if not prediction_id:
+            skipped_ineligible_count += 1
+            skipped_ineligible_reasons["prediction_id_missing"] += 1
             continue
+        selected_ids.append(prediction_id)
         model_patch = _read_model_patch_for_resolution(record)
         if not model_patch:
             missing_patch_count += 1
+            no_patch_ids.append(prediction_id)
             continue
         predictions.append(
             {
@@ -563,6 +607,8 @@ def collect_resolution_predictions(
         "scope": "resolution_predictions",
         "predictions": predictions,
         "prediction_ids": [str(prediction.get("instance_id") or "").strip() for prediction in predictions if str(prediction.get("instance_id") or "").strip()],
+        "selected_ids": selected_ids,
+        "no_patch_ids": no_patch_ids,
     }
 
 
@@ -986,6 +1032,10 @@ def _resolution_instance_summary_path(instance_dir: Path) -> Path:
     return instance_dir / "resolution-result.json"
 
 
+def _resolution_instance_diagnostics_path(instance_dir: Path) -> Path:
+    return instance_dir / "resolution-diagnostics.json"
+
+
 def _resolution_checkpoint_instance_dir(cache_dir: Path, instance_id: str) -> Path:
     return cache_dir / "instances" / safe_path_component(instance_id)
 
@@ -998,6 +1048,97 @@ def _read_resolution_artifact_text(path: Path, *, max_chars: int = 200_000) -> s
     if len(text) <= max_chars:
         return text
     return text[-max_chars:]
+
+
+def _resolution_artifact_tail(path_value: object, *, max_chars: int = 20_000) -> str | None:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return None
+    path = Path(path_text)
+    if not path.exists():
+        return None
+    text = _read_resolution_artifact_text(path, max_chars=max_chars)
+    return text or None
+
+
+def _safe_json_object(path_value: object) -> dict[str, object] | None:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return None
+    path = Path(path_text)
+    if not path.exists() or path.suffix.lower() != ".json":
+        return None
+    try:
+        payload = read_json(path)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _build_resolution_instance_diagnostics(
+    *,
+    summary: dict[str, object],
+    instance_dir: Path,
+    artifacts_retained: bool,
+    cleanup_note: str | None = None,
+) -> dict[str, object]:
+    report_payload = _safe_json_object(summary.get("report_path"))
+    diagnostic: dict[str, object] = {
+        "schema_version": 1,
+        "instance_id": str(summary.get("instance_id") or instance_dir.name),
+        "status": str(summary.get("status") or ""),
+        "resolved_ids": list(summary.get("resolved_ids") or []),
+        "unresolved_ids": list(summary.get("unresolved_ids") or []),
+        "error_ids": list(summary.get("error_ids") or []),
+        "evaluation_error_ids": list(summary.get("evaluation_error_ids") or []),
+        "test_timeout_ids": list(summary.get("test_timeout_ids") or []),
+        "infra_error_ids": list(summary.get("infra_error_ids") or []),
+        "resolution_failure_kind": summary.get("resolution_failure_kind"),
+        "resolution_failure_is_evaluated": summary.get("resolution_failure_is_evaluated"),
+        "error_detail": summary.get("error_detail"),
+        "log_path": summary.get("log_path"),
+        "report_path": summary.get("report_path"),
+        "artifacts_retained": artifacts_retained,
+        "input_metadata": summary.get("input_metadata"),
+        "log_tail": _resolution_artifact_tail(summary.get("log_path")),
+    }
+    if report_payload is not None:
+        diagnostic["report_keys"] = sorted(str(key) for key in report_payload.keys())
+        for key in (
+            "resolved_ids",
+            "unresolved_ids",
+            "error_ids",
+            "evaluation_error_ids",
+            "test_timeout_ids",
+            "infra_error_ids",
+            "FAIL_TO_PASS",
+            "PASS_TO_PASS",
+        ):
+            if key in report_payload:
+                diagnostic[f"report_{key}"] = report_payload.get(key)
+    if cleanup_note:
+        diagnostic["cleanup_note"] = cleanup_note
+        diagnostic["cleanup_recorded_at_unix"] = time.time()
+    return {key: value for key, value in diagnostic.items() if value not in (None, "", [])}
+
+
+def _write_resolution_instance_diagnostics(
+    instance_dir: Path,
+    summary: dict[str, object],
+    *,
+    artifacts_retained: bool,
+    cleanup_note: str | None = None,
+) -> dict[str, object]:
+    diagnostics_path = _resolution_instance_diagnostics_path(instance_dir)
+    diagnostic = _build_resolution_instance_diagnostics(
+        summary=summary,
+        instance_dir=instance_dir,
+        artifacts_retained=artifacts_retained,
+        cleanup_note=cleanup_note,
+    )
+    diagnostic["diagnostics_path"] = str(diagnostics_path)
+    write_json(diagnostics_path, diagnostic)
+    return diagnostic
 
 
 def _swebench_timeout_from_input_metadata(input_metadata: dict[str, object]) -> int | None:
@@ -1172,12 +1313,28 @@ def _write_resolution_instance_summary(
     *,
     cache_dir: Path | None = None,
 ) -> None:
-    write_json(_resolution_instance_summary_path(instance_dir), payload)
+    payload["diagnostics_path"] = str(_resolution_instance_diagnostics_path(instance_dir))
+    payload["artifacts_retained"] = True
+    local_payload = dict(payload)
+    write_json(_resolution_instance_summary_path(instance_dir), local_payload)
+    _write_resolution_instance_diagnostics(
+        instance_dir,
+        local_payload,
+        artifacts_retained=True,
+    )
     if cache_dir is not None:
         instance_id = str(payload.get("instance_id") or instance_dir.name).strip()
         if instance_id:
             checkpoint_dir = _resolution_checkpoint_instance_dir(cache_dir, instance_id)
-            write_json(_resolution_instance_summary_path(checkpoint_dir), payload)
+            checkpoint_payload = dict(payload)
+            checkpoint_payload["diagnostics_path"] = str(_resolution_instance_diagnostics_path(checkpoint_dir))
+            checkpoint_payload["artifacts_retained"] = True
+            write_json(_resolution_instance_summary_path(checkpoint_dir), checkpoint_payload)
+            _write_resolution_instance_diagnostics(
+                checkpoint_dir,
+                checkpoint_payload,
+                artifacts_retained=True,
+            )
 
 
 def _cleanup_checkpointed_resolution_instance(
@@ -1201,9 +1358,36 @@ def _cleanup_checkpointed_resolution_instance(
     )
     if reusable is None:
         return False
+    cleanup_note = f"Removed checkpointed resolution artifact directory {instance_dir}"
+    checkpoint_payload = dict(reusable)
+    checkpoint_payload["artifacts_retained"] = False
+    checkpoint_payload["diagnostics_path"] = str(_resolution_instance_diagnostics_path(checkpoint_dir))
+    checkpoint_payload["artifact_cleanup"] = {
+        "removed_instance_dir": str(instance_dir),
+        "recorded_at_unix": time.time(),
+    }
+    _write_resolution_instance_diagnostics(
+        checkpoint_dir,
+        checkpoint_payload,
+        artifacts_retained=False,
+        cleanup_note=cleanup_note,
+    )
+    write_json(_resolution_instance_summary_path(checkpoint_dir), checkpoint_payload)
     shutil.rmtree(instance_dir)
     _append_text_log(log_path, f"[cleanup] removed checkpointed resolution artifacts for {instance_id}")
     return True
+
+
+def _mark_resolution_summary_artifacts_cleaned(
+    summary: dict[str, object],
+    *,
+    cache_dir: Path | None,
+    instance_id: str,
+) -> None:
+    summary["artifacts_retained"] = False
+    if cache_dir is not None:
+        checkpoint_dir = _resolution_checkpoint_instance_dir(cache_dir, instance_id)
+        summary["diagnostics_path"] = str(_resolution_instance_diagnostics_path(checkpoint_dir))
 
 
 def _docker_image_references() -> list[str]:
@@ -1250,8 +1434,68 @@ def _multi_resolution_docker_image_ref(instance_id: str) -> str | None:
     return f"mswebench/{org}_m_{repo}:pr-{number}"
 
 
+def _swebench_resolution_docker_image_ref(instance_id: str) -> str:
+    instance = str(instance_id or "").strip().lower()
+    if not instance:
+        raise RuntimeError("SWE-bench resolution image requires a non-empty instance_id.")
+    return f"sweb.eval.x86_64.{instance}:latest"
+
+
+def _poly_resolution_docker_image_ref(*, instance_id: str, language: str) -> str:
+    instance = str(instance_id or "").strip().lower()
+    lang = str(language or "").strip().lower()
+    if not instance or not lang:
+        raise RuntimeError("SWE-PolyBench resolution image requires instance_id and language.")
+    return f"polybench_{lang}_{instance}"
+
+
+def _repo_name_from_task(task: dict[str, object]) -> str:
+    repo_name = str(task.get("repo") or "").strip()
+    if repo_name:
+        return repo_name
+    repo_url = str(task.get("repo_url") or "").strip()
+    if not repo_url:
+        raise RuntimeError(f"Task is missing repo metadata: {task.get('instance_id') or task.get('original_inst_id')}")
+    repo = repo_url.rstrip("/")
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    if "/" not in repo:
+        raise RuntimeError(f"Task repo_url is not owner/name-addressable: {repo_url!r}")
+    return "/".join(repo.rsplit("/", 2)[-2:])
+
+
+def resolution_instance_id_from_task(task: dict[str, object]) -> str:
+    instance_id = str(task.get("original_inst_id") or task.get("instance_id") or "").strip()
+    if not instance_id:
+        raise RuntimeError("Task is missing original_inst_id/instance_id for resolution image selection.")
+    return instance_id
+
+
+def resolution_image_ref_for_task(task: dict[str, object]) -> str:
+    bench = str(task.get("bench") or task.get("source") or "Verified").strip() or "Verified"
+    instance_id = resolution_instance_id_from_task(task)
+    if bench == "Verified":
+        return _swebench_resolution_docker_image_ref(instance_id)
+    if bench == "Poly":
+        return _poly_resolution_docker_image_ref(
+            instance_id=instance_id,
+            language=str(task.get("language") or ""),
+        )
+    if bench == "Pro":
+        return _pro_dockerhub_image_uri(instance_id, _repo_name_from_task(task))
+    if bench == "Multi":
+        image_ref = _multi_resolution_docker_image_ref(instance_id)
+        if not image_ref:
+            raise RuntimeError(f"Invalid Multi-SWE-Bench instance id for image selection: {instance_id!r}")
+        return image_ref
+    raise RuntimeError(f"No resolution image mapping is configured for bench {bench!r}")
+
+
 def _resolution_docker_image_refs_for_instance(*, backend: str, instance_id: str) -> list[str]:
     image_refs = set(_docker_image_references())
+    if backend == "swebench":
+        image_ref = _swebench_resolution_docker_image_ref(instance_id)
+        return [image_ref] if image_ref in image_refs else []
     if backend == "multi-swebench":
         image_ref = _multi_resolution_docker_image_ref(instance_id)
         return [image_ref] if image_ref and image_ref in image_refs else []
@@ -1394,6 +1638,7 @@ def _aggregate_instance_resolution_results(
     evaluation_error_ids: list[str] = []
     test_timeout_ids: list[str] = []
     infra_error_ids: list[str] = []
+    instance_diagnostics: list[dict[str, object]] = []
     for summary in instance_summaries:
         _extend_resolution_ids(resolved_ids, summary.get("resolved_ids") or [])
         _extend_resolution_ids(unresolved_ids, summary.get("unresolved_ids") or [])
@@ -1401,6 +1646,15 @@ def _aggregate_instance_resolution_results(
         _extend_resolution_ids(evaluation_error_ids, summary.get("evaluation_error_ids") or [])
         _extend_resolution_ids(test_timeout_ids, summary.get("test_timeout_ids") or [])
         _extend_resolution_ids(infra_error_ids, summary.get("infra_error_ids") or [])
+        instance_diagnostics.append(
+            {
+                "instance_id": summary.get("instance_id"),
+                "status": summary.get("status"),
+                "diagnostics_path": summary.get("diagnostics_path"),
+                "artifacts_retained": summary.get("artifacts_retained"),
+                "resolution_failure_kind": summary.get("resolution_failure_kind"),
+            }
+        )
 
     aggregate_payload = {
         "resolved_ids": resolved_ids,
@@ -1415,6 +1669,8 @@ def _aggregate_instance_resolution_results(
         aggregate_payload["test_timeout_ids"] = test_timeout_ids
     if infra_error_ids:
         aggregate_payload["infra_error_ids"] = infra_error_ids
+    if instance_diagnostics:
+        aggregate_payload["instance_diagnostics"] = instance_diagnostics
 
     aggregate = {**aggregate_payload, "report_path": str(report_path)}
     ensure_dir(report_path.parent)
@@ -1434,7 +1690,7 @@ def _write_single_resolution_prediction(
         payload = [
             {
                 "instance_id": str(prediction.get("instance_id") or "").strip(),
-                "patch": _normalize_model_patch_for_resolution(prediction.get("model_patch")),
+                "patch": _normalize_model_patch_for_resolution(prediction.get("patch", prediction.get("model_patch"))),
                 "prefix": str(prediction.get("model_name_or_path") or ""),
             }
         ]
@@ -1492,15 +1748,23 @@ def run_resolution_evaluation(
         harness_args,
         swebench_timeout=swebench_timeout,
     )
-    instance_summaries: list[dict[str, object]] = []
-    first_error: ResolutionCommandError | None = None
     backend = _resolution_backend_for_bench("Verified")
-    for index, prediction in enumerate(prediction_rows, start=1):
-        if not isinstance(prediction, dict):
-            continue
+    valid_predictions = [
+        prediction
+        for prediction in prediction_rows
+        if isinstance(prediction, dict) and str(prediction.get("instance_id") or "").strip()
+    ]
+
+    log_lock = threading.Lock()
+
+    def append_log(text: str) -> None:
+        with log_lock:
+            _append_text_log(log_path, text)
+
+    def run_one(job_index: int) -> _ResolutionInstanceResult:
+        prediction = valid_predictions[job_index]
         instance_id = str(prediction.get("instance_id") or "").strip()
-        if not instance_id:
-            continue
+        display_index = job_index + 1
         instance_dir = _resolution_instance_dir(work_dir, instance_id)
         input_metadata = _resolution_instance_input_metadata(
             prediction,
@@ -1516,21 +1780,25 @@ def run_resolution_evaluation(
         if reusable is not None:
             existing, reused_summary_path = reusable
             _write_resolution_instance_summary(instance_dir, existing, cache_dir=cache_dir)
-            instance_summaries.append(existing)
-            _append_text_log(log_path, f"[reuse] {instance_id} -> {reused_summary_path}")
+            append_log(f"[reuse] {instance_id} -> {reused_summary_path}")
             _write_reused_resolution_log(
                 log_path=instance_dir / "resolution-command.log",
                 instance_id=instance_id,
                 summary_path=reused_summary_path,
             )
-            _cleanup_checkpointed_resolution_instance(
+            if _cleanup_checkpointed_resolution_instance(
                 instance_dir,
                 cache_dir=cache_dir,
                 input_metadata=input_metadata,
                 log_path=log_path,
                 enabled=self_clean_resolution_artifacts,
-            )
-            continue
+            ):
+                _mark_resolution_summary_artifacts_cleaned(
+                    existing,
+                    cache_dir=cache_dir,
+                    instance_id=instance_id,
+                )
+            return _ResolutionInstanceResult(index=job_index, summary=existing)
 
         instance_predictions_path = instance_dir / "predictions.jsonl"
         _write_single_resolution_prediction(
@@ -1555,7 +1823,7 @@ def run_resolution_evaluation(
             str(instance_dir),
             *effective_harness_args,
         ]
-        _append_text_log(log_path, f"[run] {index}/{len(prediction_rows)} {instance_id}")
+        append_log(f"[run] {display_index}/{len(valid_predictions)} {instance_id}")
         print(
             f"[resolution:{run_id}] starting backend=swebench instance={instance_id} predictions={instance_predictions_path}",
             flush=True,
@@ -1611,17 +1879,22 @@ def run_resolution_evaluation(
             instance_summary,
             cache_dir=cache_dir if successful_return else None,
         )
-        instance_summaries.append(instance_summary)
         if successful_return:
-            _cleanup_checkpointed_resolution_instance(
+            if _cleanup_checkpointed_resolution_instance(
                 instance_dir,
                 cache_dir=cache_dir,
                 input_metadata=input_metadata,
                 log_path=log_path,
                 enabled=self_clean_resolution_artifacts,
-            )
-        elif first_error is None:
-            first_error = ResolutionCommandError(
+            ):
+                _mark_resolution_summary_artifacts_cleaned(
+                    instance_summary,
+                    cache_dir=cache_dir,
+                    instance_id=instance_id,
+                )
+        error = None
+        if not successful_return:
+            error = ResolutionCommandError(
                 message=(
                     f"SWE-bench harness failed for {dataset_name} ({run_id}): "
                     f"{tail.strip()}\nFull log: {instance_log_path}"
@@ -1630,7 +1903,15 @@ def run_resolution_evaluation(
                 log_path=str(instance_log_path),
                 tail=tail,
             )
+        return _ResolutionInstanceResult(index=job_index, summary=instance_summary, error=error)
 
+    instance_results = _run_resolution_instance_jobs(
+        job_count=len(valid_predictions),
+        max_workers=max_workers,
+        run_one=run_one,
+    )
+    instance_summaries = [result.summary for result in instance_results]
+    first_error = next((result.error for result in instance_results if result.error is not None), None)
     summary = _aggregate_instance_resolution_results(
         instance_summaries=instance_summaries,
         report_path=work_dir / "report.json",
@@ -1673,15 +1954,22 @@ def run_poly_resolution_evaluation(
     if log_path.exists():
         log_path.unlink()
     prediction_rows = read_jsonl(predictions_path)
-    instance_summaries: list[dict[str, object]] = []
-    first_error: ResolutionCommandError | None = None
     backend = _resolution_backend_for_bench("Poly")
-    for index, prediction in enumerate(prediction_rows, start=1):
-        if not isinstance(prediction, dict):
-            continue
+    valid_predictions = [
+        prediction
+        for prediction in prediction_rows
+        if isinstance(prediction, dict) and str(prediction.get("instance_id") or "").strip()
+    ]
+    log_lock = threading.Lock()
+
+    def append_log(text: str) -> None:
+        with log_lock:
+            _append_text_log(log_path, text)
+
+    def run_one(job_index: int) -> _ResolutionInstanceResult:
+        prediction = valid_predictions[job_index]
         instance_id = str(prediction.get("instance_id") or "").strip()
-        if not instance_id:
-            continue
+        display_index = job_index + 1
         instance_dir = _resolution_instance_dir(work_dir, instance_id)
         input_metadata = _resolution_instance_input_metadata(
             prediction,
@@ -1697,20 +1985,24 @@ def run_poly_resolution_evaluation(
         if reusable is not None:
             existing, reused_summary_path = reusable
             _write_resolution_instance_summary(instance_dir, existing, cache_dir=cache_dir)
-            instance_summaries.append(existing)
-            _append_text_log(log_path, f"[reuse] {instance_id} -> {reused_summary_path}")
+            append_log(f"[reuse] {instance_id} -> {reused_summary_path}")
             _write_reused_resolution_log(
                 log_path=instance_dir / "resolution-command.log",
                 instance_id=instance_id,
                 summary_path=reused_summary_path,
             )
-            _cleanup_checkpointed_resolution_instance(
+            if _cleanup_checkpointed_resolution_instance(
                 instance_dir,
                 cache_dir=cache_dir,
                 input_metadata=input_metadata,
                 log_path=log_path,
                 enabled=self_clean_resolution_artifacts,
-            )
+            ):
+                _mark_resolution_summary_artifacts_cleaned(
+                    existing,
+                    cache_dir=cache_dir,
+                    instance_id=instance_id,
+                )
             _cleanup_checkpointed_resolution_docker_images(
                 instance_id=instance_id,
                 backend=backend,
@@ -1719,7 +2011,7 @@ def run_poly_resolution_evaluation(
                 log_path=log_path,
                 enabled=self_clean_resolution_docker_images,
             )
-            continue
+            return _ResolutionInstanceResult(index=job_index, summary=existing)
         instance_predictions_path = instance_dir / "predictions.jsonl"
         _write_single_resolution_prediction(
             prediction=prediction,
@@ -1742,7 +2034,7 @@ def run_poly_resolution_evaluation(
             "1",
             *(harness_args or []),
         ]
-        _append_text_log(log_path, f"[run] {index}/{len(prediction_rows)} {instance_id}")
+        append_log(f"[run] {display_index}/{len(valid_predictions)} {instance_id}")
         print(
             f"[resolution:{run_id}] starting backend=swe-polybench instance={instance_id} predictions={instance_predictions_path}",
             flush=True,
@@ -1785,15 +2077,19 @@ def run_poly_resolution_evaluation(
             instance_summary,
             cache_dir=cache_dir if successful_return else None,
         )
-        instance_summaries.append(instance_summary)
         if successful_return:
-            _cleanup_checkpointed_resolution_instance(
+            if _cleanup_checkpointed_resolution_instance(
                 instance_dir,
                 cache_dir=cache_dir,
                 input_metadata=input_metadata,
                 log_path=log_path,
                 enabled=self_clean_resolution_artifacts,
-            )
+            ):
+                _mark_resolution_summary_artifacts_cleaned(
+                    instance_summary,
+                    cache_dir=cache_dir,
+                    instance_id=instance_id,
+                )
             _cleanup_checkpointed_resolution_docker_images(
                 instance_id=instance_id,
                 backend=backend,
@@ -1802,8 +2098,9 @@ def run_poly_resolution_evaluation(
                 log_path=log_path,
                 enabled=self_clean_resolution_docker_images,
             )
-        elif first_error is None:
-            first_error = ResolutionCommandError(
+        error = None
+        if not successful_return:
+            error = ResolutionCommandError(
                 message=(
                     f"SWE-PolyBench evaluator failed for {dataset_name} ({run_id}): "
                     f"{tail.strip()}\nFull log: {instance_log_path}"
@@ -1812,7 +2109,15 @@ def run_poly_resolution_evaluation(
                 log_path=str(instance_log_path),
                 tail=tail,
             )
+        return _ResolutionInstanceResult(index=job_index, summary=instance_summary, error=error)
 
+    instance_results = _run_resolution_instance_jobs(
+        job_count=len(valid_predictions),
+        max_workers=max_workers,
+        run_one=run_one,
+    )
+    instance_summaries = [result.summary for result in instance_results]
+    first_error = next((result.error for result in instance_results if result.error is not None), None)
     summary = _aggregate_instance_resolution_results(
         instance_summaries=instance_summaries,
         report_path=work_dir / "result.json",
@@ -2015,60 +2320,186 @@ def run_pro_resolution_evaluation(
     if not predictions_path.exists():
         raise FileNotFoundError(f"Resolution predictions not found: {predictions_path}")
     ensure_dir(work_dir)
-    result_root = work_dir / "evaluation_results"
-    ensure_dir(result_root)
     raw_sample_path = work_dir / "raw-sample.csv"
     log_path = work_dir / "resolution-command.log"
-    command = [
-        str(_pro_bench_python_executable()),
-        str(_PROBENCH_RESOLUTION_WRAPPER),
-        "--patch_path",
-        str(predictions_path),
-        "--output_dir",
-        str(result_root),
-        "--num_workers",
-        str(max_workers),
-        "--dockerhub_username",
-        _PRO_BENCH_DOCKERHUB_USERNAME,
-        "--use_local_docker",
-        *(harness_args or []),
+    if log_path.exists():
+        log_path.unlink()
+    prediction_payload = read_json(predictions_path)
+    if not isinstance(prediction_payload, list):
+        raise RuntimeError(f"SWE-bench Pro predictions must be a JSON list: {predictions_path}")
+    valid_predictions = [
+        prediction
+        for prediction in prediction_payload
+        if isinstance(prediction, dict) and str(prediction.get("instance_id") or "").strip()
     ]
-    if cache_dir is not None:
-        command.extend(["--cache_dir", str(cache_dir.resolve())])
-    if cache_dir is not None and self_clean_resolution_artifacts:
-        command.append("--self-clean-resolution-artifacts")
+    backend = _resolution_backend_for_bench("Pro")
+    log_lock = threading.Lock()
+
+    def append_log(text: str) -> None:
+        with log_lock:
+            _append_text_log(log_path, text)
+
+    def run_one(job_index: int) -> _ResolutionInstanceResult:
+        prediction = valid_predictions[job_index]
+        instance_id = str(prediction.get("instance_id") or "").strip()
+        display_index = job_index + 1
+        instance_dir = _resolution_instance_dir(work_dir, instance_id)
+        input_metadata = _resolution_instance_input_metadata(
+            prediction,
+            backend=backend,
+            dataset_name=dataset_name,
+            harness_args=harness_args,
+        )
+        reusable = _read_reusable_resolution_instance_summary(
+            instance_dir,
+            cache_dir=cache_dir,
+            expected_input_metadata=input_metadata,
+        )
+        if reusable is not None:
+            existing, reused_summary_path = reusable
+            _write_resolution_instance_summary(instance_dir, existing, cache_dir=cache_dir)
+            append_log(f"[reuse] {instance_id} -> {reused_summary_path}")
+            _write_reused_resolution_log(
+                log_path=instance_dir / "resolution-command.log",
+                instance_id=instance_id,
+                summary_path=reused_summary_path,
+            )
+            if _cleanup_checkpointed_resolution_instance(
+                instance_dir,
+                cache_dir=cache_dir,
+                input_metadata=input_metadata,
+                log_path=log_path,
+                enabled=self_clean_resolution_artifacts,
+            ):
+                _mark_resolution_summary_artifacts_cleaned(
+                    existing,
+                    cache_dir=cache_dir,
+                    instance_id=instance_id,
+                )
+            return _ResolutionInstanceResult(index=job_index, summary=existing)
+
+        instance_predictions_path = instance_dir / "predictions.json"
+        _write_single_resolution_prediction(
+            prediction=prediction,
+            out_path=instance_predictions_path,
+            backend=backend,
+        )
+        result_root = instance_dir / "evaluation_results"
+        ensure_dir(result_root)
+        instance_log_path = instance_dir / "resolution-command.log"
+        command = [
+            str(_pro_bench_python_executable()),
+            str(_PROBENCH_RESOLUTION_WRAPPER),
+            "--patch_path",
+            str(instance_predictions_path),
+            "--output_dir",
+            str(result_root),
+            "--num_workers",
+            "1",
+            "--dockerhub_username",
+            _PRO_BENCH_DOCKERHUB_USERNAME,
+            "--use_local_docker",
+            *(harness_args or []),
+        ]
+        if cache_dir is not None:
+            command.extend(["--cache_dir", str(cache_dir.resolve())])
+        if cache_dir is not None and self_clean_resolution_artifacts:
+            command.append("--self-clean-resolution-artifacts")
+        append_log(f"[run] {display_index}/{len(valid_predictions)} {instance_id}")
+        print(
+            f"[resolution:{run_id}] starting backend=swebench-pro instance={instance_id} predictions={instance_predictions_path}",
+            flush=True,
+        )
+        command_env = {**(env or {}), "CONTEXTBENCH_PROBENCH_ROOT": str(_PRO_BENCH_ROOT)}
+        returncode, tail = _run_resolution_command(
+            command=command,
+            cwd=instance_dir,
+            log_path=instance_log_path,
+            log_prefix=f"[resolution:{run_id}]",
+            env=command_env,
+        )
+        try:
+            instance_report = _load_pro_resolution_report(result_root)
+            resolved_ids = [str(item).strip() for item in (instance_report.get("resolved_ids") or []) if str(item).strip()]
+            unresolved_ids = [str(item).strip() for item in (instance_report.get("unresolved_ids") or []) if str(item).strip()]
+            error_ids = [str(item).strip() for item in (instance_report.get("error_ids") or []) if str(item).strip()]
+            instance_summary = {
+                "instance_id": instance_id,
+                "resolved_ids": resolved_ids,
+                "unresolved_ids": unresolved_ids,
+                "error_ids": error_ids,
+                "log_path": str(instance_log_path),
+                "report_path": str(instance_report.get("report_path") or ""),
+                "status": _status_for_instance_report(instance_id, resolved_ids, unresolved_ids, error_ids),
+                "input_metadata": input_metadata,
+            }
+        except Exception:
+            instance_summary = {
+                "instance_id": instance_id,
+                "resolved_ids": [],
+                "unresolved_ids": [],
+                "error_ids": [instance_id],
+                "log_path": str(instance_log_path),
+                "status": "error",
+                "input_metadata": input_metadata,
+            }
+        successful_return = returncode == 0
+        _write_resolution_instance_summary(
+            instance_dir,
+            instance_summary,
+            cache_dir=cache_dir if successful_return else None,
+        )
+        if successful_return:
+            if _cleanup_checkpointed_resolution_instance(
+                instance_dir,
+                cache_dir=cache_dir,
+                input_metadata=input_metadata,
+                log_path=log_path,
+                enabled=self_clean_resolution_artifacts,
+            ):
+                _mark_resolution_summary_artifacts_cleaned(
+                    instance_summary,
+                    cache_dir=cache_dir,
+                    instance_id=instance_id,
+                )
+        error = None
+        if not successful_return:
+            error = ResolutionCommandError(
+                message=(
+                    f"SWE-bench Pro evaluator failed for {dataset_name} ({run_id}): "
+                    f"{tail.strip()}\nFull log: {instance_log_path}"
+                ),
+                exit_code=returncode,
+                log_path=str(instance_log_path),
+                tail=tail,
+            )
+        return _ResolutionInstanceResult(index=job_index, summary=instance_summary, error=error)
+
     # Pro evaluator Docker images are not currently instance-addressable in a way
     # that is safe to prune here; artifact checkpointing still works per instance.
     del self_clean_resolution_docker_images
-    print(
-        f"[resolution:{run_id}] starting backend=swebench-pro dataset={dataset_name} predictions={predictions_path}",
-        flush=True,
+    instance_results = _run_resolution_instance_jobs(
+        job_count=len(valid_predictions),
+        max_workers=max_workers,
+        run_one=run_one,
     )
-    command_env = {**(env or {}), "CONTEXTBENCH_PROBENCH_ROOT": str(_PRO_BENCH_ROOT)}
-    returncode, tail = _run_resolution_command(
-        command=command,
-        cwd=work_dir,
-        log_path=log_path,
-        log_prefix=f"[resolution:{run_id}]",
-        env=command_env,
+    instance_summaries = [result.summary for result in instance_results]
+    first_error = next((result.error for result in instance_results if result.error is not None), None)
+    summary = _aggregate_instance_resolution_results(
+        instance_summaries=instance_summaries,
+        report_path=work_dir / "evaluation_results" / "eval_results.json",
     )
-    if returncode != 0:
-        raise ResolutionCommandError(
-            message=(
-                f"SWE-bench Pro evaluator failed for {dataset_name} ({run_id}): "
-                f"{tail.strip()}\nFull log: {log_path}"
-            ),
-            exit_code=returncode,
-            log_path=str(log_path),
-            tail=tail,
-        )
-    summary = _load_pro_resolution_report(result_root)
     summary["dataset_name"] = dataset_name
     summary["run_id"] = run_id
     summary["log_path"] = str(log_path)
     summary["python_executable"] = str(_pro_bench_python_executable())
     summary["wrapper_path"] = str(_PROBENCH_RESOLUTION_WRAPPER)
     summary["raw_sample_path"] = str(raw_sample_path)
+    if first_error is not None:
+        summary["error_detail"] = str(first_error)
+        summary["exit_code"] = first_error.exit_code
+        summary["tail"] = first_error.tail
+        summary["_partial_from_error"] = True
     return summary
 
 
@@ -2095,19 +2526,29 @@ def run_multi_resolution_evaluation(
     if log_path.exists():
         log_path.unlink()
     prediction_rows = read_jsonl(predictions_path)
-    instance_summaries: list[dict[str, object]] = []
-    first_error: ResolutionCommandError | None = None
     backend = _resolution_backend_for_bench("Multi")
-    for index, prediction in enumerate(prediction_rows, start=1):
-        if not isinstance(prediction, dict):
-            continue
+    valid_predictions = [
+        prediction
+        for prediction in prediction_rows
+        if isinstance(prediction, dict)
+        and str(prediction.get("org") or "").strip()
+        and str(prediction.get("repo") or "").strip()
+        and prediction.get("number") not in (None, "")
+    ]
+    log_lock = threading.Lock()
+
+    def append_log(text: str) -> None:
+        with log_lock:
+            _append_text_log(log_path, text)
+
+    def run_one(job_index: int) -> _ResolutionInstanceResult:
+        prediction = valid_predictions[job_index]
         instance_id = _multi_patch_id(
             org=str(prediction.get("org") or "").strip(),
             repo=str(prediction.get("repo") or "").strip(),
             number=int(prediction.get("number") or 0),
         )
-        if not instance_id:
-            continue
+        display_index = job_index + 1
         instance_dir = _resolution_instance_dir(work_dir, instance_id)
         input_metadata = _resolution_instance_input_metadata(
             prediction,
@@ -2123,20 +2564,24 @@ def run_multi_resolution_evaluation(
         if reusable is not None:
             existing, reused_summary_path = reusable
             _write_resolution_instance_summary(instance_dir, existing, cache_dir=cache_dir)
-            instance_summaries.append(existing)
-            _append_text_log(log_path, f"[reuse] {instance_id} -> {reused_summary_path}")
+            append_log(f"[reuse] {instance_id} -> {reused_summary_path}")
             _write_reused_resolution_log(
                 log_path=instance_dir / "resolution-command.log",
                 instance_id=instance_id,
                 summary_path=reused_summary_path,
             )
-            _cleanup_checkpointed_resolution_instance(
+            if _cleanup_checkpointed_resolution_instance(
                 instance_dir,
                 cache_dir=cache_dir,
                 input_metadata=input_metadata,
                 log_path=log_path,
                 enabled=self_clean_resolution_artifacts,
-            )
+            ):
+                _mark_resolution_summary_artifacts_cleaned(
+                    existing,
+                    cache_dir=cache_dir,
+                    instance_id=instance_id,
+                )
             _cleanup_checkpointed_resolution_docker_images(
                 instance_id=instance_id,
                 backend=backend,
@@ -2145,7 +2590,7 @@ def run_multi_resolution_evaluation(
                 log_path=log_path,
                 enabled=self_clean_resolution_docker_images,
             )
-            continue
+            return _ResolutionInstanceResult(index=job_index, summary=existing)
 
         instance_predictions_path = instance_dir / "predictions.jsonl"
         _write_multi_resolution_predictions_jsonl(
@@ -2183,10 +2628,10 @@ def run_multi_resolution_evaluation(
             "--log-dir",
             str(log_root),
             "--max-workers",
-            str(max_workers),
+            "1",
             *(harness_args or []),
         ]
-        _append_text_log(log_path, f"[run] {index}/{len(prediction_rows)} {instance_id}")
+        append_log(f"[run] {display_index}/{len(valid_predictions)} {instance_id}")
         print(
             f"[resolution:{run_id}] starting backend=multi-swebench instance={instance_id} predictions={instance_predictions_path}",
             flush=True,
@@ -2229,15 +2674,19 @@ def run_multi_resolution_evaluation(
             instance_summary,
             cache_dir=cache_dir if successful_return else None,
         )
-        instance_summaries.append(instance_summary)
         if successful_return:
-            _cleanup_checkpointed_resolution_instance(
+            if _cleanup_checkpointed_resolution_instance(
                 instance_dir,
                 cache_dir=cache_dir,
                 input_metadata=input_metadata,
                 log_path=log_path,
                 enabled=self_clean_resolution_artifacts,
-            )
+            ):
+                _mark_resolution_summary_artifacts_cleaned(
+                    instance_summary,
+                    cache_dir=cache_dir,
+                    instance_id=instance_id,
+                )
             _cleanup_checkpointed_resolution_docker_images(
                 instance_id=instance_id,
                 backend=backend,
@@ -2246,8 +2695,9 @@ def run_multi_resolution_evaluation(
                 log_path=log_path,
                 enabled=self_clean_resolution_docker_images,
             )
-        elif first_error is None:
-            first_error = ResolutionCommandError(
+        error = None
+        if not successful_return:
+            error = ResolutionCommandError(
                 message=(
                     f"Multi-SWE-Bench evaluator failed for {dataset_name} ({run_id}): "
                     f"{tail.strip()}\nFull log: {instance_log_path}"
@@ -2256,7 +2706,15 @@ def run_multi_resolution_evaluation(
                 log_path=str(instance_log_path),
                 tail=tail,
             )
+        return _ResolutionInstanceResult(index=job_index, summary=instance_summary, error=error)
 
+    instance_results = _run_resolution_instance_jobs(
+        job_count=len(valid_predictions),
+        max_workers=max_workers,
+        run_one=run_one,
+    )
+    instance_summaries = [result.summary for result in instance_results]
+    first_error = next((result.error for result in instance_results if result.error is not None), None)
     summary = _aggregate_instance_resolution_results(
         instance_summaries=instance_summaries,
         report_path=work_dir / "final_report.json",
@@ -2272,6 +2730,419 @@ def run_multi_resolution_evaluation(
         summary["tail"] = first_error.tail
         summary["_partial_from_error"] = True
     return summary
+
+
+def _pro_dockerhub_image_uri(instance_id: str, repo_name: str) -> str:
+    if "/" not in repo_name:
+        raise RuntimeError(f"SWE-bench Pro raw sample repo is not owner/name: {repo_name!r}")
+    repo_base, repo_name_only = repo_name.lower().split("/", 1)
+    tag_part = instance_id.replace("instance_", "")
+    if instance_id == "instance_element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan":
+        repo_name_only = "element-web"
+    elif "element-hq" in repo_name.lower() and "element-web" in repo_name.lower():
+        repo_name_only = "element"
+        if tag_part.endswith("-vnan"):
+            tag_part = tag_part[:-5]
+    elif tag_part.endswith("-vnan"):
+        tag_part = tag_part[:-5]
+    tag = f"{repo_base}.{repo_name_only}-{tag_part}"
+    if len(tag) > 128:
+        tag = tag[:128]
+    return f"{_PRO_BENCH_DOCKERHUB_USERNAME}/sweap-images:{tag}"
+
+
+def _prepare_swebench_resolution_images(
+    *,
+    predictions_path: Path,
+    dataset_name: str,
+    work_dir: Path,
+    max_workers: int,
+    env: dict[str, str] | None = None,
+) -> dict[str, object]:
+    predictions_path = predictions_path.resolve()
+    work_dir = work_dir.resolve()
+    instance_ids = _load_jsonl_prediction_ids(predictions_path)
+    log_path = work_dir / "image-prebuild-command.log"
+    if not instance_ids:
+        return {"status": "skipped", "reason": "no predictions", "instance_count": 0}
+    command = [
+        str(_swe_bench_python_executable()),
+        "-m",
+        "swebench.harness.prepare_images",
+        "--dataset_name",
+        dataset_name,
+        "--split",
+        "test",
+        "--instance_ids",
+        *instance_ids,
+        "--max_workers",
+        str(max(1, int(max_workers))),
+        "--force_rebuild",
+        "false",
+        "--tag",
+        "latest",
+        "--env_image_tag",
+        "latest",
+        "--open_file_limit",
+        "4096",
+    ]
+    returncode, tail = _run_resolution_command(
+        command=command,
+        cwd=work_dir,
+        log_path=log_path,
+        log_prefix="[resolution-image-prebuild:swebench]",
+        env=env,
+    )
+    if returncode != 0:
+        raise ResolutionCommandError(
+            message=f"SWE-bench image preparation failed for {dataset_name}: {tail.strip()}\nFull log: {log_path}",
+            exit_code=returncode,
+            log_path=str(log_path),
+            tail=tail,
+        )
+    return {
+        "status": "completed",
+        "backend": "swebench",
+        "dataset_name": dataset_name,
+        "instance_count": len(instance_ids),
+        "max_workers": max(1, int(max_workers)),
+        "log_path": str(log_path),
+    }
+
+
+def _prepare_poly_resolution_images(
+    *,
+    predictions_path: Path,
+    dataset_name: str,
+    work_dir: Path,
+    max_workers: int,
+    env: dict[str, str] | None = None,
+) -> dict[str, object]:
+    predictions_path = predictions_path.resolve()
+    work_dir = work_dir.resolve()
+    instance_ids = _load_jsonl_prediction_ids(predictions_path)
+    if not instance_ids:
+        return {"status": "skipped", "reason": "no predictions", "instance_count": 0}
+    result_root = work_dir / "poly-image-prebuild"
+    log_path = work_dir / "image-prebuild-command.log"
+    command = [
+        str(_poly_bench_python_executable()),
+        str(_POLYBENCH_RESOLUTION_WRAPPER),
+        "--dataset-name",
+        dataset_name,
+        "--predictions-path",
+        str(predictions_path),
+        "--result-path",
+        str(result_root),
+        "--num-threads",
+        str(max(1, int(max_workers))),
+        "--prepare-images-only",
+    ]
+    returncode, tail = _run_resolution_command(
+        command=command,
+        cwd=work_dir,
+        log_path=log_path,
+        log_prefix="[resolution-image-prebuild:poly]",
+        env=env,
+    )
+    if returncode != 0:
+        raise ResolutionCommandError(
+            message=f"SWE-PolyBench image preparation failed for {dataset_name}: {tail.strip()}\nFull log: {log_path}",
+            exit_code=returncode,
+            log_path=str(log_path),
+            tail=tail,
+        )
+    return {
+        "status": "completed",
+        "backend": "swe-polybench",
+        "dataset_name": dataset_name,
+        "instance_count": len(instance_ids),
+        "max_workers": max(1, int(max_workers)),
+        "log_path": str(log_path),
+    }
+
+
+def _prepare_pro_resolution_images(
+    *,
+    predictions_path: Path,
+    dataset_name: str,
+    work_dir: Path,
+    max_workers: int,
+    env: dict[str, str] | None = None,
+) -> dict[str, object]:
+    predictions_path = predictions_path.resolve()
+    work_dir = work_dir.resolve()
+    del dataset_name
+    prediction_ids = _load_pro_prediction_ids(predictions_path)
+    if not prediction_ids:
+        return {"status": "skipped", "reason": "no predictions", "instance_count": 0}
+    _write_pro_raw_sample_csv(
+        raw_sample_jsonl=_PRO_BENCH_RAW_SAMPLE_JSONL,
+        instance_ids=prediction_ids,
+        out_path=work_dir / "image-prebuild-raw-sample.csv",
+    )
+    by_id: dict[str, dict[str, object]] = {}
+    wanted = set(prediction_ids)
+    for raw_row in read_jsonl(_PRO_BENCH_RAW_SAMPLE_JSONL):
+        if not isinstance(raw_row, dict):
+            continue
+        row = _normalized_pro_raw_sample_row(raw_row)
+        instance_id = str(row.get("instance_id") or "").strip()
+        if instance_id in wanted and instance_id not in by_id:
+            by_id[instance_id] = row
+    missing_raw_rows = [instance_id for instance_id in prediction_ids if instance_id not in by_id]
+    if missing_raw_rows:
+        raise RuntimeError(
+            "SWE-bench Pro raw sample snapshot is missing selected instances: "
+            + ", ".join(missing_raw_rows[:10])
+            + (f" ... and {len(missing_raw_rows) - 10} more" if len(missing_raw_rows) > 10 else "")
+        )
+    images = [
+        {
+            "instance_id": instance_id,
+            "image": _pro_dockerhub_image_uri(instance_id, str(by_id[instance_id].get("repo") or "")),
+        }
+        for instance_id in prediction_ids
+    ]
+    image_root = work_dir / "pro-image-prebuild"
+    ensure_dir(image_root)
+
+    def pull_one(index: int) -> _ResolutionInstanceResult:
+        row = images[index]
+        instance_id = str(row["instance_id"])
+        image = str(row["image"])
+        log_path = image_root / f"{safe_path_component(instance_id)}.log"
+        command = ["docker", "pull", image]
+        returncode, tail = _run_resolution_command(
+            command=command,
+            cwd=image_root,
+            log_path=log_path,
+            log_prefix="[resolution-image-prebuild:pro]",
+            env=env,
+        )
+        summary = {
+            "instance_id": instance_id,
+            "image": image,
+            "status": "completed" if returncode == 0 else "failed",
+            "log_path": str(log_path),
+        }
+        error = None
+        if returncode != 0:
+            error = ResolutionCommandError(
+                message=f"SWE-bench Pro image pull failed for {instance_id}: {tail.strip()}\nFull log: {log_path}",
+                exit_code=returncode,
+                log_path=str(log_path),
+                tail=tail,
+            )
+        return _ResolutionInstanceResult(index=index, summary=summary, error=error)
+
+    results = _run_resolution_instance_jobs(
+        job_count=len(images),
+        max_workers=max_workers,
+        run_one=pull_one,
+    )
+    first_error = next((result.error for result in results if result.error is not None), None)
+    summary = {
+        "status": "completed" if first_error is None else "failed",
+        "backend": "swebench-pro",
+        "instance_count": len(images),
+        "max_workers": max(1, int(max_workers)),
+        "images": [result.summary for result in results],
+    }
+    write_json(image_root / "summary.json", summary)
+    if first_error is not None:
+        raise first_error
+    return {**summary, "summary_path": str(image_root / "summary.json")}
+
+
+def _prepare_multi_resolution_images(
+    *,
+    predictions_path: Path,
+    dataset_name: str,
+    work_dir: Path,
+    max_workers: int,
+    env: dict[str, str] | None = None,
+) -> dict[str, object]:
+    instance_ids = _load_multi_prediction_ids(predictions_path)
+    if not instance_ids:
+        return {"status": "skipped", "reason": "no predictions", "instance_count": 0}
+    image_root = work_dir / "multi-image-prebuild"
+    dataset_path = image_root / "dataset.jsonl"
+    _write_multi_dataset_jsonl(
+        dataset_name=dataset_name,
+        instance_ids=instance_ids,
+        out_path=dataset_path,
+    )
+    result_root = image_root / "evaluation_results"
+    repo_root = image_root / "repos"
+    log_root = image_root / "logs"
+    for path in (result_root, repo_root, log_root):
+        ensure_dir(path)
+    log_path = work_dir / "image-prebuild-command.log"
+    command = [
+        str(_multi_bench_python_executable()),
+        str(_MULTIBENCH_RESOLUTION_WRAPPER),
+        "--predictions-path",
+        str(predictions_path),
+        "--dataset-path",
+        str(dataset_path),
+        "--output-dir",
+        str(result_root),
+        "--repo-dir",
+        str(repo_root),
+        "--log-dir",
+        str(log_root),
+        "--max-workers",
+        str(max(1, int(max_workers))),
+        "--prepare-images-only",
+    ]
+    returncode, tail = _run_resolution_command(
+        command=command,
+        cwd=image_root,
+        log_path=log_path,
+        log_prefix="[resolution-image-prebuild:multi]",
+        env=env,
+    )
+    if returncode != 0:
+        raise ResolutionCommandError(
+            message=f"Multi-SWE-Bench image preparation failed for {dataset_name}: {tail.strip()}\nFull log: {log_path}",
+            exit_code=returncode,
+            log_path=str(log_path),
+            tail=tail,
+        )
+    return {
+        "status": "completed",
+        "backend": "multi-swebench",
+        "dataset_name": dataset_name,
+        "instance_count": len(instance_ids),
+        "max_workers": max(1, int(max_workers)),
+        "log_path": str(log_path),
+    }
+
+
+def prepare_resolution_images_for_bench(
+    *,
+    bench: str,
+    predictions_path: Path,
+    dataset_name: str,
+    work_dir: Path,
+    max_workers: int,
+    env: dict[str, str] | None = None,
+) -> dict[str, object]:
+    predictions_path = predictions_path.resolve()
+    work_dir = work_dir.resolve()
+    ensure_dir(work_dir)
+    if bench == "Verified":
+        return _prepare_swebench_resolution_images(
+            predictions_path=predictions_path,
+            dataset_name=dataset_name,
+            work_dir=work_dir,
+            max_workers=max_workers,
+            env=env,
+        )
+    if bench == "Poly":
+        return _prepare_poly_resolution_images(
+            predictions_path=predictions_path,
+            dataset_name=dataset_name,
+            work_dir=work_dir,
+            max_workers=max_workers,
+            env=env,
+        )
+    if bench == "Pro":
+        return _prepare_pro_resolution_images(
+            predictions_path=predictions_path,
+            dataset_name=dataset_name,
+            work_dir=work_dir,
+            max_workers=max_workers,
+            env=env,
+        )
+    if bench == "Multi":
+        return _prepare_multi_resolution_images(
+            predictions_path=predictions_path,
+            dataset_name=dataset_name,
+            work_dir=work_dir,
+            max_workers=max_workers,
+            env=env,
+        )
+    raise RuntimeError(f"No resolution image preparation hook is configured for bench {bench!r}")
+
+
+def prepare_resolution_images_for_tasks(
+    *,
+    tasks: list[dict[str, object]],
+    work_dir: Path,
+    max_workers: int,
+    env: dict[str, str] | None = None,
+) -> dict[str, object]:
+    work_dir = work_dir.resolve()
+    ensure_dir(work_dir)
+    if not tasks:
+        return {"status": "skipped", "reason": "no tasks", "task_count": 0, "benches": {}, "images": []}
+
+    tasks_by_bench: dict[str, list[dict[str, object]]] = {}
+    for task in tasks:
+        bench = str(task.get("bench") or task.get("source") or "Verified").strip() or "Verified"
+        tasks_by_bench.setdefault(bench, []).append(task)
+
+    per_bench: dict[str, dict[str, object]] = {}
+    images: list[dict[str, object]] = []
+    worker_count = max(1, int(max_workers or 1))
+    for bench, bench_tasks in sorted(tasks_by_bench.items()):
+        backend = _resolution_backend_for_bench(bench)
+        status, message = _resolution_backend_availability(backend)
+        if status != "available":
+            raise RuntimeError(
+                f"Resolution runtime image preparation requires backend {backend.backend!r} for {bench}, "
+                f"but it is {status}: {message}"
+            )
+        predictions = [
+            {
+                "instance_id": resolution_instance_id_from_task(task),
+                "model_patch": "",
+                "model_name_or_path": "contextbench-runtime-image-prebuild",
+            }
+            for task in bench_tasks
+        ]
+        bench_work_dir = work_dir / safe_path_component(bench.lower())
+        predictions_path = _resolution_predictions_path(
+            predictions_root=bench_work_dir,
+            bench=bench,
+            backend=backend,
+        )
+        _write_backend_resolution_predictions(
+            predictions=predictions,
+            out_path=predictions_path,
+            backend=backend,
+            expected_agent="contextbench-runtime-image-prebuild",
+        )
+        bench_summary = prepare_resolution_images_for_bench(
+            bench=bench,
+            predictions_path=predictions_path,
+            dataset_name=str(backend.dataset_name or ""),
+            work_dir=bench_work_dir / "image-prebuild",
+            max_workers=worker_count,
+            env=env,
+        )
+        bench_summary["predictions_path"] = str(predictions_path)
+        per_bench[bench] = bench_summary
+        images.extend(
+            {
+                "bench": bench,
+                "instance_id": resolution_instance_id_from_task(task),
+                "image": resolution_image_ref_for_task(task),
+            }
+            for task in bench_tasks
+        )
+
+    return {
+        "status": "completed",
+        "scope": "resolution_runtime_images",
+        "task_count": len(tasks),
+        "bench_count": len(per_bench),
+        "max_workers": worker_count,
+        "benches": per_bench,
+        "images": images,
+    }
 
 
 def _resolution_backend_for_bench(bench: str) -> ResolutionBackend:
@@ -2393,6 +3264,8 @@ def evaluate_resolution_for_suite(
     variant_name: str,
     work_dir: Path,
     max_workers: int,
+    prebuild_images: bool = False,
+    prebuild_workers: int | None = None,
     harness_args: list[str] | None = None,
     env: dict[str, str] | None = None,
     swebench_timeout: int = 1800,
@@ -2435,9 +3308,12 @@ def evaluate_resolution_for_suite(
         )
         task_count = int(export_summary["task_count"])
         prediction_count = int(export_summary["prediction_count"])
+        missing_patch_count = int(export_summary["missing_patch_count"])
+        skipped_ineligible_count = int(export_summary["skipped_ineligible_count"])
+        no_patch_ids = [str(item).strip() for item in (export_summary.get("no_patch_ids") or []) if str(item).strip()]
         total_tasks += task_count
         total_predictions += prediction_count
-        bench_is_partial = bool(task_count and prediction_count < task_count)
+        bench_is_partial = bool(task_count and skipped_ineligible_count)
         if bench_is_partial:
             partial_benches.append(bench)
         run_id = _resolution_run_id(
@@ -2460,12 +3336,16 @@ def evaluate_resolution_for_suite(
             "resolved_count": 0,
             "pass_at_1": None,
             "prediction_ids": list(export_summary.get("prediction_ids") or []),
+            "selected_ids": list(export_summary.get("selected_ids") or []),
             "resolved_ids": [],
             "unresolved_ids": [],
+            "no_patch_ids": no_patch_ids,
             "unknown_ids": [],
             "coverage_of_attempted_tasks": export_summary["coverage_of_attempted_tasks"],
             "is_partial": bench_is_partial,
-            "missing_patch_count": export_summary["missing_patch_count"],
+            "missing_patch_count": missing_patch_count,
+            "skipped_ineligible_count": skipped_ineligible_count,
+            "skipped_ineligible_reasons": export_summary["skipped_ineligible_reasons"],
             "error_detail": None,
             "predictions_path": None,
             "evaluation_dir": str(bench_eval_dir.resolve()),
@@ -2485,6 +3365,21 @@ def evaluate_resolution_for_suite(
             per_bench[bench] = bench_summary
             continue
         supported_benches.append(bench)
+        if prediction_count <= 0 and no_patch_ids and len(no_patch_ids) == task_count and not bench_is_partial:
+            evaluated_count = len(no_patch_ids)
+            evaluated_task_count += evaluated_count
+            evaluated_prediction_count += evaluated_count
+            successful_benches.append(bench)
+            bench_summary["status"] = "completed"
+            bench_summary["unresolved_ids"] = no_patch_ids
+            bench_summary["evaluated_task_count"] = evaluated_count
+            bench_summary["resolved_count"] = 0
+            bench_summary["pass_at_1"] = 0.0 if task_count else None
+            bench_summary["pass_at_1_on_evaluated"] = 0.0 if evaluated_count else None
+            bench_summary["pass_at_1_on_selected"] = 0.0 if task_count else None
+            bench_summary["is_partial"] = False
+            per_bench[bench] = bench_summary
+            continue
         if prediction_count <= 0:
             bench_summary["status"] = "no_predictions"
             bench_summary["error_detail"] = "No patch-producing predictions were available for this bench."
@@ -2517,6 +3412,15 @@ def evaluate_resolution_for_suite(
             expected_agent=expected_agent,
         )
         bench_summary["predictions_path"] = str(predictions_path)
+        if prebuild_images:
+            bench_summary["image_prebuild"] = prepare_resolution_images_for_bench(
+                bench=bench,
+                predictions_path=predictions_path,
+                dataset_name=str(backend.dataset_name or ""),
+                work_dir=bench_eval_dir / "image-prebuild",
+                max_workers=prebuild_workers or max_workers,
+                env=env,
+            )
         stale_error_path = bench_eval_dir / "resolution-error.json"
         if stale_error_path.exists():
             stale_error_path.unlink()
@@ -2605,10 +3509,16 @@ def evaluate_resolution_for_suite(
         resolved_ids = [str(item).strip() for item in (resolution_summary.get("resolved_ids") or []) if str(item).strip()]
         raw_unresolved_ids = [str(item).strip() for item in (resolution_summary.get("unresolved_ids") or []) if str(item).strip()]
         unresolved_ids = list(raw_unresolved_ids)
+        unresolved_seen = set(unresolved_ids)
+        for no_patch_id in no_patch_ids:
+            if no_patch_id not in unresolved_seen:
+                unresolved_ids.append(no_patch_id)
+                unresolved_seen.add(no_patch_id)
         error_ids = [str(item).strip() for item in (resolution_summary.get("error_ids") or []) if str(item).strip()]
         submitted_ids = [str(item).strip() for item in (bench_summary.get("prediction_ids") or []) if str(item).strip()]
         unknown_ids = sorted(set(submitted_ids) - set(resolved_ids) - set(unresolved_ids) - set(error_ids))
-        extra_ids = sorted((set(resolved_ids) | set(unresolved_ids) | set(error_ids)) - set(submitted_ids))
+        backend_reported_ids = set(resolved_ids) | set(raw_unresolved_ids) | set(error_ids)
+        extra_ids = sorted(backend_reported_ids - set(submitted_ids))
         attempted_ids = sorted(set(resolved_ids) | set(unresolved_ids) | set(error_ids))
         evaluated_count = len(attempted_ids)
         if evaluated_count <= 0:
@@ -2665,12 +3575,13 @@ def evaluate_resolution_for_suite(
         pass_at_1_on_selected = (resolved_count / task_count) if task_count else None
         total_resolved += resolved_count
         evaluated_task_count += evaluated_count
-        evaluated_prediction_count += min(prediction_count, evaluated_count)
+        evaluated_prediction_count += evaluated_count
         successful_benches.append(bench)
         bench_summary.update(resolution_summary)
         bench_summary["status"] = "completed"
         bench_summary["resolved_ids"] = resolved_ids
         bench_summary["unresolved_ids"] = unresolved_ids
+        bench_summary["no_patch_ids"] = no_patch_ids
         bench_summary["unknown_ids"] = unknown_ids
         bench_summary["error_ids"] = error_ids
         bench_summary["evaluated_task_count"] = evaluated_count
@@ -2720,6 +3631,112 @@ def evaluate_resolution_for_suite(
     }
 
 
+def _verification_quality_paths(out_path: Path) -> tuple[Path, Path, Path]:
+    root = out_path.parent
+    return (
+        root / "verification-quality.jsonl",
+        root / "verification-quality-summary.json",
+        root / "verification-quality.csv",
+    )
+
+
+def _write_verification_quality_artifacts(*, out_path: Path, rows: list[dict[str, object]]) -> dict[str, object]:
+    jsonl_path, summary_path, csv_path = _verification_quality_paths(out_path)
+    _write_jsonl_atomic(jsonl_path, rows)
+
+    strongest_counts = Counter(
+        str(((row.get("verification_quality") or {}).get("strongest_verification") if isinstance(row.get("verification_quality"), dict) else "") or "unknown")
+        for row in rows
+    )
+    syntax_only_count = sum(
+        1
+        for row in rows
+        if isinstance(row.get("verification_quality"), dict)
+        and bool(row["verification_quality"].get("syntax_only"))
+    )
+    successful_runtime_count = sum(
+        1
+        for row in rows
+        if isinstance(row.get("verification_quality"), dict)
+        and bool(row["verification_quality"].get("successful_runtime_verification"))
+    )
+    environment_limited_count = sum(
+        1
+        for row in rows
+        if isinstance(row.get("verification_quality"), dict)
+        and bool(row["verification_quality"].get("environment_limited"))
+    )
+    added_regression_test_count = sum(
+        1
+        for row in rows
+        if isinstance(row.get("regression_test"), dict)
+        and bool(row["regression_test"].get("added_regression_test"))
+    )
+    added_regression_test_not_run_count = sum(
+        1
+        for row in rows
+        if isinstance(row.get("regression_test"), dict)
+        and bool(row["regression_test"].get("added_regression_test"))
+        and row["regression_test"].get("regression_tests_run") is False
+    )
+    summary = {
+        "schema_version": 1,
+        "scope": "verification_quality",
+        "record_count": len(rows),
+        "strongest_verification_counts": dict(sorted(strongest_counts.items())),
+        "successful_runtime_verification_count": successful_runtime_count,
+        "syntax_only_count": syntax_only_count,
+        "environment_limited_count": environment_limited_count,
+        "added_regression_test_count": added_regression_test_count,
+        "added_regression_test_not_run_count": added_regression_test_not_run_count,
+        "jsonl_path": str(jsonl_path),
+        "csv_path": str(csv_path),
+    }
+    write_json(summary_path, summary)
+
+    fieldnames = [
+        "instance_id",
+        "original_inst_id",
+        "bench",
+        "record_path",
+        "strongest_verification",
+        "successful_runtime_verification",
+        "syntax_only",
+        "environment_limited",
+        "commands_total",
+        "failed_commands_total",
+        "added_regression_test",
+        "regression_tests_run",
+        "added_test_files",
+    ]
+    ensure_dir(csv_path.parent)
+    with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            verification = row.get("verification_quality") if isinstance(row.get("verification_quality"), dict) else {}
+            regression = row.get("regression_test") if isinstance(row.get("regression_test"), dict) else {}
+            writer.writerow(
+                {
+                    "instance_id": row.get("instance_id"),
+                    "original_inst_id": row.get("original_inst_id"),
+                    "bench": row.get("bench"),
+                    "record_path": row.get("record_path"),
+                    "strongest_verification": verification.get("strongest_verification"),
+                    "successful_runtime_verification": verification.get("successful_runtime_verification"),
+                    "syntax_only": verification.get("syntax_only"),
+                    "environment_limited": verification.get("environment_limited"),
+                    "commands_total": verification.get("commands_total"),
+                    "failed_commands_total": verification.get("failed_commands_total"),
+                    "added_regression_test": regression.get("added_regression_test"),
+                    "regression_tests_run": regression.get("regression_tests_run"),
+                    "added_test_files": "|".join(str(item) for item in (regression.get("added_test_files") or [])),
+                }
+            )
+    summary["summary_path"] = str(summary_path)
+    return summary
+
+
 def convert_records_to_jsonl(*, source_dir: Path, expected_agent: str, out_path: Path) -> dict[str, object]:
     started_at = time.time()
     print(f"[postprocess] converting {expected_agent} records from {source_dir} -> {out_path}", flush=True)
@@ -2740,6 +3757,7 @@ def convert_records_to_jsonl(*, source_dir: Path, expected_agent: str, out_path:
         "is_partial": False,
     }
     task_results = _task_results_for_source_dir(source_dir) if source_dir.exists() else None
+    verification_quality_rows: list[dict[str, object]] = []
     if task_results is not None:
         rows = [row for row in read_jsonl(task_results) if isinstance(row, dict)]
         total = len(rows)
@@ -2764,6 +3782,18 @@ def convert_records_to_jsonl(*, source_dir: Path, expected_agent: str, out_path:
                     require_existing_artifacts=True,
                 )
                 summary["record_count"] = int(summary["record_count"] or 0) + 1
+                if _record_matches_agent(record, expected_agent):
+                    quality_payload = analyze_record_quality(record)
+                    verification_quality_rows.append(
+                        {
+                            "schema_version": 1,
+                            "instance_id": str(record.get("instance_id") or row.get("instance_id") or instance_id),
+                            "original_inst_id": str(record.get("original_inst_id") or row.get("original_inst_id") or ""),
+                            "bench": str(record.get("bench") or row.get("bench") or ""),
+                            "record_path": str(record_path),
+                            **quality_payload,
+                        }
+                    )
                 if not record_is_convertible(record, expected_agent=expected_agent):
                     summary["nonconvertible_record_count"] = int(summary["nonconvertible_record_count"] or 0) + 1
                     if index % progress_every == 0 or index == total:
@@ -2840,6 +3870,18 @@ def convert_records_to_jsonl(*, source_dir: Path, expected_agent: str, out_path:
         summary["record_count"] = count
         summary["convertible_record_count"] = count
         summary["prediction_count"] = count
+    quality_summary = _write_verification_quality_artifacts(
+        out_path=out_path,
+        rows=verification_quality_rows,
+    )
+    summary["verification_quality_path"] = quality_summary["jsonl_path"]
+    summary["verification_quality_summary_path"] = quality_summary["summary_path"]
+    summary["verification_quality_csv_path"] = quality_summary["csv_path"]
+    summary["verification_quality"] = {
+        key: value
+        for key, value in quality_summary.items()
+        if key not in {"jsonl_path", "summary_path", "csv_path"}
+    }
     print(
         f"[postprocess] conversion complete: wrote {int(summary['prediction_count'] or 0)} predictions in {time.time() - started_at:.1f}s",
         flush=True,

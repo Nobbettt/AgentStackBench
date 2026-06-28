@@ -7,7 +7,12 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from ..adapter_base import BaseCodingAgentAdapter, CodingAgentInvocationResult, PreparedCodingAgentRuntime
+from ..adapter_base import (
+    BaseCodingAgentAdapter,
+    CodingAgentInvocationResult,
+    PreparedCodingAgentRuntime,
+    expose_workspace_bin_on_path,
+)
 from ...coding_agents.constants import CLAUDE_OUTPUT_SCHEMA_PATH
 from .parser import ClaudeAgentParser
 from .prompting import build_prompt
@@ -58,6 +63,7 @@ class ClaudeAdapter(BaseCodingAgentAdapter):
         )
         if env_overrides:
             command_env.update(env_overrides)
+        expose_workspace_bin_on_path(command_env, env_overrides)
         template_env = {
             **dict(runtime_env or {}),
             **dict(env_overrides or {}),

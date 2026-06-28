@@ -6,6 +6,8 @@ import importlib.util
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,40 @@ from contextbench.run_suites_core.postprocess import (
 
 
 from .helpers import _fake_run_coding_agent_task, _make_fake_agent_record, _write_task_inputs
+
+
+def test_resolution_image_ref_for_task_uses_resolution_backend_image_names() -> None:
+    assert postprocess.resolution_image_ref_for_task(
+        {
+            "bench": "Verified",
+            "instance_id": "SWE-Bench-Verified__python__maintenance__bugfix__8adb3e00",
+            "original_inst_id": "astropy__astropy-12907",
+        }
+    ) == "sweb.eval.x86_64.astropy__astropy-12907:latest"
+    assert postprocess.resolution_image_ref_for_task(
+        {
+            "bench": "Poly",
+            "instance_id": "SWE-PolyBench__javascript__maintenance__bugfix__368a9735",
+            "original_inst_id": "sveltejs__svelte-464",
+            "language": "javascript",
+        }
+    ) == "polybench_javascript_sveltejs__svelte-464"
+    assert postprocess.resolution_image_ref_for_task(
+        {
+            "bench": "Pro",
+            "instance_id": "SWE-Bench-Pro__javascript__maintenance__bugfix__4eb0e647",
+            "original_inst_id": "instance_NodeBB__NodeBB-04998908ba6721d64eba79ae3b65a351dcfbc5b5-vnan",
+            "repo": "NodeBB/NodeBB",
+        }
+    ) == "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-04998908ba6721d64eba79ae3b65a351dcfbc5b5"
+    assert postprocess.resolution_image_ref_for_task(
+        {
+            "bench": "Multi",
+            "instance_id": "Multi-SWE-Bench__c__maintenance__bugfix__5adf8efc",
+            "original_inst_id": "facebook__zstd-3942",
+        }
+    ) == "mswebench/facebook_m_zstd:pr-3942"
+
 
 def test_run_resolution_evaluation_passes_absolute_predictions_path(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
@@ -73,6 +109,132 @@ def test_run_resolution_evaluation_passes_absolute_predictions_path(tmp_path: Pa
     assert captured["log_path"] == (instance_dir.resolve() / "resolution-command.log")
     assert str(captured["log_prefix"]).startswith("[resolution:")
     assert summary["resolved_ids"] == ["task-a"]
+
+
+def test_prepare_poly_resolution_images_passes_absolute_predictions_path(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    predictions_path = Path("variant") / "resolution-exports" / "poly.jsonl"
+    predictions_path.parent.mkdir(parents=True)
+    predictions_path.write_text(
+        json.dumps({"instance_id": "task-a", "model_patch": "diff --git a/a.py b/a.py\n"})
+        + "\n",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run_resolution_command(*, command, cwd, log_path, log_prefix, env=None):
+        del log_path, log_prefix, env
+        captured["command"] = list(command)
+        captured["cwd"] = cwd
+        return 0, "ok"
+
+    monkeypatch.setattr("contextbench.run_suites_core.postprocess._run_resolution_command", fake_run_resolution_command)
+    monkeypatch.setattr("contextbench.run_suites_core.postprocess._DEFAULT_POLY_BENCH_PYTHON", tmp_path / "python")
+
+    summary = postprocess.prepare_resolution_images_for_bench(
+        bench="Poly",
+        predictions_path=predictions_path,
+        dataset_name="AmazonScience/SWE-PolyBench",
+        work_dir=Path("variant") / "resolution-eval" / "poly" / "image-prebuild",
+        max_workers=2,
+    )
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    pred_index = command.index("--predictions-path")
+    assert Path(command[pred_index + 1]).is_absolute()
+    assert captured["cwd"] == (tmp_path / "variant" / "resolution-eval" / "poly" / "image-prebuild").resolve()
+    assert summary["status"] == "completed"
+    assert summary["max_workers"] == 2
+
+
+def test_prepare_swebench_resolution_images_passes_required_image_tags(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    predictions_path = Path("variant") / "resolution-exports" / "verified.jsonl"
+    predictions_path.parent.mkdir(parents=True)
+    predictions_path.write_text(
+        json.dumps({"instance_id": "astropy__astropy-12907", "model_patch": ""}) + "\n",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run_resolution_command(*, command, cwd, log_path, log_prefix, env=None):
+        del log_path, log_prefix, env
+        captured["command"] = list(command)
+        captured["cwd"] = cwd
+        return 0, "ok"
+
+    monkeypatch.setattr("contextbench.run_suites_core.postprocess._run_resolution_command", fake_run_resolution_command)
+    monkeypatch.setattr("contextbench.run_suites_core.postprocess._DEFAULT_SWE_BENCH_PYTHON", tmp_path / "python")
+
+    summary = postprocess.prepare_resolution_images_for_bench(
+        bench="Verified",
+        predictions_path=predictions_path,
+        dataset_name="princeton-nlp/SWE-bench_Verified",
+        work_dir=Path("variant") / "resolution-eval" / "verified" / "image-prebuild",
+        max_workers=2,
+    )
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[command.index("--tag") + 1] == "latest"
+    assert command[command.index("--env_image_tag") + 1] == "latest"
+    assert Path(command[command.index("--instance_ids") + 1]).name == "astropy__astropy-12907"
+    assert captured["cwd"] == (tmp_path / "variant" / "resolution-eval" / "verified" / "image-prebuild").resolve()
+    assert summary["status"] == "completed"
+    assert summary["max_workers"] == 2
+
+
+def test_run_resolution_evaluation_parallelizes_instances(tmp_path: Path, monkeypatch) -> None:
+    predictions_path = tmp_path / "predictions.jsonl"
+    predictions_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"instance_id": "task-a", "model_patch": "diff --git a/a.py b/a.py\n"}),
+                json.dumps({"instance_id": "task-b", "model_patch": "diff --git a/b.py b/b.py\n"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    work_dir = tmp_path / "resolution"
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+    commands: list[list[str]] = []
+
+    def fake_run_resolution_command(*, command, cwd, log_path, log_prefix, env=None):
+        nonlocal active, max_active
+        del log_path, log_prefix, env
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+            commands.append(list(command))
+        try:
+            time.sleep(0.05)
+            instance_id = Path(cwd).name
+            (Path(cwd) / "report.json").write_text(
+                json.dumps({"resolved_ids": [instance_id], "unresolved_ids": [], "error_ids": []}) + "\n",
+                encoding="utf-8",
+            )
+            return 0, "ok"
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr("contextbench.run_suites_core.postprocess._run_resolution_command", fake_run_resolution_command)
+
+    summary = run_resolution_evaluation(
+        predictions_path=predictions_path,
+        dataset_name="princeton-nlp/SWE-bench_Verified",
+        run_id="parallel-run",
+        work_dir=work_dir,
+        max_workers=2,
+    )
+
+    assert max_active == 2
+    assert summary["resolved_ids"] == ["task-a", "task-b"]
+    assert all(command[command.index("--max_workers") + 1] == "1" for command in commands)
 
 
 def test_describe_resolution_backend_support_marks_poly_pro_and_multi_unavailable(monkeypatch) -> None:

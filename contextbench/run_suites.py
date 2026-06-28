@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-06-09 from upstream ContextBench.
-# Summary of changes: add refresh-rollups support for regenerated suite artifacts.
+# Summary of changes: add refresh-rollups support and global run-suite worker scheduling.
 
 """Primary CLI entrypoint for ContextBench run suites."""
 
@@ -30,7 +30,12 @@ __all__ = [
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a ContextBench run suite across multiple coding-agent setups")
     parser.add_argument("--config", required=True, type=Path, help="Path to run suite JSON config")
-    parser.add_argument("--max-workers", type=int, default=None, help="Override the per-task variant worker cap")
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="Override the run-suite worker cap; by default this drives the global agent job pool.",
+    )
     parser.add_argument(
         "--resume",
         action="store_true",

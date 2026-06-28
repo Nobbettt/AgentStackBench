@@ -190,6 +190,7 @@ def _fake_run_coding_agent_task(call_log: list[dict[str, object]]):
         runtime_validation_commands=(),
         diff_exclude_paths=(),
         required_tool_call_patterns=(),
+        required_command_patterns=(),
         required_available_tool_patterns=(),
         runtime_keep_failed=False,
     ):
@@ -227,6 +228,7 @@ def _fake_run_coding_agent_task(call_log: list[dict[str, object]]):
                 "runtime_validation_commands": list(runtime_validation_commands or []),
                 "diff_exclude_paths": list(diff_exclude_paths or []),
                 "required_tool_call_patterns": list(required_tool_call_patterns or []),
+                "required_command_patterns": list(required_command_patterns or []),
                 "required_available_tool_patterns": list(required_available_tool_patterns or []),
                 "runtime_keep_failed": runtime_keep_failed,
             }

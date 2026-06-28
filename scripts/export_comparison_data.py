@@ -18,6 +18,7 @@ from contextbench.artifact_sanitization import (
     sanitize_text,
 )
 from contextbench.coding_agents.records import normalize_span_map, normalize_symbol_map
+from contextbench.coding_agents.verification_quality import analyze_record_quality
 from contextbench.evaluate import aggregate_results
 from contextbench.metrics.patch_editloc import compute_patch_editloc, compute_patch_to_patch_overlap
 from contextbench.parsers import GoldLoader
@@ -1004,16 +1005,89 @@ def _codex_tool_result(event: dict[str, Any], item: dict[str, Any] | None = None
     return None
 
 
-def _trace_mcp_count_from_codex(raw_response: dict[str, Any]) -> int:
-    count = 0
+def _jsonish_values_from_text(value: str) -> list[Any]:
+    decoder = json.JSONDecoder()
+    candidates = [value.strip()]
+    unescaped = value.strip().replace('\\"', '"').replace("\\'", "'")
+    if unescaped not in candidates:
+        candidates.append(unescaped)
+    try:
+        decoded = value.strip().encode("utf-8").decode("unicode_escape")
+    except UnicodeDecodeError:
+        decoded = ""
+    if decoded and decoded not in candidates:
+        candidates.append(decoded)
+
+    parsed_values: list[Any] = []
+    for candidate in candidates:
+        for match in re.finditer(r"[\[{]", candidate):
+            try:
+                parsed, _ = decoder.raw_decode(candidate[match.start():])
+            except json.JSONDecodeError:
+                continue
+            parsed_values.append(parsed)
+            break
+    return parsed_values
+
+
+def _parse_mcp_cli_command(command: Any) -> tuple[str, dict[str, Any]] | None:
+    command_text = str(command or "")
+    match = re.search(r"(?:^|[\s'\"/])mcp-tool\s+([A-Za-z0-9_.:-]+)", command_text)
+    if not match:
+        return None
+    tool = re.sub(r"[^A-Za-z0-9_.:-]+", "_", match.group(1)).strip("_")
+    if not tool:
+        return None
+    tool_input: dict[str, Any] = {}
+    for parsed in _jsonish_values_from_text(command_text[match.end():]):
+        if isinstance(parsed, dict):
+            tool_input = parsed
+            break
+    return f"mcp__cli__{tool}", tool_input
+
+
+def _command_execution_succeeded(item: dict[str, Any]) -> bool:
+    exit_code = item.get("exit_code") if "exit_code" in item else item.get("exitCode")
+    if exit_code is not None:
+        try:
+            return int(exit_code) == 0
+        except (TypeError, ValueError):
+            return False
+    return _tool_call_succeeded({"status": item.get("status"), "payload": {"status": item.get("status")}})
+
+
+def _trace_mcp_stats_from_codex(raw_response: dict[str, Any]) -> tuple[int, int]:
+    total = 0
+    successful = 0
     for event in raw_response.get("events", []):
         if not isinstance(event, dict):
             continue
         item = event.get("item")
         item_dict = item if isinstance(item, dict) else None
+        if item_dict and item_dict.get("type") == "command_execution":
+            if str(event.get("type") or "") != "item.completed":
+                continue
+            if not _parse_mcp_cli_command(item_dict.get("command")):
+                continue
+            total += 1
+            if _command_execution_succeeded(item_dict):
+                successful += 1
+            continue
         if _codex_event_is_mcp(event, item_dict):
-            count += 1
-    return count
+            total += 1
+            if _tool_call_succeeded(
+                {
+                    "status": item_dict.get("status") if isinstance(item_dict, dict) else event.get("status"),
+                    "payload": item_dict if isinstance(item_dict, dict) else event,
+                }
+            ):
+                successful += 1
+    return total, successful
+
+
+def _trace_mcp_count_from_codex(raw_response: dict[str, Any]) -> int:
+    total, _ = _trace_mcp_stats_from_codex(raw_response)
+    return total
 
 
 def _trace_action_counts(raw_response: dict[str, Any] | None, record: dict[str, Any]) -> dict[str, int]:
@@ -1027,6 +1101,7 @@ def _trace_action_counts(raw_response: dict[str, Any] | None, record: dict[str, 
     read_tool_calls = 0
     edit_tool_calls = 0
     trace_mcp_tool_calls = 0
+    trace_successful_mcp_tool_calls = 0
 
     if isinstance(raw_response, dict) and isinstance(raw_response.get("response"), list):
         for event in raw_response.get("response", []):
@@ -1048,6 +1123,7 @@ def _trace_action_counts(raw_response: dict[str, Any] | None, record: dict[str, 
                     edit_tool_calls += 1
                 if tool_name.startswith("mcp__"):
                     trace_mcp_tool_calls += 1
+                    trace_successful_mcp_tool_calls += 1
     elif isinstance(raw_response, dict):
         for event in raw_response.get("events", []):
             if not isinstance(event, dict):
@@ -1061,14 +1137,21 @@ def _trace_action_counts(raw_response: dict[str, Any] | None, record: dict[str, 
                 command_executions += 1
             elif item_type == "file_change" and event_type == "item.completed":
                 edit_tool_calls += 1
-        trace_mcp_tool_calls = _trace_mcp_count_from_codex(raw_response)
+        trace_mcp_tool_calls, trace_successful_mcp_tool_calls = _trace_mcp_stats_from_codex(raw_response)
 
     if total_tool_calls is None:
         total_tool_calls = len(tool_calls)
     if mcp_tool_calls is None:
         mcp_tool_calls = sum(1 for call in tool_calls if _tool_call_is_mcp(call)) or trace_mcp_tool_calls
+    elif not mcp_tool_calls and trace_mcp_tool_calls:
+        mcp_tool_calls = trace_mcp_tool_calls
     if successful_mcp_tool_calls is None:
-        successful_mcp_tool_calls = sum(1 for call in tool_calls if _tool_call_is_mcp(call) and _tool_call_succeeded(call))
+        successful_mcp_tool_calls = (
+            sum(1 for call in tool_calls if _tool_call_is_mcp(call) and _tool_call_succeeded(call))
+            or trace_successful_mcp_tool_calls
+        )
+    elif not successful_mcp_tool_calls and trace_successful_mcp_tool_calls:
+        successful_mcp_tool_calls = trace_successful_mcp_tool_calls
 
     return {
         "toolCalls": int(total_tool_calls or 0),
@@ -1145,14 +1228,65 @@ def _parse_jsonish_payload(value: Any) -> Any:
     return value
 
 
+def _is_content_block_list(value: list[Any]) -> bool:
+    return bool(value) and all(isinstance(item, dict) and "text" in item for item in value)
+
+
+def _mcp_payload_candidates(payload: Any) -> list[Any]:
+    candidates: list[Any] = []
+    stack = [payload, _parse_jsonish_payload(payload)]
+    seen: set[str] = set()
+
+    while stack:
+        candidate = stack.pop(0)
+        try:
+            marker = json.dumps(candidate, sort_keys=True, default=str)
+        except TypeError:
+            marker = repr(candidate)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        candidates.append(candidate)
+
+        if isinstance(candidate, dict):
+            content = candidate.get("content")
+            content_items = content if isinstance(content, list) else [content]
+            for item in content_items:
+                if isinstance(item, dict) and "text" in item:
+                    stack.extend(_jsonish_values_from_text(str(item.get("text") or "")))
+                elif isinstance(item, str):
+                    stack.extend(_jsonish_values_from_text(item))
+                elif isinstance(item, (dict, list)):
+                    stack.append(item)
+        elif isinstance(candidate, list) and _is_content_block_list(candidate):
+            for item in candidate:
+                stack.extend(_jsonish_values_from_text(str(item.get("text") or "")))
+
+    return candidates
+
+
 def _mcp_payload_results(payload: Any) -> list[Any]:
-    if not isinstance(payload, dict):
-        return []
-    for key in ("results", "rules", "items", "matches"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            return value
+    for candidate in _mcp_payload_candidates(payload):
+        if isinstance(candidate, list) and not _is_content_block_list(candidate):
+            return candidate
+        if not isinstance(candidate, dict):
+            continue
+        for key in ("results", "rules", "items", "matches"):
+            value = candidate.get(key)
+            if isinstance(value, list):
+                return value
     return []
+
+
+def _mcp_total_candidates(payload: Any) -> int | None:
+    for candidate in _mcp_payload_candidates(payload):
+        if not isinstance(candidate, dict):
+            continue
+        for key in ("total_candidates", "totalCandidates", "total", "count"):
+            value = _int_or_none(candidate.get(key))
+            if value is not None:
+                return value
+    return None
 
 
 def _normalized_result_path(value: Any, *, workspace_path: str | None) -> str:
@@ -1232,6 +1366,7 @@ def _mcp_call_detail(
     tool_name: str,
     tool_input: dict[str, Any],
     result: Any,
+    succeeded: bool = True,
     ordered_tool_events: list[tuple[int, str, Any]],
     event_index: int,
     final_files: set[str],
@@ -1239,7 +1374,7 @@ def _mcp_call_detail(
     workspace_path: str | None,
     sanitize_context: SanitizationContext,
 ) -> dict[str, Any]:
-    payload = _parse_jsonish_payload(result)
+    payload = result
     if isinstance(payload, dict) and isinstance(payload.get("content"), str):
         payload = _parse_jsonish_payload(payload.get("content"))
     results = _mcp_payload_results(payload)
@@ -1260,14 +1395,11 @@ def _mcp_call_detail(
     meaningful = result_count > 0 and bool(final_overlap or patch_overlap or followed_paths)
     return {
         "toolName": tool_name,
+        "succeeded": succeeded,
         "query": sanitize_text(str(tool_input.get("query") or ""), context=sanitize_context),
         "topK": _int_or_none(tool_input.get("top_k") or tool_input.get("topK")),
         "resultCount": result_count,
-        "totalCandidates": (
-            _int_or_none(payload.get("total_candidates") or payload.get("totalCandidates"))
-            if isinstance(payload, dict)
-            else None
-        ),
+        "totalCandidates": _mcp_total_candidates(payload),
         "topPaths": sanitize_json_value(result_paths[:5], context=sanitize_context),
         "topSymbols": sanitize_json_value(result_symbols[:5], context=sanitize_context),
         "overlapFinalContextFiles": final_overlap,
@@ -1327,6 +1459,7 @@ def _claude_mcp_call_details(
             tool_name=str(tool_use.get("toolName") or ""),
             tool_input=tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {},
             result=tool_use.get("result"),
+            succeeded=True,
             ordered_tool_events=ordered_tool_events,
             event_index=int(tool_use["index"]),
             final_files=final_files,
@@ -1357,7 +1490,24 @@ def _codex_mcp_call_details(
         item = event.get("item")
         item_dict = item if isinstance(item, dict) else None
         if item_dict and item_dict.get("type") == "command_execution":
-            ordered_tool_events.append((index, "command_execution", {"command": item_dict.get("command")}))
+            parsed_mcp_command = _parse_mcp_cli_command(item_dict.get("command"))
+            if parsed_mcp_command:
+                tool_name, tool_input = parsed_mcp_command
+                ordered_tool_events.append((index, tool_name, tool_input))
+                if str(event.get("type") or "") == "item.completed":
+                    mcp_events.append(
+                        {
+                            "index": index,
+                            "toolName": tool_name,
+                            "input": tool_input,
+                            "result": item_dict.get("aggregated_output")
+                            if item_dict.get("aggregated_output") is not None
+                            else _codex_tool_result(event, item_dict),
+                            "succeeded": _command_execution_succeeded(item_dict),
+                        }
+                    )
+            else:
+                ordered_tool_events.append((index, "command_execution", {"command": item_dict.get("command")}))
             continue
         if not _codex_event_is_mcp(event, item_dict):
             continue
@@ -1372,6 +1522,12 @@ def _codex_mcp_call_details(
                 "toolName": tool_name,
                 "input": tool_input,
                 "result": _codex_tool_result(event, item_dict),
+                "succeeded": _tool_call_succeeded(
+                    {
+                        "status": item_dict.get("status") if isinstance(item_dict, dict) else event.get("status"),
+                        "payload": item_dict if isinstance(item_dict, dict) else event,
+                    }
+                ),
             }
         )
 
@@ -1380,6 +1536,7 @@ def _codex_mcp_call_details(
             tool_name=str(tool_use.get("toolName") or ""),
             tool_input=tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {},
             result=tool_use.get("result"),
+            succeeded=bool(tool_use.get("succeeded", True)),
             ordered_tool_events=ordered_tool_events,
             event_index=int(tool_use["index"]),
             final_files=final_files,
@@ -1413,6 +1570,7 @@ def _record_mcp_call_details(
                 tool_name=tool_name,
                 tool_input=tool_input,
                 result=_codex_tool_result({}, payload),
+                succeeded=_tool_call_succeeded(call),
                 ordered_tool_events=[],
                 event_index=index,
                 final_files=final_files,
@@ -1480,6 +1638,30 @@ def _extract_mcp_usage(
             workspace_path=workspace_path,
             sanitize_context=sanitize_context,
         )
+
+    if calls:
+        call_counts_by_tool: dict[str, dict[str, int]] = {}
+        for call in calls:
+            name = str(call.get("toolName") or "").strip()
+            if not name:
+                continue
+            counts = call_counts_by_tool.setdefault(name, {"calls": 0, "successfulCalls": 0})
+            counts["calls"] += 1
+            if call.get("succeeded", True):
+                counts["successfulCalls"] += 1
+        available_tools = sorted({*available_tools, *call_counts_by_tool.keys()})
+        if total_calls == 0:
+            total_calls = len(calls)
+        if successful_calls == 0:
+            successful_calls = sum(1 for call in calls if call.get("succeeded", True))
+        by_tool = {str(entry.get("name") or ""): dict(entry) for entry in tool_counts if str(entry.get("name") or "")}
+        for name, counts in call_counts_by_tool.items():
+            entry = by_tool.setdefault(name, {"name": name, "calls": 0, "successfulCalls": 0})
+            if int(entry.get("calls") or 0) == 0:
+                entry["calls"] = counts["calls"]
+            if int(entry.get("successfulCalls") or 0) == 0:
+                entry["successfulCalls"] = counts["successfulCalls"]
+        tool_counts = [by_tool[name] for name in sorted(by_tool)]
 
     calls_with_results = sum(1 for call in calls if int(call.get("resultCount") or 0) > 0)
     calls_with_final_overlap = sum(1 for call in calls if call.get("overlapFinalContextFiles"))
@@ -1680,6 +1862,44 @@ def _normalize_final_output(
             candidates=candidates,
         ),
     }
+
+
+def _record_quality_diagnostics(
+    record: dict[str, Any],
+    *,
+    sanitize_context: SanitizationContext,
+) -> dict[str, Any]:
+    payload = analyze_record_quality(record)
+    verification = payload.get("verification_quality") if isinstance(payload.get("verification_quality"), dict) else {}
+    regression = payload.get("regression_test") if isinstance(payload.get("regression_test"), dict) else {}
+    frontend_payload = {
+        "verificationQuality": {
+            "schemaVersion": verification.get("schema_version"),
+            "strongestVerification": verification.get("strongest_verification"),
+            "successfulRuntimeVerification": verification.get("successful_runtime_verification"),
+            "successfulStaticVerification": verification.get("successful_static_verification"),
+            "syntaxOnly": verification.get("syntax_only"),
+            "dependencyBlocked": verification.get("dependency_blocked"),
+            "environmentLimited": verification.get("environment_limited"),
+            "environmentLimitationMatches": verification.get("environment_limitation_matches") or [],
+            "commandsTotal": verification.get("commands_total"),
+            "successfulCommandsTotal": verification.get("successful_commands_total"),
+            "failedCommandsTotal": verification.get("failed_commands_total"),
+            "commandCategories": verification.get("command_categories") or {},
+            "successfulCommandCategories": verification.get("successful_command_categories") or {},
+            "verificationCommands": verification.get("verification_commands") or [],
+        },
+        "regressionTest": {
+            "schemaVersion": regression.get("schema_version"),
+            "addedRegressionTest": regression.get("added_regression_test"),
+            "regressionTestsRun": regression.get("regression_tests_run"),
+            "addedTestFiles": regression.get("added_test_files") or [],
+            "coveringCommands": regression.get("covering_commands") or [],
+            "reason": regression.get("reason"),
+        },
+    }
+    sanitized = sanitize_json_value(frontend_payload, context=sanitize_context)
+    return sanitized if isinstance(sanitized, dict) else {}
 
 
 def _extract_trace_entries(
@@ -2154,6 +2374,10 @@ def _build_instance_payloads(
             sanitize_context=sanitize_context,
         )
         mcp_summary = {key: value for key, value in mcp_usage.items() if key != "calls"}
+        quality_diagnostics = _record_quality_diagnostics(
+            record,
+            sanitize_context=sanitize_context,
+        )
         duration_resource = _duration_resource_payload(record, effective_config)
         token_resource = _token_resource_payload(record)
         path_diagnostics = (
@@ -2183,6 +2407,8 @@ def _build_instance_payloads(
                     "evaluationStatus": evaluation_status,
                     "resolutionStatus": resolution_status,
                     "predictedContextPathDiagnostics": predicted_context_path_diagnostics,
+                    "verificationQuality": quality_diagnostics.get("verificationQuality") or {},
+                    "regressionTest": quality_diagnostics.get("regressionTest") or {},
                 },
                 "quality": {
                     granularity: {
@@ -2275,6 +2501,8 @@ def _build_instance_payloads(
                 "evaluationStatus": evaluation_status,
                 "resolutionStatus": resolution_status,
                 "predictedContextPathDiagnostics": predicted_context_path_diagnostics,
+                "verificationQuality": quality_diagnostics.get("verificationQuality") or {},
+                "regressionTest": quality_diagnostics.get("regressionTest") or {},
                 "startedAt": record.get("started_at"),
                 "completedAt": record.get("completed_at"),
                 **duration_resource,
@@ -2537,6 +2765,47 @@ def _aggregate_mcp_usage_from_instances(instance_rows: list[dict[str, Any]]) -> 
             }
             for name, values in sorted(by_tool.items())
         ],
+    }
+
+
+def _aggregate_verification_quality_from_instances(instance_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    strongest_counts: dict[str, int] = {}
+    successful_runtime = 0
+    syntax_only = 0
+    environment_limited = 0
+    added_regression_test = 0
+    added_regression_test_not_run = 0
+    total_commands = 0
+    failed_commands = 0
+
+    for row in instance_rows:
+        artifacts = row.get("artifacts") if isinstance(row.get("artifacts"), dict) else {}
+        verification = artifacts.get("verificationQuality") if isinstance(artifacts.get("verificationQuality"), dict) else {}
+        regression = artifacts.get("regressionTest") if isinstance(artifacts.get("regressionTest"), dict) else {}
+        strongest = str(verification.get("strongestVerification") or "unknown")
+        strongest_counts[strongest] = strongest_counts.get(strongest, 0) + 1
+        if verification.get("successfulRuntimeVerification"):
+            successful_runtime += 1
+        if verification.get("syntaxOnly"):
+            syntax_only += 1
+        if verification.get("environmentLimited"):
+            environment_limited += 1
+        total_commands += int(verification.get("commandsTotal") or 0)
+        failed_commands += int(verification.get("failedCommandsTotal") or 0)
+        if regression.get("addedRegressionTest"):
+            added_regression_test += 1
+            if regression.get("regressionTestsRun") is False:
+                added_regression_test_not_run += 1
+
+    return {
+        "strongestVerificationCounts": dict(sorted(strongest_counts.items())),
+        "successfulRuntimeVerificationRuns": successful_runtime,
+        "syntaxOnlyRuns": syntax_only,
+        "environmentLimitedRuns": environment_limited,
+        "addedRegressionTestRuns": added_regression_test,
+        "addedRegressionTestNotRunRuns": added_regression_test_not_run,
+        "totalCommands": total_commands,
+        "failedCommands": failed_commands,
     }
 
 
@@ -2870,6 +3139,7 @@ def _load_variant_payload(
     skill_usage = _aggregate_skill_usage_from_instances(instance_rows)
     tool_usage = _aggregate_tool_usage_from_instances(instance_rows)
     mcp_usage = _aggregate_mcp_usage_from_instances(instance_rows)
+    verification_usage = _aggregate_verification_quality_from_instances(instance_rows)
     pattern_metrics = _aggregate_pattern_metrics_from_instances(instance_rows)
     fix_overlap_vs_gold_summary = _format_fix_overlap_summary(
         _aggregate_fix_overlap_vs_gold_from_instances(instance_rows)
@@ -3023,6 +3293,7 @@ def _load_variant_payload(
             "skills": skill_usage,
             "tools": tool_usage,
             "mcp": mcp_usage,
+            "verification": verification_usage,
         },
         "instances": instance_rows,
     }, instance_details

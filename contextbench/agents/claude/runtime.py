@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-19 from upstream ContextBench.
+# Summary of changes: include parsed command executions in Claude invocation results.
 
 """Claude-specific runtime preparation and invocation helpers."""
 
@@ -188,6 +191,8 @@ def prepare_runtime_env(
     env.update(
         {
             "HOME": str(roots["home_dir"]),
+            "CONTEXTBENCH_RUNTIME_ROOT": str(roots["runtime_root"]),
+            "CONTEXTBENCH_RUNTIME_BIN": str(runtime_bin),
             "XDG_CONFIG_HOME": str(roots["xdg_config_home"]),
             "XDG_DATA_HOME": str(roots["xdg_data_home"]),
             "XDG_CACHE_HOME": str(roots["xdg_cache_home"]),
@@ -831,6 +836,7 @@ def run_invocation(
         structured_output=structured_output,
         token_usage=parser.extract_token_usage(raw_response),
         tool_calls=parser.extract_tool_calls(raw_response),
+        command_executions=parser.extract_command_executions(raw_response),
         available_tools=parser.extract_available_tools(raw_response),
         persisted_tool_results=persisted_tool_results,
         diagnostic_note=diagnostic_note,

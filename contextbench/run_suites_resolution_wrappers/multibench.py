@@ -1,4 +1,6 @@
 
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 import argparse
@@ -16,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-dir", type=Path, required=True)
     parser.add_argument("--log-dir", type=Path, required=True)
     parser.add_argument("--max-workers", type=int, default=1)
+    parser.add_argument("--prepare-images-only", action="store_true")
     return parser.parse_args()
 
 
@@ -70,6 +73,7 @@ def _write_error(*, output_dir: Path, instance_id: str, exit_code: int | None, d
 
 def main() -> int:
     args = parse_args()
+    prepare_images_only = bool(getattr(args, "prepare_images_only", False))
     predictions_path = args.predictions_path.resolve()
     dataset_path = args.dataset_path.resolve()
     output_dir = args.output_dir.resolve()
@@ -77,10 +81,11 @@ def main() -> int:
     log_dir = args.log_dir.resolve()
 
     prediction_rows = _load_jsonl(predictions_path)
-    if len(prediction_rows) != 1:
+    if len(prediction_rows) != 1 and not prepare_images_only:
         raise RuntimeError("The Multi-SWE-Bench wrapper expects exactly one prediction per invocation.")
-    instance_id = _instance_id(prediction_rows[0])
-    official_instance_id = _official_instance_id(prediction_rows[0])
+    instance_ids = [_instance_id(row) for row in prediction_rows]
+    official_instance_ids = [_official_instance_id(row) for row in prediction_rows]
+    instance_id = instance_ids[0] if instance_ids else "image-prebuild"
 
     output_dir.mkdir(parents=True, exist_ok=True)
     repo_dir.mkdir(parents=True, exist_ok=True)
@@ -91,14 +96,14 @@ def main() -> int:
     config_path.write_text(
         json.dumps(
             {
-                "mode": "evaluation",
+                "mode": "image" if prepare_images_only else "evaluation",
                 "workdir": str(work_dir),
                 "patch_files": [str(predictions_path)],
                 "dataset_files": [str(dataset_path)],
                 "output_dir": str(output_dir),
                 "repo_dir": str(repo_dir),
                 "log_dir": str(log_dir),
-                "specifics": [official_instance_id],
+                "specifics": official_instance_ids,
                 "skips": [],
                 "force_build": False,
                 "need_clone": True,
@@ -106,7 +111,7 @@ def main() -> int:
                 "clear_env": True,
                 "stop_on_error": False,
                 "max_workers": max(1, int(args.max_workers)),
-                "max_workers_build_image": 1,
+                "max_workers_build_image": max(1, int(args.max_workers)),
                 "max_workers_run_instance": 1,
                 "fix_patch_run_cmd": "",
                 "log_level": "INFO",
@@ -133,7 +138,10 @@ def main() -> int:
         if stale_path.exists():
             stale_path.unlink()
 
-    print(f"[multibench-wrapper] evaluating instance: {instance_id}", flush=True)
+    if prepare_images_only:
+        print(f"[multibench-wrapper] preparing images for {len(instance_ids)} instances", flush=True)
+    else:
+        print(f"[multibench-wrapper] evaluating instance: {instance_id}", flush=True)
     completed = subprocess.run(command, check=False, cwd=str(output_dir.parent))
     if completed.returncode != 0:
         detail = (
@@ -143,6 +151,8 @@ def main() -> int:
         error_path = _write_error(output_dir=output_dir, instance_id=instance_id, exit_code=completed.returncode, detail=detail)
         print(f"[multibench-wrapper] {detail}; proof={error_path}", flush=True)
         return completed.returncode
+    if prepare_images_only:
+        return 0
     if not final_report.exists():
         detail = (
             f"Multi-SWE-Bench evaluator produced no final_report.json for {instance_id}; "

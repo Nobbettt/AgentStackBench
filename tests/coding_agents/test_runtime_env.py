@@ -61,13 +61,42 @@ def test_prepare_codex_runtime_env_can_copy_auth_without_host_environment_for_do
     path_parts = env["PATH"].split(":")
     assert path_parts[0] == str(Path(env["HOME"]) / ".local" / "bin")
     assert path_parts[1] == str(codex_runtime_root(tmp_path / "task") / "bin")
+    assert path_parts[2] == str(codex_runtime_root(tmp_path / "task") / "npm-global" / "bin")
     assert "/usr/local/bin" in path_parts
     assert "/host-only/bin" not in path_parts
     assert "SECRET_SHOULD_NOT_LEAK" not in env
     assert "/.cache/agent-runtimes/codex/" in env["HOME"]
     assert env["HOME"].endswith("/home")
+    assert env["CONTEXTBENCH_RUNTIME_ROOT"] == str(codex_runtime_root(tmp_path / "task"))
+    assert env["CONTEXTBENCH_RUNTIME_BIN"] == str(codex_runtime_root(tmp_path / "task") / "bin")
+    assert env["NPM_CONFIG_PREFIX"] == str(codex_runtime_root(tmp_path / "task") / "npm-global")
     assert env["OTEL_SDK_DISABLED"] == "true"
     assert json.loads((Path(env["HOME"]) / ".codex" / "auth.json").read_text(encoding="utf-8")) == {"token": "host"}
+
+
+def test_prepare_codex_runtime_env_exposes_explicit_tool_bundle_for_docker(tmp_path, monkeypatch) -> None:
+    source_codex_dir = tmp_path / "source-codex"
+    source_codex_dir.mkdir()
+    (source_codex_dir / "auth.json").write_text('{"token":"host"}', encoding="utf-8")
+    bundle_root = tmp_path / "bundle"
+    (bundle_root / "usr-local" / "bin").mkdir(parents=True)
+    (bundle_root / "usr-local" / "lib" / "node_modules").mkdir(parents=True)
+    monkeypatch.setenv("PATH", "/host-only/bin")
+
+    env = prepare_codex_runtime_env(
+        tmp_path / "task",
+        source_codex_dir=source_codex_dir,
+        include_host_env=False,
+        runtime_env={"CONTEXTBENCH_CODEX_TOOL_BUNDLE": str(bundle_root)},
+    )
+
+    path_parts = env["PATH"].split(":")
+    assert str(bundle_root / "usr-local" / "bin") in path_parts
+    assert path_parts.index(str(codex_runtime_root(tmp_path / "task") / "npm-global" / "bin")) < path_parts.index(
+        str(bundle_root / "usr-local" / "bin")
+    )
+    assert "/host-only/bin" not in path_parts
+
 
 def test_codex_prepare_runtime_uses_host_auth_without_host_env_for_docker_backend(tmp_path, monkeypatch) -> None:
     host_home = tmp_path / "host-home"
@@ -90,12 +119,48 @@ def test_codex_prepare_runtime_uses_host_auth_without_host_env_for_docker_backen
     assert "/host-only/bin" not in prepared.env["PATH"].split(":")
     assert str(Path(prepared.env["HOME"]) / ".local" / "bin") in prepared.env["PATH"].split(":")
     assert str(codex_runtime_root(tmp_path) / "bin") in prepared.env["PATH"].split(":")
+    assert str(codex_runtime_root(tmp_path) / "npm-global" / "bin") in prepared.env["PATH"].split(":")
     assert "/usr/local/bin" in prepared.env["PATH"].split(":")
     assert "/.cache/agent-runtimes/codex/" in prepared.env["HOME"]
     assert prepared.env["HOME"].endswith("/home")
+    assert prepared.env["CONTEXTBENCH_RUNTIME_ROOT"] == str(codex_runtime_root(tmp_path))
+    assert prepared.env["CONTEXTBENCH_RUNTIME_BIN"] == str(codex_runtime_root(tmp_path) / "bin")
     assert json.loads((Path(prepared.env["HOME"]) / ".codex" / "auth.json").read_text(encoding="utf-8")) == {
         "token": "host"
     }
+
+
+def test_agent_docker_runtime_path_exposes_workspace_bin_without_shadowing_tools(tmp_path, monkeypatch) -> None:
+    workspace_path = tmp_path / "workspace"
+    (workspace_path / "bin").mkdir(parents=True)
+    host_home = tmp_path / "host-home"
+    source_codex_dir = host_home / ".codex"
+    source_codex_dir.mkdir(parents=True)
+    (source_codex_dir / "auth.json").write_text('{"token":"host"}', encoding="utf-8")
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    env_overrides = {"CONTEXTBENCH_WORKSPACE_PATH": str(workspace_path)}
+
+    codex = CodexAdapter().prepare_runtime(
+        task_dir=tmp_path / "codex-task",
+        setup={},
+        env_overrides=env_overrides,
+        runtime_backend="docker",
+    )
+    claude = ClaudeAdapter().prepare_runtime(
+        task_dir=tmp_path / "claude-task",
+        setup={},
+        env_overrides=env_overrides,
+        runtime_backend="docker",
+        runtime_env={"ANTHROPIC_API_KEY": "test-key"},
+    )
+
+    for prepared in (codex, claude):
+        assert prepared.env is not None
+        path_parts = prepared.env["PATH"].split(":")
+        assert path_parts[-1] == str(workspace_path / "bin")
+        assert path_parts.index("/usr/local/bin") < path_parts.index(str(workspace_path / "bin"))
+
 
 def test_prepare_codex_runtime_env_applies_runtime_files(tmp_path) -> None:
     source_codex_dir = tmp_path / "source-codex"
@@ -276,6 +341,8 @@ def test_prepare_claude_runtime_env_copies_auth_and_isolates_home(tmp_path, monk
     assert str(claude_runtime_root(tmp_path / "task") / "bin") in env["PATH"].split(":")
     assert "/usr/local/bin" in env["PATH"].split(":")
     assert env["HOME"].endswith("/home")
+    assert env["CONTEXTBENCH_RUNTIME_ROOT"] == str(claude_runtime_root(tmp_path / "task"))
+    assert env["CONTEXTBENCH_RUNTIME_BIN"] == str(claude_runtime_root(tmp_path / "task") / "bin")
     assert env["OTEL_SDK_DISABLED"] == "true"
 
 

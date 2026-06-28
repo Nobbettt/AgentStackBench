@@ -17,7 +17,11 @@ from contextbench.coding_agents import (
     convert_run_record,
     extract_structured_output_from_value,
 )
-from contextbench.coding_agents.runtime import missing_required_tool_call_patterns, summarize_tool_calls
+from contextbench.coding_agents.runtime import (
+    missing_required_command_patterns,
+    missing_required_tool_call_patterns,
+    summarize_tool_calls,
+)
 from contextbench.coding_agents.constants import CLAUDE_OUTPUT_SCHEMA_PATH, CODEX_OUTPUT_SCHEMA_PATH
 from contextbench.coding_agents.trace_inference import (
     infer_file_list_from_text,
@@ -238,6 +242,40 @@ def test_codex_parser_extracts_item_level_mcp_tool_calls_for_metadata(tmp_path) 
     assert inferred["pred_files"] == ["src/a.py"]
 
 
+def test_codex_parser_extracts_native_mcp_tool_field_for_metadata() -> None:
+    parser = CodexAgentParser()
+    raw_response = {
+        "agent": "codex",
+        "response_format": "jsonl-events",
+        "events": [
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "mcp_tool_call",
+                    "server": "memtrace",
+                    "tool": "find_code",
+                    "status": "completed",
+                    "result": {"content": [{"type": "text", "text": "[]"}]},
+                },
+            }
+        ],
+    }
+
+    tool_calls = parser.extract_tool_calls(raw_response)
+    summary = summarize_tool_calls(tool_calls)
+
+    assert tool_calls[0]["source"] == "codex.item"
+    assert tool_calls[0]["tool_name"] == "mcp__memtrace__find_code"
+    assert tool_calls[0]["payload"]["mcp_server"] == "memtrace"
+    assert tool_calls[0]["payload"]["mcp_tool"] == "find_code"
+    assert summary["mcp_total"] == 1
+    assert summary["mcp_successful_total"] == 1
+    assert summary["mcp_by_server"] == {"memtrace": 1}
+    assert summary["mcp_by_tool"] == {"memtrace/find_code": 1}
+    assert missing_required_tool_call_patterns(tool_calls, [r"^mcp__memtrace__"]) == []
+
+
 def test_codex_mcp_ok_false_does_not_satisfy_required_tool_call() -> None:
     parser = CodexAgentParser()
     raw_response = {
@@ -258,6 +296,104 @@ def test_codex_mcp_ok_false_does_not_satisfy_required_tool_call() -> None:
     assert summary["mcp_total"] == 1
     assert summary["mcp_successful_total"] == 0
     assert missing_required_tool_call_patterns(tool_calls, [r"^mcp__cortex__"]) == [r"^mcp__cortex__"]
+
+
+def test_codex_parser_extracts_successful_command_executions_for_requirements() -> None:
+    parser = CodexAgentParser()
+    raw_response = {
+        "agent": "codex",
+        "response_format": "jsonl-events",
+        "events": [
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "command_execution",
+                    "command": "mcp-tool list_indexed_repositories '{}'",
+                    "aggregated_output": '{"repos":[]}',
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            },
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_2",
+                    "type": "command_execution",
+                    "command": "mcp-tool find_code '{bad json'",
+                    "aggregated_output": "error",
+                    "exit_code": 1,
+                    "status": "failed",
+                },
+            },
+        ],
+    }
+
+    executions = parser.extract_command_executions(raw_response)
+
+    assert executions[0]["source"] == "codex.item"
+    assert executions[0]["command"] == "mcp-tool list_indexed_repositories '{}'"
+    assert missing_required_command_patterns(executions, [r"\bmcp-tool\s+list_indexed_repositories\b"]) == []
+    assert missing_required_command_patterns(executions, [r"\bmcp-tool\s+find_code\b"]) == [
+        r"\bmcp-tool\s+find_code\b"
+    ]
+
+
+def test_claude_parser_extracts_successful_bash_command_executions_for_requirements() -> None:
+    parser = ClaudeAgentParser()
+    raw_response = {
+        "agent": "claude",
+        "response_format": "stream-json",
+        "response": [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "Bash",
+                            "input": {"command": "mcp-tool list_indexed_repositories '{}'"},
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_2",
+                            "name": "Bash",
+                            "input": {"command": "mcp-tool find_code '{bad json'"},
+                        },
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": '{"repos":[]}',
+                            "is_error": False,
+                        },
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_2",
+                            "content": "error",
+                            "is_error": True,
+                        },
+                    ]
+                },
+            },
+        ],
+    }
+
+    executions = parser.extract_command_executions(raw_response)
+
+    assert executions[0]["source"] == "claude.bash"
+    assert executions[0]["command"] == "mcp-tool list_indexed_repositories '{}'"
+    assert missing_required_command_patterns(executions, [r"\bmcp-tool\s+list_indexed_repositories\b"]) == []
+    assert missing_required_command_patterns(executions, [r"\bmcp-tool\s+find_code\b"]) == [
+        r"\bmcp-tool\s+find_code\b"
+    ]
 
 
 def test_codex_parser_does_not_double_prefix_qualified_mcp_tool_names() -> None:

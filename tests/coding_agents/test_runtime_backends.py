@@ -23,6 +23,7 @@ from contextbench.coding_agents.runtime import (
 from contextbench.coding_agents.runtime_backends import (
     RuntimeBackendConfig,
     DockerTaskRuntime,
+    _container_bootstrap_command,
     normalize_runtime_backend_config,
     run_runtime_setup_commands,
 )
@@ -297,6 +298,62 @@ def test_docker_task_runtime_starts_execs_and_cleans_container(tmp_path, monkeyp
     assert_subsequence(docker_exec, ["timeout", "--foreground", "--kill-after", "10s", "30s"])
     assert docker_exec[-3:] == ["codex", "exec", "-"]
     assert docker_rm[:3] == ["docker", "rm", "--force"]
+
+
+def test_docker_container_bootstrap_creates_sudoers_dir() -> None:
+    command = _container_bootstrap_command("501:20")
+
+    assert "mkdir -p /etc/sudoers.d" in command
+    assert command.index("mkdir -p /etc/sudoers.d") < command.index("> /etc/sudoers.d/contextbench")
+
+
+def test_docker_task_runtime_does_not_treat_dead_container_124_as_timeout(tmp_path, monkeypatch) -> None:
+    workspace_path = tmp_path / "workspace"
+    task_dir = tmp_path / "task"
+    workspace_path.mkdir()
+    task_dir.mkdir()
+    stdout_path = task_dir / "stdout.log"
+    stderr_path = task_dir / "stderr.log"
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        if command[:4] == ["docker", "inspect", "--format", "{{.State.Running}}"]:
+            return subprocess.CompletedProcess(command, 0, stdout="false\n", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    class FakeProcess:
+        returncode = 124
+
+        def __init__(self, command, **kwargs):
+            del command, kwargs
+
+        def communicate(self, input=None, timeout=None):
+            del input, timeout
+            return None
+
+    monkeypatch.setattr("contextbench.coding_agents.runtime_backends.subprocess.run", fake_run)
+    monkeypatch.setattr("contextbench.coding_agents.runtime_backends.subprocess.Popen", FakeProcess)
+
+    runtime = DockerTaskRuntime(
+        config=RuntimeBackendConfig(backend="docker", image="contextbench-agent:test"),
+        workspace_path=workspace_path,
+        task_dir=task_dir,
+        schema_path=None,
+        container_name="contextbench-dead",
+        _started=True,
+    )
+
+    result = runtime.run_command(
+        ["codex", "--version"],
+        cwd=workspace_path,
+        stdin_text=None,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        timeout=30,
+    )
+
+    assert result == {"ok": False, "exit_code": 124, "signal": None, "timeout": False}
+    assert runtime._timed_out is False
 
 def test_docker_task_runtime_mounts_linked_worktree_git_metadata(tmp_path) -> None:
     base_repo = tmp_path / "base"

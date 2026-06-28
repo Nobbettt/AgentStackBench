@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-05-21 from upstream ContextBench.
-# Summary of changes: add fork run-suite resolution controls.
+# Summary of changes: add fork run-suite resolution, scheduling, and runtime prebuild controls.
 
 """Pydantic models for run suite configuration and state."""
 
@@ -35,7 +35,9 @@ RuntimeTargetRoot = Literal[
 ]
 
 RuntimeBackend = Literal["host", "docker"]
+RuntimeImageSource = Literal["configured", "resolution"]
 SelectionAssertion = Literal["full_dataset", "configured_selection"]
+AgentScheduler = Literal["global", "per_task"]
 
 ReasoningLevel = Literal[
     "none",
@@ -49,6 +51,40 @@ ReasoningLevel = Literal[
 SUPPORTED_RUNTIME_TARGET_ROOTS: frozenset[str] = frozenset(get_args(RuntimeTargetRoot))
 SUPPORTED_REASONING_LEVELS: frozenset[str] = frozenset(get_args(ReasoningLevel))
 SUPPORTED_CODING_AGENTS: frozenset[str] = frozenset(adapter.name for adapter in iter_coding_agent_adapters())
+
+
+def _normalize_runtime_image_map(value: object, *, field_name: str) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError(f"{field_name} must be an object mapping benchmark names to Docker images")
+    normalized: dict[str, str] = {}
+    for raw_bench, raw_image in value.items():
+        bench = str(raw_bench).strip()
+        image = str(raw_image).strip()
+        if not bench:
+            raise ValueError(f"{field_name} contains an empty benchmark name")
+        if not image:
+            raise ValueError(f"{field_name}.{bench} must be a non-empty Docker image")
+        normalized[bench] = image
+    return normalized
+
+
+def _normalize_runtime_python_image_map(value: object, *, field_name: str) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError(f"{field_name} must be an object mapping Python versions to Docker images")
+    normalized: dict[str, str] = {}
+    for raw_version, raw_image in value.items():
+        version = str(raw_version).strip()
+        image = str(raw_image).strip()
+        if not version:
+            raise ValueError(f"{field_name} contains an empty Python version")
+        if not image:
+            raise ValueError(f"{field_name}.{version} must be a non-empty Docker image")
+        normalized[version] = image
+    return normalized
 
 
 class MaterializedFileConfig(BaseModel):
@@ -88,6 +124,40 @@ class VariantSetupConfig(BaseModel):
         return text or None
 
 
+class RuntimePrebuildConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    commands: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    image_tag: str | None = None
+    pull_base_image: bool = False
+    force_rebuild: bool = False
+
+    @field_validator("commands", mode="before")
+    @classmethod
+    def normalize_commands(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise TypeError("runtime_prebuild.commands must be a list")
+        return [text for text in (str(item).strip() for item in value) if text]
+
+    @field_validator("image_tag", mode="before")
+    @classmethod
+    def normalize_optional_image_tag(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @model_validator(mode="after")
+    def validate_enabled_commands(self) -> "RuntimePrebuildConfig":
+        if self.enabled and not self.commands:
+            raise ValueError("runtime_prebuild.commands must be non-empty when runtime_prebuild.enabled=true")
+        return self
+
+
 class BaseRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -109,7 +179,10 @@ class BaseRunConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     setup: VariantSetupConfig = Field(default_factory=VariantSetupConfig)
     runtime_backend: RuntimeBackend = "docker"
+    runtime_image_source: RuntimeImageSource = "configured"
     runtime_image: str | None = None
+    runtime_images_by_bench: dict[str, str] = Field(default_factory=dict)
+    runtime_images_by_python: dict[str, str] = Field(default_factory=dict)
     runtime_platform: str | None = None
     runtime_env_file: Path | None = None
     runtime_env: dict[str, str] = Field(default_factory=dict)
@@ -117,10 +190,12 @@ class BaseRunConfig(BaseModel):
     runtime_validation_timeout: int | None = Field(default=None, gt=0)
     runtime_setup_cache: bool = False
     runtime_setup_cache_dir: Path | None = None
+    runtime_prebuild: RuntimePrebuildConfig = Field(default_factory=RuntimePrebuildConfig)
     runtime_setup_commands: list[str] = Field(default_factory=list)
     runtime_validation_commands: list[str] = Field(default_factory=list)
     diff_exclude_paths: list[str] = Field(default_factory=list)
     required_tool_call_patterns: list[str] = Field(default_factory=list)
+    required_command_patterns: list[str] = Field(default_factory=list)
     required_available_tool_patterns: list[str] = Field(default_factory=list)
     runtime_keep_failed: bool = False
 
@@ -136,6 +211,16 @@ class BaseRunConfig(BaseModel):
             return None
         text = str(value).strip().lower()
         return text or None
+
+    @field_validator("runtime_images_by_bench", mode="before")
+    @classmethod
+    def normalize_runtime_images_by_bench(cls, value: object) -> dict[str, str]:
+        return _normalize_runtime_image_map(value, field_name="base_run.runtime_images_by_bench")
+
+    @field_validator("runtime_images_by_python", mode="before")
+    @classmethod
+    def normalize_runtime_images_by_python(cls, value: object) -> dict[str, str]:
+        return _normalize_runtime_python_image_map(value, field_name="base_run.runtime_images_by_python")
 
 
 class VariantConfig(BaseModel):
@@ -155,7 +240,12 @@ class VariantConfig(BaseModel):
     env_replace: dict[str, str] | None = None
     setup: VariantSetupConfig = Field(default_factory=VariantSetupConfig)
     runtime_backend: RuntimeBackend | None = None
+    runtime_image_source: RuntimeImageSource | None = None
     runtime_image: str | None = None
+    runtime_images_by_bench_add: dict[str, str] = Field(default_factory=dict)
+    runtime_images_by_bench_replace: dict[str, str] | None = None
+    runtime_images_by_python_add: dict[str, str] = Field(default_factory=dict)
+    runtime_images_by_python_replace: dict[str, str] | None = None
     runtime_platform: str | None = None
     runtime_env_file: Path | None = None
     runtime_env_add: dict[str, str] = Field(default_factory=dict)
@@ -164,6 +254,7 @@ class VariantConfig(BaseModel):
     runtime_validation_timeout: int | None = Field(default=None, gt=0)
     runtime_setup_cache: bool | None = None
     runtime_setup_cache_dir: Path | None = None
+    runtime_prebuild: RuntimePrebuildConfig | None = None
     runtime_setup_commands_add: list[str] = Field(default_factory=list)
     runtime_setup_commands_replace: list[str] | None = None
     runtime_validation_commands_add: list[str] = Field(default_factory=list)
@@ -172,6 +263,8 @@ class VariantConfig(BaseModel):
     diff_exclude_paths_replace: list[str] | None = None
     required_tool_call_patterns_add: list[str] = Field(default_factory=list)
     required_tool_call_patterns_replace: list[str] | None = None
+    required_command_patterns_add: list[str] = Field(default_factory=list)
+    required_command_patterns_replace: list[str] | None = None
     required_available_tool_patterns_add: list[str] = Field(default_factory=list)
     required_available_tool_patterns_replace: list[str] | None = None
     runtime_keep_failed: bool | None = None
@@ -192,11 +285,37 @@ class VariantConfig(BaseModel):
         text = str(value).strip().lower()
         return text or None
 
+    @field_validator("runtime_images_by_bench_add", mode="before")
+    @classmethod
+    def normalize_runtime_images_by_bench_add(cls, value: object) -> dict[str, str]:
+        return _normalize_runtime_image_map(value, field_name="variants[].runtime_images_by_bench_add")
+
+    @field_validator("runtime_images_by_bench_replace", mode="before")
+    @classmethod
+    def normalize_runtime_images_by_bench_replace(cls, value: object) -> dict[str, str] | None:
+        if value is None:
+            return None
+        return _normalize_runtime_image_map(value, field_name="variants[].runtime_images_by_bench_replace")
+
+    @field_validator("runtime_images_by_python_add", mode="before")
+    @classmethod
+    def normalize_runtime_images_by_python_add(cls, value: object) -> dict[str, str]:
+        return _normalize_runtime_python_image_map(value, field_name="variants[].runtime_images_by_python_add")
+
+    @field_validator("runtime_images_by_python_replace", mode="before")
+    @classmethod
+    def normalize_runtime_images_by_python_replace(cls, value: object) -> dict[str, str] | None:
+        if value is None:
+            return None
+        return _normalize_runtime_python_image_map(value, field_name="variants[].runtime_images_by_python_replace")
+
 
 class ParallelismConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_workers: int = Field(default=1, gt=0)
+    agent_workers: int | None = Field(default=None, gt=0)
+    scheduler: AgentScheduler = "global"
 
 
 class PostprocessConfig(BaseModel):
@@ -211,6 +330,8 @@ class PostprocessConfig(BaseModel):
     cache_dir: Path | None = None
     env_file: Path | None = None
     resolve_workers: int = Field(default=1, gt=0)
+    prebuild_resolution_images: bool = False
+    prebuild_resolution_workers: int | None = Field(default=None, gt=0)
     swebench_timeout: int = Field(default=1800, gt=0)
     self_clean_resolution_artifacts: bool = True
     self_clean_resolution_docker_images: bool = True
@@ -260,7 +381,11 @@ class RunSuiteConfig(BaseModel):
             raise ValueError("At least one variant is required")
         if self.base_run.schema_path is None:
             self.base_run.schema_path = get_coding_agent_adapter(self.agent).output_schema_path
-        if self.base_run.runtime_backend == "docker" and self.base_run.runtime_image is None:
+        if (
+            self.base_run.runtime_backend == "docker"
+            and self.base_run.runtime_image_source == "configured"
+            and self.base_run.runtime_image is None
+        ):
             self.base_run.runtime_image = DEFAULT_AGENT_RUNTIME_IMAGES.get(self.agent)
         names = [variant.name for variant in self.variants]
         if len(names) != len(set(names)):
@@ -273,7 +398,10 @@ class RunSuiteConfig(BaseModel):
         self._validate_reasoning_effort(self.base_run.reasoning_effort, location="base_run.reasoning_effort")
         self._validate_runtime_config(
             self.base_run.runtime_backend,
+            self.base_run.runtime_image_source,
             self.base_run.runtime_image,
+            self.base_run.runtime_images_by_bench,
+            self.base_run.runtime_images_by_python,
             self.base_run.runtime_platform,
             location="base_run",
         )
@@ -282,23 +410,60 @@ class RunSuiteConfig(BaseModel):
             self._validate_agent_specific_setup(variant.setup, location=f"variants[{index}].setup")
             self._validate_reasoning_effort(variant.reasoning_effort, location=f"variants[{index}].reasoning_effort")
             effective_backend = variant.runtime_backend or self.base_run.runtime_backend
+            effective_image_source = variant.runtime_image_source or self.base_run.runtime_image_source
             effective_image = variant.runtime_image if variant.runtime_image is not None else self.base_run.runtime_image
             effective_platform = (
                 variant.runtime_platform
                 if variant.runtime_platform is not None
                 else self.base_run.runtime_platform
             )
-            if effective_backend == "docker" and effective_image is None:
+            if (
+                effective_backend == "docker"
+                and effective_image_source == "configured"
+                and effective_image is None
+            ):
                 effective_image = DEFAULT_AGENT_RUNTIME_IMAGES.get(self.agent)
             if effective_backend == "host" and variant.runtime_backend == "host" and variant.runtime_image is None:
+                effective_image_source = "configured"
                 effective_image = None
                 effective_platform = None
+            effective_images_by_bench = (
+                dict(variant.runtime_images_by_bench_replace)
+                if variant.runtime_images_by_bench_replace is not None
+                else {
+                    **self.base_run.runtime_images_by_bench,
+                    **variant.runtime_images_by_bench_add,
+                }
+            )
+            effective_images_by_python = (
+                dict(variant.runtime_images_by_python_replace)
+                if variant.runtime_images_by_python_replace is not None
+                else {
+                    **self.base_run.runtime_images_by_python,
+                    **variant.runtime_images_by_python_add,
+                }
+            )
+            if effective_backend == "host" and variant.runtime_backend == "host":
+                effective_images_by_bench = {}
+                effective_images_by_python = {}
             self._validate_runtime_config(
                 effective_backend,
+                effective_image_source,
                 effective_image,
+                effective_images_by_bench,
+                effective_images_by_python,
                 effective_platform,
                 location=f"variants[{index}]",
             )
+            effective_prebuild = variant.runtime_prebuild or self.base_run.runtime_prebuild
+            if effective_prebuild.enabled and effective_backend != "docker":
+                raise ValueError(
+                    f"variants[{index}].runtime_prebuild requires runtime_backend='docker'"
+                )
+            if effective_prebuild.enabled and effective_image_source != "configured":
+                raise ValueError(
+                    f"variants[{index}].runtime_prebuild requires runtime_image_source='configured'"
+                )
         return self
 
     def _validate_agent_specific_setup(self, setup: VariantSetupConfig, *, location: str) -> None:
@@ -348,15 +513,32 @@ class RunSuiteConfig(BaseModel):
     def _validate_runtime_config(
         self,
         runtime_backend: RuntimeBackend,
+        runtime_image_source: RuntimeImageSource,
         runtime_image: str | None,
+        runtime_images_by_bench: dict[str, str],
+        runtime_images_by_python: dict[str, str],
         runtime_platform: str | None,
         *,
         location: str,
     ) -> None:
-        if runtime_backend == "docker" and not str(runtime_image or "").strip():
+        if runtime_backend == "docker" and runtime_image_source == "configured" and not str(runtime_image or "").strip():
             raise ValueError(f"{location}.runtime_image is required when runtime_backend='docker'")
+        if runtime_backend == "docker" and runtime_image_source == "resolution":
+            if runtime_image is not None:
+                raise ValueError(f"{location}.runtime_image cannot be set when runtime_image_source='resolution'")
+            if runtime_images_by_bench:
+                raise ValueError(f"{location}.runtime_images_by_bench cannot be set when runtime_image_source='resolution'")
+            if runtime_images_by_python:
+                raise ValueError(f"{location}.runtime_images_by_python cannot be set when runtime_image_source='resolution'")
+            return
+        if runtime_backend == "host" and runtime_image_source != "configured":
+            raise ValueError(f"{location}.runtime_image_source='resolution' requires runtime_backend='docker'")
         if runtime_backend == "host" and runtime_image is not None:
             raise ValueError(f"{location}.runtime_image can only be set when runtime_backend='docker'")
+        if runtime_backend == "host" and runtime_images_by_bench:
+            raise ValueError(f"{location}.runtime_images_by_bench can only be set when runtime_backend='docker'")
+        if runtime_backend == "host" and runtime_images_by_python:
+            raise ValueError(f"{location}.runtime_images_by_python can only be set when runtime_backend='docker'")
         if runtime_backend == "host" and runtime_platform is not None:
             raise ValueError(f"{location}.runtime_platform can only be set when runtime_backend='docker'")
 
@@ -385,17 +567,22 @@ class EffectiveVariantConfig(BaseModel):
     agent_args: list[str] = Field(default_factory=list)
     setup: VariantSetupConfig = Field(default_factory=VariantSetupConfig)
     runtime_backend: RuntimeBackend = "docker"
+    runtime_image_source: RuntimeImageSource = "configured"
     runtime_image: str | None = None
+    runtime_images_by_bench: dict[str, str] = Field(default_factory=dict)
+    runtime_images_by_python: dict[str, str] = Field(default_factory=dict)
     runtime_platform: str | None = None
     runtime_env: dict[str, str] = Field(default_factory=dict)
     runtime_setup_timeout: int | None = None
     runtime_validation_timeout: int | None = None
     runtime_setup_cache: bool = False
     runtime_setup_cache_dir: Path | None = None
+    runtime_prebuild: RuntimePrebuildConfig = Field(default_factory=RuntimePrebuildConfig)
     runtime_setup_commands: list[str] = Field(default_factory=list)
     runtime_validation_commands: list[str] = Field(default_factory=list)
     diff_exclude_paths: list[str] = Field(default_factory=list)
     required_tool_call_patterns: list[str] = Field(default_factory=list)
+    required_command_patterns: list[str] = Field(default_factory=list)
     required_available_tool_patterns: list[str] = Field(default_factory=list)
     runtime_keep_failed: bool = False
 

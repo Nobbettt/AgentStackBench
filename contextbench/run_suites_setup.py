@@ -1,4 +1,6 @@
 
+# SPDX-License-Identifier: Apache-2.0
+
 """Deterministic setup helpers for run-suite backend dependencies."""
 
 from __future__ import annotations
@@ -58,6 +60,9 @@ POSTPROCESS_DOCKERFILE = REPO_ROOT / "docker" / "postprocess" / "Dockerfile"
 CODEX_RUNTIME_DOCKERFILE = REPO_ROOT / "docker" / "codex-runtime.Dockerfile"
 CLAUDE_RUNTIME_DOCKERFILE = REPO_ROOT / "docker" / "claude-runtime.Dockerfile"
 CLAUDE_RUNTIME_NATIVE_DEPS_DOCKERFILE = REPO_ROOT / "docker" / "claude-runtime-native-deps.Dockerfile"
+CODEX_TOOL_BUNDLE_ROOT = REPO_ROOT / ".cache" / "agent-tool-bundles" / "codex"
+CODEX_TOOL_BUNDLE_DIR = CODEX_TOOL_BUNDLE_ROOT / f"codex-cli-{CODEX_CLI_VERSION}"
+CODEX_TOOL_BUNDLE_CURRENT = CODEX_TOOL_BUNDLE_ROOT / "current"
 CLAUDE_RUNTIME_DOCKERFILES = {
     "default": CLAUDE_RUNTIME_DOCKERFILE,
     "native-deps": CLAUDE_RUNTIME_NATIVE_DEPS_DOCKERFILE,
@@ -86,6 +91,16 @@ def _docker_build(
         command.extend(["--build-arg", f"{key}={value}"])
     command.extend(["-f", str(dockerfile), "-t", image, str(REPO_ROOT)])
     _run(command)
+
+
+def _docker_image_exists(image: str) -> bool:
+    result = subprocess.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
 
 
 def _verify_fully_pinned_constraints(path: Path) -> None:
@@ -425,6 +440,66 @@ def setup_codex_runtime_image(*, force: bool = False, image: str = CODEX_RUNTIME
     return 0
 
 
+def setup_codex_tool_bundle(
+    *,
+    force: bool = False,
+    image: str = CODEX_RUNTIME_IMAGE,
+    platform: str | None = None,
+) -> int:
+    if not _docker_image_exists(image):
+        setup_codex_runtime_image(force=False, image=image, platform=platform)
+
+    if force and CODEX_TOOL_BUNDLE_DIR.exists():
+        shutil.rmtree(CODEX_TOOL_BUNDLE_DIR)
+
+    if not CODEX_TOOL_BUNDLE_DIR.exists():
+        tmp_dir = CODEX_TOOL_BUNDLE_DIR.with_name(f".{CODEX_TOOL_BUNDLE_DIR.name}.tmp")
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        (tmp_dir / "usr-local").mkdir(parents=True)
+        create = subprocess.run(
+            ["docker", "create", image],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if create.returncode != 0:
+            raise RuntimeError(
+                f"Unable to create temporary container from {image}: "
+                f"{(create.stderr or create.stdout).strip()}"
+            )
+        container_id = create.stdout.strip()
+        try:
+            for source, target in (
+                ("/usr/local/bin", tmp_dir / "usr-local" / "bin"),
+                ("/usr/local/lib/node_modules", tmp_dir / "usr-local" / "lib" / "node_modules"),
+            ):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _run(["docker", "cp", f"{container_id}:{source}", str(target)])
+            (tmp_dir / "manifest.json").write_text(
+                (
+                    "{\n"
+                    f'  "codex_cli_version": "{CODEX_CLI_VERSION}",\n'
+                    f'  "source_image": "{image}"\n'
+                    "}\n"
+                ),
+                encoding="utf-8",
+            )
+            tmp_dir.rename(CODEX_TOOL_BUNDLE_DIR)
+        finally:
+            subprocess.run(["docker", "rm", container_id], capture_output=True, text=True, check=False)
+
+    CODEX_TOOL_BUNDLE_ROOT.mkdir(parents=True, exist_ok=True)
+    if CODEX_TOOL_BUNDLE_CURRENT.is_symlink() or CODEX_TOOL_BUNDLE_CURRENT.exists():
+        if CODEX_TOOL_BUNDLE_CURRENT.is_dir() and not CODEX_TOOL_BUNDLE_CURRENT.is_symlink():
+            shutil.rmtree(CODEX_TOOL_BUNDLE_CURRENT)
+        else:
+            CODEX_TOOL_BUNDLE_CURRENT.unlink()
+    CODEX_TOOL_BUNDLE_CURRENT.symlink_to(CODEX_TOOL_BUNDLE_DIR.name)
+    print(f"Codex tool bundle ready: {CODEX_TOOL_BUNDLE_CURRENT} -> {CODEX_TOOL_BUNDLE_DIR.name}")
+    return 0
+
+
 def setup_claude_runtime_image(
     *,
     force: bool = False,
@@ -488,6 +563,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     codex_runtime_image.add_argument("--force", action="store_true", help="Build without Docker layer cache")
     codex_runtime_image.add_argument("--image", default=CODEX_RUNTIME_IMAGE, help="Docker image tag to build")
     codex_runtime_image.add_argument("--platform", default=None, help="Docker build platform, e.g. linux/amd64")
+    codex_tool_bundle = subparsers.add_parser(
+        "codex-tool-bundle",
+        help="Extract the pinned Codex CLI and Node runtime into a repo-local tool bundle",
+    )
+    codex_tool_bundle.add_argument("--force", action="store_true", help="Recreate the bundle")
+    codex_tool_bundle.add_argument("--image", default=CODEX_RUNTIME_IMAGE, help="Codex runtime image to extract from")
+    codex_tool_bundle.add_argument("--platform", default=None, help="Docker build platform if the image must be built")
     claude_runtime_image = subparsers.add_parser("claude-runtime-image", help="Build the Docker image for Claude Code task runs")
     claude_runtime_image.add_argument("--force", action="store_true", help="Build without Docker layer cache")
     claude_runtime_image.add_argument("--image", default=CLAUDE_RUNTIME_IMAGE, help="Docker image tag to build")
@@ -520,6 +602,8 @@ def main(argv: list[str] | None = None) -> int:
         return setup_postprocess_image(force=bool(args.force))
     if args.command == "codex-runtime-image":
         return setup_codex_runtime_image(force=bool(args.force), image=str(args.image), platform=args.platform)
+    if args.command == "codex-tool-bundle":
+        return setup_codex_tool_bundle(force=bool(args.force), image=str(args.image), platform=args.platform)
     if args.command == "claude-runtime-image":
         return setup_claude_runtime_image(
             force=bool(args.force),

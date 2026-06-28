@@ -1,5 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-03-22 from upstream ContextBench.
-# Summary of changes: add setup-run metadata for unscored coding-agent bootstrap prompts.
+# Summary of changes: add setup-run metadata and command-execution requirements for coding-agent records.
 
 """Typed structures for coding-agent integration records."""
 
@@ -35,6 +36,12 @@ class CommandResult(TypedDict):
 class ToolCall(TypedDict):
     source: str
     tool_name: str
+    payload: dict[str, object]
+
+
+class CommandExecution(TypedDict):
+    source: str
+    command: str
     payload: dict[str, object]
 
 
@@ -203,6 +210,7 @@ class TaskRecord(TypedDict):
     final_output: StructuredOutput | None
     token_usage: TokenUsage | None
     tool_calls: list[ToolCall]
+    command_executions: NotRequired[list[CommandExecution]]
     raw_response_path: str | None
     diff_path: str | None
     model_patch: str
@@ -213,6 +221,7 @@ class TaskRecord(TypedDict):
     persisted_tool_results: NotRequired[list[PersistedToolResult]]
     tool_call_summary: NotRequired[dict[str, object]]
     tool_call_requirements: NotRequired[ToolCallRequirementResult]
+    command_requirements: NotRequired[ToolCallRequirementResult]
     tool_availability_requirements: NotRequired[ToolCallRequirementResult]
     retry: NotRequired[RetryMetadata]
     runtime_failure: NotRequired[RuntimeFailureRecord]
