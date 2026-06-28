@@ -37,11 +37,6 @@ from contextbench.coding_agents.task_data import load_tasks
 from .helpers import _fake_run_coding_agent_task, _make_fake_agent_record, _write_task_inputs
 
 
-_MEMTRACE_NATIVE_TOOL_PATTERN = r"^mcp__memtrace__"
-_MEMTRACE_RUNTIME_SETUP_COMMAND = (
-    "npm install --global memtrace@0.6.46 --include=optional --no-fund --no-update-notifier --loglevel=warn "
-    "&& memtrace --version"
-)
 _PYTHON_SOURCE_BOOTSTRAP_DIFF_EXCLUDES = [
     ".venv/**",
     ".codex-venv/**",
@@ -61,46 +56,11 @@ _PYTHON_SOURCE_BOOTSTRAP_DIFF_EXCLUDES = [
     "**/*.a",
 ]
 
-
-def _assert_memtrace_uses_native_codex_mcp(treatment) -> None:
-    prompt = treatment.setup.prompt_preamble or ""
-
-    assert "Memtrace MCP is connected" in prompt
-    assert "native Memtrace MCP tools" in prompt
-    assert "mcp-tool" not in prompt
-    assert "$CONTEXTBENCH_RUNTIME_ROOT/bin/mcp-tool" not in prompt
-    assert "benchmark marks the run invalid" not in prompt
-    assert treatment.required_tool_call_patterns_add == [_MEMTRACE_NATIVE_TOOL_PATTERN]
-    assert treatment.required_command_patterns_add == []
-
-
 def _assert_no_base_python_source_bootstrap(config) -> None:
     assert config.base_run.diff_exclude_paths == _PYTHON_SOURCE_BOOTSTRAP_DIFF_EXCLUDES
     assert config.base_run.runtime_setup_timeout is None
     assert config.base_run.runtime_setup_commands == []
     assert config.base_run.setup.copy_paths == []
-
-
-def _assert_memtrace_resolution_runtime_config(config) -> None:
-    assert config.base_run.runtime_backend == "docker"
-    assert config.base_run.runtime_image_source == "resolution"
-    assert config.base_run.runtime_image is None
-    assert config.base_run.runtime_images_by_bench == {}
-    assert config.base_run.runtime_images_by_python == {}
-    assert config.base_run.runtime_platform == "linux/amd64"
-    assert config.base_run.runtime_env["CONTEXTBENCH_CODEX_TOOL_BUNDLE"] == ".cache/agent-tool-bundles/codex/current"
-    _assert_no_base_python_source_bootstrap(config)
-
-
-def _assert_memtrace_runtime_state_is_task_local(treatment) -> None:
-    setup_commands = "\n".join(treatment.runtime_setup_commands_add)
-
-    assert treatment.runtime_env_add["MEMTRACE_DATA_DIR"] == "${CONTEXTBENCH_TASK_DIR}/memtrace-state"
-    assert treatment.runtime_env_add["MEMTRACE_MEMDB_DATA_DIR"] == "${CONTEXTBENCH_TASK_DIR}/memtrace-memdb"
-    assert "MEMTRACE_DATA_DIR" in setup_commands
-    assert "MEMTRACE_MEMDB_DATA_DIR" in setup_commands
-    assert "env_vars = " in setup_commands
-
 
 def test_run_suite_cli_rejects_partial_postprocess_escape_hatch(tmp_path) -> None:
     config_path = tmp_path / "suite.yaml"
@@ -205,205 +165,6 @@ def test_claude_cortex_main_config_bootstraps_and_validates_cortex() -> None:
         "^mcp__cortex__context_get_rules$",
         "^mcp__cortex__context_reload$",
     ]
-
-
-def test_codex_memtrace_main_config_bootstraps_and_validates_memtrace() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    config = load_run_suite_config(repo_root / "configs/run_suites/codex-memtrace.json")
-
-    assert config.agent == "codex"
-    _assert_memtrace_resolution_runtime_config(config)
-    assert config.base_run.runtime_env_file == Path(".env")
-    assert config.base_run.model == "gpt-5.5"
-    assert config.base_run.reasoning_effort == "high"
-    assert config.base_run.runtime_env["MEMTRACE_TELEMETRY"] == "off"
-    assert config.base_run.runtime_env["MEMTRACE_RAIL_SHADOW"] == "off"
-    assert config.base_run.runtime_env["MEMTRACE_NO_REMOTE_RECEIPT"] == "1"
-    assert config.base_run.runtime_env["OTEL_SDK_DISABLED"] == "true"
-    assert config.parallelism.max_workers == 1
-    assert config.postprocess.env_file == Path(".env")
-    baseline = next(variant for variant in config.variants if variant.name == "baseline")
-    treatment = next(variant for variant in config.variants if variant.name == "with-memtrace-mcp")
-    effective_baseline = build_run_suite_variant(config, baseline)
-    effective_treatment = build_run_suite_variant(config, treatment)
-    setup_commands = "\n".join(treatment.runtime_setup_commands_add)
-    validation_commands = "\n".join(treatment.runtime_validation_commands_add)
-
-    assert baseline.model == "gpt-5.5"
-    assert baseline.reasoning_effort == "high"
-    assert baseline.runtime_prebuild is None
-    assert treatment.model == "gpt-5.5"
-    assert treatment.reasoning_effort == "high"
-    assert treatment.runtime_setup_timeout == 3600
-    assert treatment.runtime_validation_timeout == 600
-    assert treatment.runtime_prebuild is None
-    assert effective_baseline.runtime_setup_commands == []
-    assert effective_treatment.runtime_setup_commands == treatment.runtime_setup_commands_add
-    assert effective_treatment.setup.copy_paths == treatment.setup.copy_paths
-    assert treatment.runtime_env_add["MEMTRACE_AUTH_URL"] == "http://127.0.0.1:45682"
-    assert treatment.runtime_env_add["CONTEXTBENCH_PROXY_PORT"] == "45682"
-    assert treatment.runtime_env_add["CONTEXTBENCH_PROXY_UPSTREAM_ORIGIN"] == "https://www.memtrace.io"
-    assert "MEMTRACE_AUTH_DEVICE_ID" in treatment.runtime_env_add["CONTEXTBENCH_PROXY_REWRITE_RULES_JSON"]
-    assert treatment.runtime_env_add["CONTEXTBENCH_MCP_COMMAND"] == "memtrace"
-    assert treatment.runtime_env_add["CONTEXTBENCH_MCP_ARGS_JSON"] == '["mcp"]'
-    assert treatment.runtime_env_add["CONTEXTBENCH_MCP_CLIENT_NAME"] == "agentstackbench-memtrace"
-    assert treatment.runtime_env_add["MEMTRACE_TELEMETRY"] == "off"
-    assert treatment.runtime_env_add["MEMTRACE_RAIL_SHADOW"] == "off"
-    assert treatment.runtime_env_add["MEMTRACE_NO_REMOTE_RECEIPT"] == "1"
-    assert treatment.runtime_env_add["OTEL_SDK_DISABLED"] == "true"
-    _assert_memtrace_runtime_state_is_task_local(treatment)
-    assert treatment.setup.copy_paths[0].source == Path("agent-resources/http-json-rewrite-proxy.mjs")
-    assert treatment.setup.copy_paths[0].destination == "http-json-rewrite-proxy.mjs"
-    assert treatment.setup.copy_paths[0].target_root == "task_dir"
-    assert treatment.setup.copy_paths[1].source == Path("agent-resources/prepare-local-git-worktree.sh")
-    assert treatment.setup.copy_paths[1].destination == "prepare-local-git-worktree.sh"
-    assert treatment.setup.copy_paths[1].target_root == "task_dir"
-    assert treatment.setup.copy_paths[2].source == Path("agent-resources/mcp-tool.mjs")
-    assert treatment.setup.copy_paths[2].destination == "bin/mcp-tool"
-    assert treatment.setup.copy_paths[2].target_root == "runtime_root"
-    assert treatment.runtime_setup_commands_add[0] == _MEMTRACE_RUNTIME_SETUP_COMMAND
-    assert "memtrace@0.6.46" in setup_commands
-    assert "apt-get install" not in setup_commands
-    assert "MEMTRACE_LICENSE_KEY is required" in setup_commands
-    assert "MEMTRACE_AUTH_DEVICE_ID is required" in setup_commands
-    assert "Memtrace privacy opt-out env is not configured" in setup_commands
-    assert "http-json-rewrite-proxy.mjs" in setup_commands
-    assert "http-json-rewrite-proxy.log" in setup_commands
-    assert "prepare-local-git-worktree.sh" in setup_commands
-    assert "memtrace/installer/dist/index.js\" install --only codex --global --yes" in setup_commands
-    assert "required = true" in setup_commands
-    assert "startup_timeout_sec = 60" in setup_commands
-    assert "tool_timeout_sec = 120" in setup_commands
-    assert 'default_tools_approval_mode = "auto"' in setup_commands
-    assert "env_vars = " in setup_commands
-    assert "MEMTRACE_AUTH_URL" in setup_commands
-    assert "MEMTRACE_NO_REMOTE_RECEIPT" in setup_commands
-    assert "rm -f \"$HOME/.codex/hooks.json\"" in setup_commands
-    assert setup_commands.index("prepare-local-git-worktree.sh") < setup_commands.index("memtrace index .")
-    assert setup_commands.index("memtrace index .") < setup_commands.index("memtrace start --headless --force")
-    assert "memtrace start --headless --force" in setup_commands
-    assert "memtrace index ." in setup_commands
-    assert "no git repositories found" in setup_commands
-    assert "memtrace-version.txt" in validation_commands
-    assert "grep -q '0.6.46'" in validation_commands
-    assert "memtrace-status-final.log" in validation_commands
-    assert "No data indexed yet" in validation_commands
-    assert "0 nodes - 0 edges" in validation_commands
-    assert "grep -q 'required = true'" in validation_commands
-    assert "grep -q 'env_vars = .*MEMTRACE_AUTH_URL'" in validation_commands
-    assert "codex mcp get memtrace" in validation_commands
-    assert "codex-memtrace-mcp.txt" in validation_commands
-    assert "enabled: true" in validation_commands
-    assert "command:.*memtrace|args:.*mcp" in validation_commands
-    assert "CONTEXTBENCH_RUNTIME_ROOT/mcp-tools.json" in validation_commands
-    assert "CONTEXTBENCH_RUNTIME_ROOT/mcp-repos.json" in validation_commands
-    assert "CONTEXTBENCH_TASK_DIR/memtrace-tools.json" not in validation_commands
-    assert "CONTEXTBENCH_TASK_DIR/memtrace-repos.json" not in validation_commands
-    assert "$CONTEXTBENCH_RUNTIME_ROOT/bin/mcp-tool\" --list" in validation_commands
-    assert "$CONTEXTBENCH_RUNTIME_ROOT/bin/mcp-tool\" list_indexed_repositories" in validation_commands
-    assert treatment.diff_exclude_paths_add == [".memdb/**", ".memtrace/**"]
-    _assert_memtrace_uses_native_codex_mcp(treatment)
-
-
-def test_codex_memtrace_smoke_config_selects_one_task_per_bench() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    config = load_run_suite_config(repo_root / "configs/run_suites/codex-memtrace-smoke.json")
-
-    tasks = load_tasks(config.base_run.task_data, subset_csv=config.base_run.task_csv, limit=config.base_run.limit)
-    treatment = next(variant for variant in config.variants if variant.name == "with-memtrace-mcp")
-
-    assert config.agent == "codex"
-    _assert_memtrace_resolution_runtime_config(config)
-    assert config.base_run.model == "gpt-5.5"
-    assert config.base_run.reasoning_effort == "high"
-    assert config.base_run.runtime_env["MEMTRACE_TELEMETRY"] == "off"
-    assert config.base_run.runtime_env["MEMTRACE_RAIL_SHADOW"] == "off"
-    assert config.base_run.runtime_env["MEMTRACE_NO_REMOTE_RECEIPT"] == "1"
-    assert config.base_run.runtime_env["OTEL_SDK_DISABLED"] == "true"
-    assert config.postprocess.resolve is True
-    assert config.parallelism.max_workers == 1
-    assert treatment.runtime_prebuild is None
-    assert treatment.runtime_env_add["MEMTRACE_AUTH_URL"] == "http://127.0.0.1:45682"
-    assert treatment.runtime_env_add["CONTEXTBENCH_PROXY_PORT"] == "45682"
-    assert treatment.runtime_env_add["CONTEXTBENCH_PROXY_UPSTREAM_ORIGIN"] == "https://www.memtrace.io"
-    assert treatment.runtime_env_add["CONTEXTBENCH_MCP_COMMAND"] == "memtrace"
-    assert treatment.runtime_env_add["CONTEXTBENCH_MCP_ARGS_JSON"] == '["mcp"]'
-    assert treatment.runtime_env_add["MEMTRACE_TELEMETRY"] == "off"
-    assert treatment.runtime_env_add["MEMTRACE_RAIL_SHADOW"] == "off"
-    assert treatment.runtime_env_add["MEMTRACE_NO_REMOTE_RECEIPT"] == "1"
-    assert treatment.runtime_env_add["MEMTRACE_SKIP_EMBED"] == "1"
-    assert treatment.runtime_env_add["MEMTRACE_NO_REPLAY"] == "1"
-    assert treatment.runtime_env_add["OTEL_SDK_DISABLED"] == "true"
-    _assert_memtrace_runtime_state_is_task_local(treatment)
-    _assert_memtrace_uses_native_codex_mcp(treatment)
-    assert len(tasks) == 4
-    assert {str(task["bench"]) for task in tasks} == {"Verified", "Pro", "Poly", "Multi"}
-
-
-def test_codex_memtrace_configs_do_not_use_variant_runtime_prebuilds() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-
-    for path in sorted((repo_root / "configs/run_suites").glob("codex-memtrace*.json")):
-        config = load_run_suite_config(path)
-        _assert_memtrace_resolution_runtime_config(config)
-        assert all(variant.runtime_prebuild is None or not variant.runtime_prebuild.enabled for variant in config.variants), path
-
-
-def test_codex_memtrace_limit_15_config_uses_main_treatment_matrix() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    config = load_run_suite_config(repo_root / "configs/run_suites/codex-memtrace-limit-15.json")
-
-    assert config.experiment_name == "codex-memtrace-limit-15"
-    assert config.agent == "codex"
-    assert config.base_run.limit == 15
-    assert config.base_run.model == "gpt-5.5"
-    assert config.base_run.reasoning_effort == "high"
-    assert config.parallelism.max_workers == 1
-    _assert_memtrace_resolution_runtime_config(config)
-    assert [variant.name for variant in config.variants if variant.enabled] == ["baseline", "with-memtrace-mcp"]
-    treatment = next(variant for variant in config.variants if variant.name == "with-memtrace-mcp")
-    assert treatment.runtime_prebuild is None
-    assert treatment.runtime_env_add["CONTEXTBENCH_MCP_COMMAND"] == "memtrace"
-    assert treatment.runtime_env_add["CONTEXTBENCH_MCP_ARGS_JSON"] == '["mcp"]'
-    _assert_memtrace_runtime_state_is_task_local(treatment)
-    _assert_memtrace_uses_native_codex_mcp(treatment)
-
-
-def test_codex_memtrace_limit_15_noembed_config_disables_expensive_memtrace_embedding() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    config = load_run_suite_config(repo_root / "configs/run_suites/codex-memtrace-limit-15-noembed.json")
-
-    assert config.experiment_name == "codex-memtrace-limit-15-noembed"
-    assert config.base_run.limit == 15
-    assert config.base_run.model == "gpt-5.5"
-    assert config.base_run.reasoning_effort == "high"
-    assert config.parallelism.max_workers == 1
-    _assert_memtrace_resolution_runtime_config(config)
-    treatment = next(variant for variant in config.variants if variant.name == "with-memtrace-mcp")
-    assert treatment.runtime_env_add["MEMTRACE_SKIP_EMBED"] == "1"
-    assert treatment.runtime_env_add["MEMTRACE_NO_REPLAY"] == "1"
-    assert treatment.runtime_env_add["CONTEXTBENCH_MCP_COMMAND"] == "memtrace"
-    _assert_memtrace_runtime_state_is_task_local(treatment)
-    _assert_memtrace_uses_native_codex_mcp(treatment)
-
-
-def test_codex_memtrace_limit_30_noembed_config_disables_expensive_memtrace_embedding() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    config = load_run_suite_config(repo_root / "configs/run_suites/codex-memtrace-limit-30-noembed.json")
-
-    assert config.experiment_name == "codex-memtrace-limit-30-noembed"
-    assert config.base_run.limit == 30
-    assert config.base_run.model == "gpt-5.5"
-    assert config.base_run.reasoning_effort == "high"
-    assert config.parallelism.max_workers == 1
-    _assert_memtrace_resolution_runtime_config(config)
-    assert [variant.name for variant in config.variants if variant.enabled] == ["baseline", "with-memtrace-mcp"]
-    treatment = next(variant for variant in config.variants if variant.name == "with-memtrace-mcp")
-    assert treatment.runtime_env_add["MEMTRACE_SKIP_EMBED"] == "1"
-    assert treatment.runtime_env_add["MEMTRACE_NO_REPLAY"] == "1"
-    assert treatment.runtime_env_add["CONTEXTBENCH_MCP_COMMAND"] == "memtrace"
-    _assert_memtrace_runtime_state_is_task_local(treatment)
-    _assert_memtrace_uses_native_codex_mcp(treatment)
 
 
 @pytest.mark.parametrize("agent", ["codex", "claude"])
@@ -819,13 +580,7 @@ def test_checked_in_run_suite_configs_use_expected_base_runtimes() -> None:
 
         if config.agent == "codex":
             assert config.base_run.runtime_backend == "docker", config_path
-            if config_path.name.startswith("codex-memtrace"):
-                _assert_memtrace_resolution_runtime_config(config)
-                treatment = next((variant for variant in config.variants if variant.name == "with-memtrace-mcp"), None)
-                if treatment is not None:
-                    _assert_memtrace_runtime_state_is_task_local(treatment)
-            else:
-                assert config.base_run.runtime_image == DEFAULT_CODEX_RUNTIME_IMAGE, config_path
+            assert config.base_run.runtime_image == DEFAULT_CODEX_RUNTIME_IMAGE, config_path
         if config.agent == "claude":
             assert config.base_run.runtime_backend == "docker", config_path
             if config.base_run.runtime_platform == "linux/amd64":
