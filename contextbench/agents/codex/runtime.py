@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-19 from upstream ContextBench.
+# Summary of changes: include parsed command executions in Codex invocation results.
 
 """Codex-specific runtime preparation and invocation helpers."""
 
@@ -8,7 +11,7 @@ import json
 import os
 import shutil
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Callable
 
@@ -34,6 +37,7 @@ _RETRYABLE_ERROR_SNIPPETS = (
 _RETRY_DELAYS_SECONDS = (2, 5)
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONTAINER_DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_CODEX_TOOL_BUNDLE_ENV = "CONTEXTBENCH_CODEX_TOOL_BUNDLE"
 
 
 def runtime_root(task_dir: Path) -> Path:
@@ -53,6 +57,19 @@ def runtime_roots(task_dir: Path) -> dict[str, Path]:
         "xdg_data_home": root / "xdg-data",
         "xdg_cache_home": root / "xdg-cache",
     }
+
+
+def codex_tool_bundle_root(runtime_env: Mapping[str, str] | None = None) -> Path | None:
+    configured = str((runtime_env or {}).get(_CODEX_TOOL_BUNDLE_ENV) or "").strip()
+    if not configured:
+        return None
+    path = Path(configured).expanduser().resolve()
+    if not path.exists():
+        raise usage_error(
+            f"Codex tool bundle does not exist: {path}. "
+            "Run 'python3 -m contextbench.run_suites_setup codex-tool-bundle'."
+        )
+    return path
 
 
 def apply_runtime_setup_files(
@@ -125,6 +142,7 @@ def prepare_runtime_env(
     source_codex_dir: Path | None = None,
     *,
     include_host_env: bool = True,
+    runtime_env: Mapping[str, str] | None = None,
     materialized_files: Sequence[dict[str, object]] | None = None,
     copy_paths: Sequence[dict[str, object]] | None = None,
 ) -> dict[str, str]:
@@ -142,24 +160,34 @@ def prepare_runtime_env(
     xdg_cache_home = roots["xdg_cache_home"]
     local_bin = home_dir / ".local" / "bin"
     runtime_bin = roots["runtime_root"] / "bin"
+    npm_global = roots["runtime_root"] / "npm-global"
+    npm_global_bin = npm_global / "bin"
+    tool_bundle = codex_tool_bundle_root(runtime_env=runtime_env)
 
-    for path in (codex_home, xdg_config_home, xdg_data_home, xdg_cache_home, local_bin, runtime_bin):
+    for path in (codex_home, xdg_config_home, xdg_data_home, xdg_cache_home, local_bin, runtime_bin, npm_global_bin):
         ensure_dir(path)
 
     shutil.copy2(auth_path, codex_home / "auth.json")
     apply_runtime_setup_files(task_dir, materialized_files=materialized_files, copy_paths=copy_paths)
     env = os.environ.copy() if include_host_env else {}
     if not include_host_env:
+        path_entries = [
+            str(local_bin),
+            str(runtime_bin),
+            str(npm_global_bin),
+        ]
+        if tool_bundle is not None:
+            path_entries.append(str(tool_bundle / "usr-local" / "bin"))
+        path_entries.append(_CONTAINER_DEFAULT_PATH)
         env["PATH"] = ":".join(
-            [
-                str(local_bin),
-                str(runtime_bin),
-                _CONTAINER_DEFAULT_PATH,
-            ]
+            path_entries
         )
     env.update(
         {
             "HOME": str(home_dir),
+            "CONTEXTBENCH_RUNTIME_ROOT": str(roots["runtime_root"]),
+            "CONTEXTBENCH_RUNTIME_BIN": str(runtime_bin),
+            "NPM_CONFIG_PREFIX": str(npm_global),
             "XDG_CONFIG_HOME": str(xdg_config_home),
             "XDG_DATA_HOME": str(xdg_data_home),
             "XDG_CACHE_HOME": str(xdg_cache_home),
@@ -394,6 +422,7 @@ def run_invocation(
         structured_output=structured_output,
         token_usage=parser.extract_token_usage(raw_response),
         tool_calls=parser.extract_tool_calls(raw_response),
+        command_executions=parser.extract_command_executions(raw_response),
         available_tools=parser.extract_available_tools(raw_response),
         persisted_tool_results=[],
         diagnostic_note=diagnostic_note,

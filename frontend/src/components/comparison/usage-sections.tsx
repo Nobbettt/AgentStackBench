@@ -25,8 +25,22 @@ function hasBreakdownData(usage: { totalInvocations?: number; byType?: UsageBrea
   return (usage?.totalInvocations ?? 0) > 0 || (usage?.byType?.length ?? 0) > 0;
 }
 
+function hasMcpData(usage: ComparisonCard["variants"][number]["results"]["mcp"] | undefined): boolean {
+  return (
+    (usage?.toolCalls ?? 0) > 0
+    || (usage?.successfulToolCalls ?? 0) > 0
+    || (usage?.callsWithResults ?? 0) > 0
+    || (usage?.meaningfulCalls ?? 0) > 0
+    || (usage?.byTool?.length ?? 0) > 0
+  );
+}
+
 export function comparisonHasToolUsage(comparison: ComparisonCard): boolean {
   return comparison.variants.some((variant) => hasBreakdownData(variant.results.tools));
+}
+
+export function comparisonHasMcpUsage(comparison: ComparisonCard): boolean {
+  return comparison.variants.some((variant) => hasMcpData(variant.results.mcp));
 }
 
 function UsageSection({
@@ -46,7 +60,7 @@ function UsageSection({
   const metricLabel = kind === "skills" ? "Skill Invocations / Run" : "Tool Calls / Run";
   const explanation = kind === "skills"
     ? "Average number of skill file invocations detected per run."
-    : "Average recorded tool or MCP telemetry events per run.";
+    : "Average recorded native, non-MCP tool telemetry events per run.";
   const hasData = comparison.variants.some((variant) => hasBreakdownData(variant.results[kind]));
   if (!hasData) return null;
 
@@ -180,4 +194,142 @@ export function SkillUsageSection(props: Omit<Parameters<typeof UsageSection>[0]
 
 export function ToolUsageSection(props: Omit<Parameters<typeof UsageSection>[0], "kind">) {
   return <UsageSection {...props} kind="tools" />;
+}
+
+export function McpUsageSection({
+  comparison,
+  viewMode,
+  deltaDisplayMode,
+  collapsible,
+}: {
+  comparison: ComparisonCard;
+  viewMode: ComparisonResultsViewMode;
+  deltaDisplayMode: DeltaDisplayMode;
+  collapsible?: boolean;
+}) {
+  const hasData = comparisonHasMcpUsage(comparison);
+  if (!hasData) return null;
+
+  const comparisonPair = getComparisonPair(comparison);
+  const showDeltas = viewMode === "treatment-delta" && comparisonPair;
+  const variants = showDeltas ? [comparisonPair.treatment] : comparison.variants;
+  const headerAside = showDeltas
+    ? <DeltaSectionLabel baseline={comparisonPair.baseline} treatment={comparisonPair.treatment} />
+    : undefined;
+
+  return (
+    <ComparisonSectionShell title="MCP Usage" collapsible={collapsible} headerAside={headerAside}>
+      <div className="rounded-lg bg-background p-5">
+        <div className="grid gap-5 xl:grid-cols-2">
+          {variants.map((variant) => {
+            const usage = variant.results.mcp;
+            return (
+              <div key={variant.label}>
+                <div className="mb-4 text-sm font-medium text-muted-foreground">{variant.name}</div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <McpMetricCard
+                    label="MCP Calls"
+                    value={usage?.toolCalls ?? 0}
+                    explanation="Total MCP calls exported from native MCP events or generic mcp-tool bridge commands."
+                    delta={showDeltas ? mcpDelta("toolCalls", comparisonPair.baseline, comparisonPair.treatment, deltaDisplayMode) : null}
+                  />
+                  <McpMetricCard
+                    label="Successful Calls"
+                    value={usage?.successfulToolCalls ?? 0}
+                    explanation="MCP calls whose trace status or command exit code indicated success."
+                    delta={showDeltas ? mcpDelta("successfulToolCalls", comparisonPair.baseline, comparisonPair.treatment, deltaDisplayMode) : null}
+                  />
+                  <McpMetricCard
+                    label="Calls With Results"
+                    value={usage?.callsWithResults ?? 0}
+                    explanation="MCP calls whose exported payload contained result, match, item, or rule rows."
+                    delta={showDeltas ? mcpDelta("callsWithResults", comparisonPair.baseline, comparisonPair.treatment, deltaDisplayMode) : null}
+                  />
+                  <McpMetricCard
+                    label="Meaningful Calls"
+                    value={usage?.meaningfulCalls ?? 0}
+                    explanation="MCP calls that returned paths later inspected by the agent or overlapping final context or patch files."
+                    delta={showDeltas ? mcpDelta("meaningfulCalls", comparisonPair.baseline, comparisonPair.treatment, deltaDisplayMode) : null}
+                  />
+                  <McpMetricCard
+                    label="Instances With MCP"
+                    value={usage?.instancesWithMcpCalls ?? 0}
+                    explanation="Included instances with at least one exported MCP call."
+                  />
+                  <McpMetricCard
+                    label="Instances Meaningful"
+                    value={usage?.instancesWithMeaningfulMcpUse ?? 0}
+                    explanation="Included instances with at least one MCP call linked to follow-up inspection, final context, or patch overlap."
+                  />
+                </div>
+                <McpToolBreakdown entries={usage?.byTool ?? []} />
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </ComparisonSectionShell>
+  );
+}
+
+function McpMetricCard({
+  label,
+  value,
+  explanation,
+  delta,
+}: {
+  label: string;
+  value: number;
+  explanation: string;
+  delta?: MetricDelta | null;
+}) {
+  return (
+    <div className="rounded-md border p-4">
+      <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
+        <span>{label}</span>
+        <HelpIcon label={label} explanation={explanation} />
+      </div>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+        <div className="font-medium tabular-nums">{value}</div>
+        {delta ? <DeltaIndicator label={delta.label} delta={delta.delta} tone={delta.tone} /> : null}
+      </div>
+    </div>
+  );
+}
+
+function McpToolBreakdown({ entries }: { entries: NonNullable<ComparisonCard["variants"][number]["results"]["mcp"]>["byTool"] }) {
+  if (!entries || entries.length === 0) {
+    return <p className="mt-3 text-sm text-muted-foreground">No per-tool MCP breakdown available.</p>;
+  }
+
+  return (
+    <div className="mt-4 space-y-2">
+      {entries.map((entry) => (
+        <div key={entry.name} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 rounded-md border px-3 py-2 text-sm">
+          <span className="min-w-0 break-all">{entry.name}</span>
+          <span className="text-muted-foreground">ok {entry.successfulCalls ?? 0}</span>
+          <span className="font-medium tabular-nums">{entry.calls}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function mcpDelta(
+  key: "toolCalls" | "successfulToolCalls" | "callsWithResults" | "meaningfulCalls",
+  baseline: ComparisonCard["variants"][number],
+  treatment: ComparisonCard["variants"][number],
+  displayMode: DeltaDisplayMode,
+): MetricDelta {
+  const baselineValue = baseline.results.mcp?.[key] ?? 0;
+  const treatmentValue = treatment.results.mcp?.[key] ?? 0;
+  const delta = treatmentValue - baselineValue;
+  const percentDelta = baselineValue === 0 ? (delta === 0 ? 0 : null) : (delta / Math.abs(baselineValue)) * 100;
+  return {
+    delta,
+    label: displayMode === "percent"
+      ? (percentDelta === null ? "n/a" : formatPercentDelta(percentDelta))
+      : formatSignedFixed(delta, 0),
+    tone: "neutral",
+  };
 }

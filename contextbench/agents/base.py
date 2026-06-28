@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-19 from upstream ContextBench.
+# Summary of changes: normalize command execution metadata from coding-agent responses.
 
 """Shared base classes for agent-specific response parsers."""
 
@@ -8,7 +11,14 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from ..coding_agents.files import read_json
-from ..coding_agents.types import CodingAgentRawResponse, StructuredOutput, TokenUsage, ToolCall, TrajectoryData
+from ..coding_agents.types import (
+    CodingAgentRawResponse,
+    CommandExecution,
+    StructuredOutput,
+    TokenUsage,
+    ToolCall,
+    TrajectoryData,
+)
 
 
 class BaseCodingAgentParser(ABC):
@@ -46,6 +56,11 @@ class BaseCodingAgentParser(ABC):
 
         return []
 
+    def extract_command_executions(self, raw_response: CodingAgentRawResponse) -> list[CommandExecution]:
+        """Extract shell-command execution metadata, if the adapter exposes it."""
+
+        return []
+
     def infer_trajectory_data(
         self,
         raw_response: CodingAgentRawResponse,
@@ -64,6 +79,8 @@ class BaseCodingAgentParser(ABC):
                 record["token_usage"] = self.extract_token_usage(raw_response)
             if "tool_calls" not in record:
                 record["tool_calls"] = self.extract_tool_calls(raw_response)
+            if "command_executions" not in record:
+                record["command_executions"] = self.extract_command_executions(raw_response)
             if "available_tools" not in record:
                 record["available_tools"] = self.extract_available_tools(raw_response)
         return record

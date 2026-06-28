@@ -14,7 +14,7 @@ from .helpers import _fake_run_coding_agent_task, _write_task_inputs
 def test_run_suite_runner_writes_resolution_summary(tmp_path, monkeypatch) -> None:
     task_data, task_csv = _write_task_inputs(tmp_path, count=1)
     env_file = tmp_path / ".env"
-    env_file.write_text("HF_TOKEN=secret-token\n", encoding="utf-8")
+    env_file.write_text("HF_TOKEN=secret-token\nMEMTRACE_LICENSE_KEY=license-token\n", encoding="utf-8")
     call_log: list[dict[str, object]] = []
     resolution_calls: list[dict[str, object]] = []
     cleanup_calls: list[tuple[str, str, str]] = []
@@ -78,6 +78,9 @@ def test_run_suite_runner_writes_resolution_summary(tmp_path, monkeypatch) -> No
                 "convert": True,
                 "evaluate": False,
                 "resolve": True,
+                "resolve_workers": 3,
+                "prebuild_resolution_images": True,
+                "prebuild_resolution_workers": 2,
                 "runtime_backend": "host",
                 "env_file": str(env_file),
                 "self_clean_resolution_artifacts": False,
@@ -94,8 +97,15 @@ def test_run_suite_runner_writes_resolution_summary(tmp_path, monkeypatch) -> No
     effective_config = json.loads((experiment_dir / "variants" / "baseline" / "effective-config.json").read_text(encoding="utf-8"))
 
     assert rc == 0
-    assert resolution_calls[0]["env"] == {"HF_TOKEN": "secret-token"}
+    assert resolution_calls[0]["env"] == {
+        "HF_TOKEN": "secret-token",
+        "MEMTRACE_LICENSE_KEY": "license-token",
+    }
+    assert resolution_calls[0]["max_workers"] == 3
+    assert resolution_calls[0]["prebuild_images"] is True
+    assert resolution_calls[0]["prebuild_workers"] == 2
     assert effective_config["effective_config"]["runtime_env"]["HF_TOKEN"] == "<redacted>"
+    assert effective_config["effective_config"]["runtime_env"]["MEMTRACE_LICENSE_KEY"] == "<redacted>"
     assert resolution_calls[0]["run_suffix"]
     assert resolution_calls[0]["resume_existing_resolution"] is False
     assert resolution_calls[0]["clean_resolution_artifacts"] is True

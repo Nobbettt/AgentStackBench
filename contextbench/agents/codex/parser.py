@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-19 from upstream ContextBench.
+# Summary of changes: extract Codex command executions for benchmark requirements.
 
 """Codex-specific parsing for wrapper-produced records and raw responses."""
 
@@ -12,13 +15,21 @@ from ...coding_agents.trace_inference import (
     tool_result_text_from_value,
     trajectory_from_steps,
 )
-from ...coding_agents.types import CodexRawResponse, StructuredOutput, TokenUsage, ToolCall, TraceInferenceMeta, TrajectoryData
+from ...coding_agents.types import (
+    CodexRawResponse,
+    CommandExecution,
+    StructuredOutput,
+    TokenUsage,
+    ToolCall,
+    TraceInferenceMeta,
+    TrajectoryData,
+)
 
 
 def _codex_tool_name(event: dict[str, object], item: dict[str, object] | None = None) -> str:
     sources = [source for source in (item, event) if isinstance(source, dict)]
     for source in sources:
-        for key in ("tool_name", "toolName", "name"):
+        for key in ("tool_name", "toolName", "name", "tool"):
             value = str(source.get(key) or "").strip()
             if value.startswith("mcp__"):
                 return value
@@ -38,6 +49,7 @@ def _codex_tool_name(event: dict[str, object], item: dict[str, object] | None = 
             or source.get("tool_name")
             or source.get("toolName")
             or source.get("name")
+            or source.get("tool")
             or ""
         ).strip()
         if tool.startswith("mcp__"):
@@ -46,7 +58,7 @@ def _codex_tool_name(event: dict[str, object], item: dict[str, object] | None = 
             return f"mcp__{server}__{tool}"
 
     for source in sources:
-        for key in ("tool_name", "toolName", "name", "type"):
+        for key in ("tool_name", "toolName", "name", "tool", "type"):
             value = str(source.get(key) or "").strip()
             if value:
                 return value
@@ -56,7 +68,7 @@ def _codex_tool_name(event: dict[str, object], item: dict[str, object] | None = 
 def _codex_tool_payload(event: dict[str, object], item: dict[str, object]) -> dict[str, object]:
     payload = dict(item)
     payload.setdefault("event_type", event.get("type"))
-    for key in ("status", "error", "is_error", "tool_name", "name"):
+    for key in ("status", "error", "is_error", "tool_name", "name", "tool"):
         if key not in payload and key in event:
             payload[key] = event[key]
     tool_name = _codex_tool_name(event, item)
@@ -157,6 +169,33 @@ class CodexAgentParser(BaseCodingAgentParser):
                 }
             )
         return calls
+
+    def extract_command_executions(self, raw_response: CodexRawResponse) -> list[CommandExecution]:
+        if not isinstance(raw_response, dict):
+            return []
+        events = raw_response.get("events")
+        if not isinstance(events, list):
+            return []
+        executions: list[CommandExecution] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            item = event.get("item")
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "") != "command_execution":
+                continue
+            command = str(item.get("command") or "").strip()
+            if not command:
+                continue
+            executions.append(
+                {
+                    "source": "codex.item",
+                    "command": command,
+                    "payload": _codex_tool_payload(event, item),
+                }
+            )
+        return executions
 
     def infer_trajectory_data(
         self,

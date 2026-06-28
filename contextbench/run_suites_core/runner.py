@@ -1,25 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-05-20 from upstream ContextBench.
-# Summary of changes: support fork run suites and resolution-aware resume behavior.
+# Summary of changes: support fork run suites, parallel scheduling, and resolution-aware resume behavior.
 
 """Run suite orchestration."""
 
 from __future__ import annotations
 
+import configparser
 import csv
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
+import tomllib
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
+
 from ..agents.registry import get_coding_agent_adapter
 from ..agents.claude.runtime import claude_portable_auth_sources
+from ..agents.codex.runtime import codex_tool_bundle_root
 from ..artifact_sanitization import (
     SanitizationContext,
     assert_no_private_paths,
@@ -32,11 +39,12 @@ from ..coding_agents.files import append_jsonl, ensure_dir, read_json, safe_path
 from ..coding_agents.response_parsing import structured_output_schema_error
 from ..coding_agents.runtime import (
     missing_required_available_tool_patterns,
+    missing_required_command_patterns,
     missing_required_tool_call_patterns,
     run_coding_agent_task,
 )
 from ..coding_agents.task_data import count_task_rows, load_tasks
-from ..core.repo import remove_worktree
+from ..core.repo import checkout, remove_worktree
 from ..extractors import available as treesitter_available
 from ..parsers import GoldLoader
 from .config import build_run_suite_variant
@@ -61,10 +69,74 @@ from .postprocess import (
     describe_resolution_backend_support,
     evaluate_prediction_file,
     evaluate_resolution_for_suite,
+    prepare_resolution_images_for_tasks,
+    resolution_image_ref_for_task,
 )
 from .types import EffectiveVariantConfig, RunSuiteConfig
 
 _POSTPROCESS_FINGERPRINT_VERSION = 7
+
+
+_PYTHON_METADATA_SPARSE_PATHS = ["pyproject.toml", "setup.cfg", "setup.py"]
+
+
+def _python_requires_from_workspace(workspace_path: Path) -> str | None:
+    pyproject_path = workspace_path / "pyproject.toml"
+    if pyproject_path.exists():
+        try:
+            pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            pyproject = {}
+        project = pyproject.get("project") if isinstance(pyproject, dict) else None
+        if isinstance(project, dict):
+            requires_python = str(project.get("requires-python") or "").strip()
+            if requires_python:
+                return requires_python
+
+    setup_cfg_path = workspace_path / "setup.cfg"
+    if setup_cfg_path.exists():
+        parser = configparser.ConfigParser()
+        try:
+            parser.read(setup_cfg_path, encoding="utf-8")
+        except configparser.Error:
+            parser = configparser.ConfigParser()
+        if parser.has_option("options", "python_requires"):
+            requires_python = parser.get("options", "python_requires", fallback="").strip()
+            if requires_python:
+                return requires_python
+
+    setup_py_path = workspace_path / "setup.py"
+    if setup_py_path.exists():
+        try:
+            setup_text = setup_py_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            setup_text = ""
+        match = re.search(r"python_requires\s*=\s*['\"]([^'\"]+)['\"]", setup_text)
+        if match:
+            return match.group(1).strip() or None
+
+    return None
+
+
+def _version_satisfies_python_requires(version: str, requires_python: str | None) -> bool:
+    if not requires_python:
+        return True
+    try:
+        specifier = SpecifierSet(requires_python)
+        candidate = Version(version)
+    except (InvalidSpecifier, InvalidVersion):
+        return False
+    return candidate in specifier
+
+
+def _sorted_python_profile_versions(runtime_images_by_python: dict[str, str]) -> list[str]:
+    def sort_key(version: str) -> Version:
+        try:
+            return Version(version)
+        except InvalidVersion:
+            return Version("999999")
+
+    return sorted(runtime_images_by_python, key=sort_key)
 
 
 def _claude_host_auth_status_summary() -> dict[str, object]:
@@ -162,6 +234,11 @@ class RunSuiteRunner:
         self.postprocess_runtime_metadata: dict[str, object] = {
             "backend": self.config.postprocess.runtime_backend,
         }
+        self.runtime_prebuild_metadata: list[dict[str, object]] = []
+        self.runtime_resolution_image_metadata: dict[str, object] | None = None
+        self._runtime_image_overrides: dict[tuple[str, str], str] = {}
+        self._python_requires_cache: dict[tuple[str, str], str | None] = {}
+        self.phase_timings: dict[str, object] = {}
         if not self.refresh_rollups:
             self._validate_postprocess_environment()
 
@@ -217,8 +294,10 @@ class RunSuiteRunner:
     ) -> bool:
         if not isinstance(previous_config, dict):
             return False
-        previous = dict(previous_config)
-        current = dict(current_config)
+        previous_redacted = redact_secrets(dict(previous_config))
+        current_redacted = redact_secrets(dict(current_config))
+        previous = dict(previous_redacted) if isinstance(previous_redacted, dict) else {}
+        current = dict(current_redacted) if isinstance(current_redacted, dict) else {}
         previous.pop("limit", None)
         current.pop("limit", None)
         return previous == current
@@ -265,6 +344,8 @@ class RunSuiteRunner:
         base = self.config.base_run
         if not (base.subset_csv or base.task_csv or base.bench or base.instances or base.limit > 0) and selected_count == source_count:
             return "full_dataset"
+        if base.bench or base.instances:
+            return "filtered_selection"
         if (base.subset_csv or base.task_csv) and selected_count < source_count:
             subset_path = base.subset_csv or base.task_csv
             is_default_representative_subset = False
@@ -274,8 +355,6 @@ class RunSuiteRunner:
                 except Exception:
                     is_default_representative_subset = False
             return "representative_subset" if is_default_representative_subset else "configured_subset"
-        if base.bench or base.instances:
-            return "filtered_selection"
         if base.limit > 0:
             return "limited_selection"
         return "configured_selection"
@@ -286,7 +365,466 @@ class RunSuiteRunner:
         write_json(path, {"failure": name, "created_at": utc_now(), **payload})
         return path
 
-    def _validate_preflight(self, tasks: list[dict[str, object]], variants: list[EffectiveVariantConfig]) -> None:
+    @staticmethod
+    def _runtime_prebuild_env_key_is_valid(key: str) -> bool:
+        return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is not None
+
+    @staticmethod
+    def _task_bench(task: dict[str, object]) -> str:
+        return str(task.get("bench") or "Verified").strip() or "Verified"
+
+    @classmethod
+    def _selected_task_benches(cls, tasks: list[dict[str, object]]) -> list[str]:
+        return sorted({cls._task_bench(task) for task in tasks})
+
+    @staticmethod
+    def _runtime_image_for_bench(variant: EffectiveVariantConfig, bench: str) -> str | None:
+        return variant.runtime_images_by_bench.get(bench) or variant.runtime_image
+
+    @classmethod
+    def _base_runtime_image_for_task(
+        cls,
+        variant: EffectiveVariantConfig,
+        task: dict[str, object],
+    ) -> str | None:
+        return cls._runtime_image_for_bench(variant, cls._task_bench(task))
+
+    def _python_requires_for_task(self, task: dict[str, object]) -> str | None:
+        language = str(task.get("language") or "").strip().lower()
+        if language and language != "python":
+            return None
+        repo_url = str(task.get("repo_url") or "").strip()
+        commit = str(task.get("commit") or task.get("base_commit") or "").strip()
+        if not repo_url or not commit:
+            return None
+        cache_key = (repo_url, commit)
+        if cache_key in self._python_requires_cache:
+            return self._python_requires_cache[cache_key]
+
+        workspace_key = "__".join(
+            [
+                safe_path_component(self.config.experiment_name),
+                "runtime-python-metadata",
+                hashlib.sha256(f"{repo_url}@{commit}".encode("utf-8")).hexdigest()[:16],
+            ]
+        )
+        workspace = checkout(
+            repo_url,
+            commit,
+            str(self.config.base_run.repo_cache),
+            verbose=False,
+            sparse_paths=list(_PYTHON_METADATA_SPARSE_PATHS),
+            workspace_key=workspace_key,
+        )
+        if not workspace:
+            raise RuntimeError(
+                f"Could not inspect Python metadata for {task_key(task) or task.get('original_inst_id')}: "
+                f"checkout failed for {repo_url}@{commit}"
+            )
+        workspace_path = Path(workspace)
+        try:
+            requires_python = _python_requires_from_workspace(workspace_path)
+        finally:
+            try:
+                remove_worktree(repo_url, str(self.config.base_run.repo_cache), str(workspace_path))
+            except Exception:
+                shutil.rmtree(workspace_path, ignore_errors=True)
+        self._python_requires_cache[cache_key] = requires_python
+        return requires_python
+
+    def _select_python_runtime_image_for_task(
+        self,
+        variant: EffectiveVariantConfig,
+        task: dict[str, object],
+        base_image: str | None,
+    ) -> str | None:
+        if not base_image or not variant.runtime_images_by_python:
+            return base_image
+        language = str(task.get("language") or "").strip().lower()
+        if language and language != "python":
+            return base_image
+
+        requires_python = self._python_requires_for_task(task)
+        if not requires_python:
+            return base_image
+
+        image_versions = {
+            image: version for version, image in variant.runtime_images_by_python.items()
+        }
+        base_version = image_versions.get(base_image)
+        if base_version is None:
+            return base_image
+        if base_version and _version_satisfies_python_requires(base_version, requires_python):
+            return base_image
+
+        for version in _sorted_python_profile_versions(variant.runtime_images_by_python):
+            if _version_satisfies_python_requires(version, requires_python):
+                return variant.runtime_images_by_python[version]
+
+        raise RuntimeError(
+            f"No configured Python runtime image satisfies {requires_python!r} for "
+            f"{task_key(task) or task.get('original_inst_id')}. "
+            f"Configured versions: {', '.join(_sorted_python_profile_versions(variant.runtime_images_by_python))}"
+        )
+
+    def _resolve_runtime_image_for_task(
+        self,
+        variant: EffectiveVariantConfig,
+        task: dict[str, object],
+    ) -> str | None:
+        if variant.runtime_image_source == "resolution":
+            return resolution_image_ref_for_task(task)
+        base_image = self._base_runtime_image_for_task(variant, task)
+        return self._select_python_runtime_image_for_task(variant, task, base_image)
+
+    def _runtime_image_for_task(
+        self,
+        variant: EffectiveVariantConfig,
+        task: dict[str, object],
+    ) -> str | None:
+        task_id = task_key(task)
+        if task_id:
+            override = self._runtime_image_overrides.get((variant.slug, task_id))
+            if override:
+                return override
+        return self._resolve_runtime_image_for_task(variant, task)
+
+    @staticmethod
+    def _image_tag_with_suffix(image: str, suffix: str) -> str:
+        slash_index = image.rfind("/")
+        colon_index = image.rfind(":")
+        if colon_index > slash_index:
+            return f"{image[:colon_index + 1]}{image[colon_index + 1:]}-{suffix}"
+        return f"{image}-{suffix}"
+
+    def _runtime_prebuild_fingerprint(
+        self,
+        variant: EffectiveVariantConfig,
+        *,
+        base_image: str | None = None,
+    ) -> str:
+        return stable_json_hash(
+            {
+                "version": 1,
+                "agent": variant.agent,
+                "base_image": base_image or variant.runtime_image,
+                "platform": variant.runtime_platform,
+                "commands": list(variant.runtime_prebuild.commands),
+                "env": dict(sorted(variant.runtime_prebuild.env.items())),
+            }
+        )
+
+    def _runtime_prebuild_tag(
+        self,
+        variant: EffectiveVariantConfig,
+        fingerprint: str,
+        *,
+        profile_slug: str | None = None,
+    ) -> str:
+        configured = variant.runtime_prebuild.image_tag
+        if configured:
+            return self._image_tag_with_suffix(configured, profile_slug) if profile_slug else configured
+        experiment = safe_path_component(self.config.experiment_name).lower()
+        variant_slug = safe_path_component(variant.slug).lower()
+        profile = f"-{safe_path_component(profile_slug).lower()}" if profile_slug else ""
+        return f"contextbench-runtime-prebuild:{experiment}-{variant_slug}{profile}-{fingerprint[:12]}"
+
+    def _write_runtime_prebuild_dockerfile(
+        self,
+        *,
+        variant: EffectiveVariantConfig,
+        build_dir: Path,
+        base_image: str,
+    ) -> Path:
+        prebuild = variant.runtime_prebuild
+        for key in prebuild.env:
+            if not self._runtime_prebuild_env_key_is_valid(str(key)):
+                raise RuntimeError(
+                    f"Variant '{variant.name}' runtime_prebuild.env contains invalid Docker ENV key: {key!r}"
+                )
+        lines = [
+            f"FROM {base_image}",
+            'SHELL ["/bin/sh", "-lc"]',
+        ]
+        for key, value in sorted(prebuild.env.items()):
+            lines.append(f"ENV {key}={json.dumps(str(value))}")
+        for command in prebuild.commands:
+            lines.append(f"RUN {command}")
+        dockerfile_path = build_dir / "Dockerfile"
+        dockerfile_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return dockerfile_path
+
+    def _build_runtime_prebuild_image(
+        self,
+        *,
+        variant: EffectiveVariantConfig,
+        tag: str,
+        fingerprint: str,
+        base_image: str,
+        profile_slug: str | None = None,
+        benches: list[str] | None = None,
+    ) -> dict[str, object]:
+        if variant.runtime_backend != "docker":
+            raise RuntimeError(f"Variant '{variant.name}' runtime_prebuild requires runtime_backend='docker'")
+        if not base_image:
+            raise RuntimeError(f"Variant '{variant.name}' runtime_prebuild requires a base runtime_image")
+        if not _docker_available():
+            raise RuntimeError("Docker is required for runtime_prebuild but is not available.")
+
+        build_dir = self.experiment_dir / "runtime-prebuild" / variant.slug
+        if profile_slug:
+            build_dir = build_dir / profile_slug
+        ensure_dir(build_dir)
+        dockerfile_path = self._write_runtime_prebuild_dockerfile(
+            variant=variant,
+            build_dir=build_dir,
+            base_image=base_image,
+        )
+        log_path = build_dir / "runtime-prebuild-command.log"
+        metadata_path = build_dir / "runtime-prebuild.json"
+        metadata = {
+            "variant": variant.name,
+            "status": "pending",
+            "base_image": base_image,
+            "profile": profile_slug,
+            "benches": list(benches or []),
+            "platform": variant.runtime_platform,
+            "image": tag,
+            "fingerprint": fingerprint,
+            "dockerfile_path": str(dockerfile_path),
+            "log_path": str(log_path),
+            "commands": list(variant.runtime_prebuild.commands),
+        }
+        write_json(metadata_path, metadata)
+
+        if _docker_image_available(tag) and not variant.runtime_prebuild.force_rebuild:
+            reused = {**metadata, "status": "reused", "metadata_path": str(metadata_path)}
+            write_json(metadata_path, reused)
+            return reused
+
+        base_image_available = _docker_image_available(base_image)
+        if variant.runtime_prebuild.pull_base_image and not base_image_available:
+            pull_command = ["docker", "pull"]
+            if variant.runtime_platform:
+                pull_command.extend(["--platform", variant.runtime_platform])
+            pull_command.append(base_image)
+            pull_result = subprocess.run(pull_command, capture_output=True, text=True, check=False)
+            with open(log_path, "a", encoding="utf-8") as handle:
+                handle.write("$ " + " ".join(pull_command) + "\n")
+                handle.write(pull_result.stdout)
+                handle.write(pull_result.stderr)
+            if pull_result.returncode != 0:
+                failed = {**metadata, "status": "failed", "exit_code": pull_result.returncode}
+                write_json(metadata_path, failed)
+                raise RuntimeError(
+                    f"Variant '{variant.name}' runtime_prebuild failed to pull base image "
+                    f"{base_image}: {(pull_result.stderr or pull_result.stdout).strip()}"
+                )
+            base_image_available = _docker_image_available(base_image)
+        if not base_image_available:
+            failed = {**metadata, "status": "failed", "error": "base image is not available"}
+            write_json(metadata_path, failed)
+            raise RuntimeError(
+                f"Variant '{variant.name}' runtime_prebuild base image is not available: {base_image}"
+            )
+
+        build_command = ["docker", "build", "--tag", tag, "--file", str(dockerfile_path)]
+        if variant.runtime_prebuild.force_rebuild:
+            build_command.append("--no-cache")
+        if variant.runtime_platform:
+            build_command.extend(["--platform", variant.runtime_platform])
+        build_command.append(str(build_dir))
+        result = subprocess.run(build_command, capture_output=True, text=True, check=False)
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write("$ " + " ".join(build_command) + "\n")
+            handle.write(result.stdout)
+            handle.write(result.stderr)
+        if result.returncode != 0:
+            failed = {**metadata, "status": "failed", "exit_code": result.returncode}
+            write_json(metadata_path, failed)
+            raise RuntimeError(
+                f"Variant '{variant.name}' runtime_prebuild failed: "
+                f"{(result.stderr or result.stdout).strip()}\nFull log: {log_path}"
+            )
+        image_id = _docker_image_id(tag)
+        completed = {
+            **metadata,
+            "status": "built",
+            "image_id": image_id,
+            "metadata_path": str(metadata_path),
+        }
+        write_json(metadata_path, completed)
+        return completed
+
+    def _prepare_runtime_prebuilds(
+        self,
+        variants: list[EffectiveVariantConfig],
+        tasks: list[dict[str, object]],
+    ) -> list[EffectiveVariantConfig]:
+        prepared: list[EffectiveVariantConfig] = []
+        self.runtime_prebuild_metadata = []
+        for variant in variants:
+            if not variant.runtime_prebuild.enabled:
+                prepared.append(variant)
+                continue
+            base_groups: dict[str, dict[str, object]] = {}
+            for task in tasks:
+                base_image = self._resolve_runtime_image_for_task(variant, task)
+                if not base_image:
+                    raise RuntimeError(
+                        f"Variant '{variant.name}' runtime_prebuild could not resolve a runtime image for "
+                        f"{task_key(task) or task.get('original_inst_id')!r}"
+                    )
+                group = base_groups.setdefault(base_image, {"benches": set(), "task_ids": []})
+                group["benches"].add(self._task_bench(task))  # type: ignore[union-attr]
+                task_id = task_key(task)
+                if task_id:
+                    group["task_ids"].append(task_id)  # type: ignore[union-attr]
+
+            updated_images_by_bench = dict(variant.runtime_images_by_bench)
+            updated_runtime_image = variant.runtime_image
+            bench_to_tags: dict[str, set[str]] = {}
+            bench_group_counts: Counter[str] = Counter()
+            for group in base_groups.values():
+                bench_group_counts.update(str(bench) for bench in group["benches"])  # type: ignore[index]
+            multiple_profiles = len(base_groups) > 1 or bool(variant.runtime_images_by_bench)
+            for base_image, group in sorted(base_groups.items(), key=lambda item: item[0]):
+                benches = sorted(str(bench) for bench in group["benches"])  # type: ignore[index]
+                task_ids = list(group["task_ids"])  # type: ignore[index]
+                profile_slug = None
+                if multiple_profiles:
+                    image_version = {
+                        image: version
+                        for version, image in variant.runtime_images_by_python.items()
+                    }.get(base_image)
+                    slug_parts = [*benches]
+                    if image_version:
+                        slug_parts.append(f"python-{image_version}")
+                    elif any(bench_group_counts[bench] > 1 for bench in benches):
+                        slug_parts.append(hashlib.sha256(base_image.encode("utf-8")).hexdigest()[:8])
+                    profile_slug = safe_path_component("-".join(slug_parts)).lower()
+                fingerprint = self._runtime_prebuild_fingerprint(variant, base_image=base_image)
+                tag = self._runtime_prebuild_tag(variant, fingerprint, profile_slug=profile_slug)
+                metadata = self._build_runtime_prebuild_image(
+                    variant=variant,
+                    tag=tag,
+                    fingerprint=fingerprint,
+                    base_image=base_image,
+                    profile_slug=profile_slug,
+                    benches=benches,
+                )
+                self.runtime_prebuild_metadata.append(metadata)
+                for task_id in task_ids:
+                    self._runtime_image_overrides[(variant.slug, task_id)] = tag
+                for bench in benches:
+                    bench_to_tags.setdefault(bench, set()).add(tag)
+                if base_image == variant.runtime_image:
+                    updated_runtime_image = tag
+
+            for bench, tags in bench_to_tags.items():
+                if len(tags) == 1:
+                    updated_images_by_bench[bench] = next(iter(tags))
+
+            prepared.append(
+                variant.model_copy(
+                    update={
+                        "runtime_image": updated_runtime_image,
+                        "runtime_images_by_bench": updated_images_by_bench,
+                    }
+                )
+            )
+        return prepared
+
+    def _prepare_resolution_runtime_images(
+        self,
+        variants: list[EffectiveVariantConfig],
+        tasks: list[dict[str, object]],
+    ) -> None:
+        if not any(
+            variant.runtime_backend == "docker" and variant.runtime_image_source == "resolution"
+            for variant in variants
+        ):
+            self.runtime_resolution_image_metadata = None
+            return
+        started = time.monotonic()
+        work_dir = self.experiment_dir / "runtime-resolution-images"
+        worker_count = (
+            self.config.postprocess.prebuild_resolution_workers
+            or self.config.postprocess.resolve_workers
+            or self.max_workers
+        )
+        print(
+            "[runtime-images] preparing resolution Docker images for agent execution "
+            f"with {max(1, int(worker_count))} workers",
+            flush=True,
+        )
+        try:
+            summary = prepare_resolution_images_for_tasks(
+                tasks=tasks,
+                work_dir=work_dir,
+                max_workers=max(1, int(worker_count)),
+                env=read_env_file(self.config.postprocess.env_file),
+            )
+        except Exception as exc:
+            self.runtime_resolution_image_metadata = {
+                "status": "failed",
+                "source": "resolution",
+                "error_detail": str(exc),
+                "work_dir": str(work_dir),
+            }
+            proof_path = self._write_failure_proof(
+                name="resolution-runtime-images",
+                payload={
+                    "task_count": len(tasks),
+                    "error": str(exc),
+                    "work_dir": str(work_dir),
+                },
+            )
+            raise RuntimeError(f"Resolution runtime image preparation failed; proof written to {proof_path}") from exc
+        self.runtime_resolution_image_metadata = {
+            **summary,
+            "source": "resolution",
+            "work_dir": str(work_dir),
+            "duration_ms": int((time.monotonic() - started) * 1000),
+        }
+
+    def _validate_resolution_runtime_tool_bundles(self, variants: list[EffectiveVariantConfig]) -> None:
+        failures: list[dict[str, object]] = []
+        for variant in variants:
+            if variant.runtime_backend != "docker" or variant.runtime_image_source != "resolution":
+                continue
+            if variant.agent != "codex":
+                continue
+            try:
+                bundle_root = codex_tool_bundle_root(variant.runtime_env)
+            except Exception as exc:
+                failures.append({"variant": variant.name, "agent": variant.agent, "error": str(exc)})
+                continue
+            if bundle_root is None:
+                failures.append(
+                    {
+                        "variant": variant.name,
+                        "agent": variant.agent,
+                        "error": (
+                            "Codex resolution-image runtimes require a repo-local Codex tool bundle. "
+                            "Run 'python3 -m contextbench.run_suites_setup codex-tool-bundle'."
+                        ),
+                    }
+                )
+        if not failures:
+            return
+        proof_path = self._write_failure_proof(
+            name="runtime-tool-bundles",
+            payload={"failures": failures},
+        )
+        raise RuntimeError(f"Run-suite runtime tool-bundle preflight failed; proof written to {proof_path}")
+
+    def _validate_preflight(
+        self,
+        tasks: list[dict[str, object]],
+        variants: list[EffectiveVariantConfig],
+        task_set: dict[str, object],
+    ) -> None:
         failures: list[dict[str, object]] = []
 
         base = self.config.base_run
@@ -316,6 +854,19 @@ class RunSuiteRunner:
                         "message": (
                             "base_run.selection_assertion='full_dataset' is set, but task selection filters are configured. "
                             "Use task_csv=null, subset_csv=null, bench=null, instances=null, and limit=0 for the full dataset."
+                        ),
+                    }
+                )
+        elif base.selection_assertion == "configured_selection":
+            selection_kind = str(task_set.get("selection_kind") or "").strip()
+            if selection_kind == "full_dataset":
+                failures.append(
+                    {
+                        "kind": "configured_selection_assertion",
+                        "selection_kind": selection_kind,
+                        "message": (
+                            "base_run.selection_assertion='configured_selection' is set, but the selected task set is "
+                            "the full dataset. Configure task_csv, subset_csv, bench, instances, or limit for an explicit selection."
                         ),
                     }
                 )
@@ -467,28 +1018,51 @@ class RunSuiteRunner:
             if not _docker_available():
                 failures.append({"kind": "docker_unavailable", "message": "Docker is required for docker runtime variants."})
             else:
-                missing_images = [
+                runtime_image_specs = [
                     {
                         "variant": variant.name,
-                        "image": variant.runtime_image,
+                        "bench": self._task_bench(task),
+                        "instance_id": task_key(task) or str(task.get("original_inst_id") or ""),
+                        "image": self._runtime_image_for_task(variant, task),
                         "platform": variant.runtime_platform,
                     }
                     for variant in variants
-                    if variant.runtime_backend == "docker" and not _docker_image_available(variant.runtime_image)
+                    if variant.runtime_backend == "docker"
+                    for task in tasks
+                ]
+                missing_images = [
+                    {
+                        "variant": spec["variant"],
+                        "bench": spec["bench"],
+                        "instance_id": spec["instance_id"],
+                        "image": spec["image"],
+                        "platform": spec["platform"],
+                    }
+                    for spec in runtime_image_specs
+                    if not str(spec["image"] or "").strip() or not _docker_image_available(str(spec["image"]))
                 ]
                 if missing_images:
                     failures.append({"kind": "runtime_image_missing", "images": missing_images})
                 platform_mismatches = []
-                for variant in variants:
-                    if variant.runtime_backend != "docker" or not variant.runtime_platform:
+                seen_platform_checks: set[tuple[str, str | None]] = set()
+                for spec in runtime_image_specs:
+                    image = str(spec["image"] or "").strip()
+                    platform = str(spec["platform"] or "").strip() or None
+                    if not image or not platform:
                         continue
-                    actual_platform = _docker_image_platform(variant.runtime_image)
-                    if actual_platform and actual_platform != variant.runtime_platform:
+                    check_key = (image, platform)
+                    if check_key in seen_platform_checks:
+                        continue
+                    seen_platform_checks.add(check_key)
+                    actual_platform = _docker_image_platform(image)
+                    if actual_platform and actual_platform != platform:
                         platform_mismatches.append(
                             {
-                                "variant": variant.name,
-                                "image": variant.runtime_image,
-                                "expected_platform": variant.runtime_platform,
+                                "variant": spec["variant"],
+                                "bench": spec["bench"],
+                                "instance_id": spec["instance_id"],
+                                "image": image,
+                                "expected_platform": platform,
                                 "actual_platform": actual_platform,
                             }
                         )
@@ -577,8 +1151,16 @@ class RunSuiteRunner:
             "started_at": started_at,
             "completed_at": completed_at,
             "max_workers": self.max_workers,
+            "scheduler": {
+                "mode": self.config.parallelism.scheduler,
+                "agent_workers": self.config.parallelism.agent_workers or self.max_workers,
+                "max_workers": self.max_workers,
+            },
             "resume": self.resume,
             "postprocess_runtime": self.postprocess_runtime_metadata,
+            "runtime_prebuilds": self.runtime_prebuild_metadata,
+            "runtime_resolution_images": self.runtime_resolution_image_metadata,
+            "phase_timings": self.phase_timings,
             "task_set": task_set,
             "variants": variant_entries,
         }
@@ -1024,6 +1606,10 @@ class RunSuiteRunner:
                 state,
                 record_path,
             )
+            and self._record_satisfies_required_commands(
+                state,
+                record_path,
+            )
         )
 
     def _task_is_resume_complete(self, states: list[_PreparedVariant], task: dict[str, object]) -> bool:
@@ -1069,6 +1655,26 @@ class RunSuiteRunner:
                 tool_calls = []
         return not missing_required_tool_call_patterns(tool_calls, patterns)
 
+    def _record_satisfies_required_commands(self, state: _PreparedVariant, record_path: Path) -> bool:
+        patterns = state.variant.required_command_patterns
+        if not patterns:
+            return True
+        try:
+            record = read_json(record_path)
+        except Exception:
+            return False
+        if not isinstance(record, dict):
+            return False
+        command_executions = record.get("command_executions")
+        if not isinstance(command_executions, list):
+            try:
+                parser = get_coding_agent_adapter(state.variant.agent).create_parser()
+                raw_response = parser.load_raw_response(record)
+                command_executions = parser.extract_command_executions(raw_response) if raw_response is not None else []
+            except Exception:
+                command_executions = []
+        return not missing_required_command_patterns(command_executions, patterns)
+
     def _record_satisfies_output_schema(self, state: _PreparedVariant, record_path: Path) -> bool:
         try:
             record = read_json(record_path)
@@ -1091,7 +1697,7 @@ class RunSuiteRunner:
         return "__".join(part for part in parts if part)
 
     def _run_variant_task(self, state: _PreparedVariant, task: dict[str, object]) -> dict[str, object]:
-        bench = str(task.get("bench") or "Verified")
+        bench = self._task_bench(task)
         record = run_coding_agent_task(
             task=task,
             agent=state.variant.agent,
@@ -1107,7 +1713,7 @@ class RunSuiteRunner:
             setup=state.variant.setup.model_dump(mode="python"),
             workspace_key=self._workspace_key(state, task),
             runtime_backend=state.variant.runtime_backend,
-            runtime_image=state.variant.runtime_image,
+            runtime_image=self._runtime_image_for_task(state.variant, task),
             runtime_platform=state.variant.runtime_platform,
             runtime_env=state.variant.runtime_env,
             runtime_setup_timeout=state.variant.runtime_setup_timeout,
@@ -1118,6 +1724,7 @@ class RunSuiteRunner:
             runtime_validation_commands=state.variant.runtime_validation_commands,
             diff_exclude_paths=state.variant.diff_exclude_paths,
             required_tool_call_patterns=state.variant.required_tool_call_patterns,
+            required_command_patterns=state.variant.required_command_patterns,
             required_available_tool_patterns=state.variant.required_available_tool_patterns,
             runtime_keep_failed=state.variant.runtime_keep_failed,
         )
@@ -1141,6 +1748,16 @@ class RunSuiteRunner:
         }
 
     def _record_skipped_task(self, state: _PreparedVariant, task: dict[str, object], task_id: str) -> None:
+        self._record_skipped_task_row(state, task, task_id, write=True)
+
+    def _record_skipped_task_row(
+        self,
+        state: _PreparedVariant,
+        task: dict[str, object],
+        task_id: str,
+        *,
+        write: bool,
+    ) -> dict[str, object]:
         counts = state.entry["task_counts"]
         counts["skipped"] += 1
         record_path = self._task_record_path(state, task)
@@ -1160,18 +1777,18 @@ class RunSuiteRunner:
                 status = "failed"
             else:
                 status = str(record.get("status") or "completed")
-        append_jsonl(
-            state.task_results_path,
-            {
-                "instance_id": task_id,
-                "bench": task.get("bench"),
-                "status": status,
-                "record_path": str(record_path),
-                "resumed": True,
-                "timeout": timeout,
-                "ok": ok,
-            },
-        )
+        row = {
+            "instance_id": task_id,
+            "bench": task.get("bench"),
+            "status": status,
+            "record_path": str(record_path),
+            "resumed": True,
+            "timeout": timeout,
+            "ok": ok,
+        }
+        if write:
+            append_jsonl(state.task_results_path, row)
+        return row
 
     def _record_variant_exception(
         self,
@@ -1180,18 +1797,29 @@ class RunSuiteRunner:
         task_id: str,
         exc: Exception,
     ) -> None:
+        self._record_variant_exception_row(state, task, task_id, exc, write=True)
+
+    def _record_variant_exception_row(
+        self,
+        state: _PreparedVariant,
+        task: dict[str, object],
+        task_id: str,
+        exc: Exception,
+        *,
+        write: bool,
+    ) -> dict[str, object]:
         counts = state.entry["task_counts"]
         counts["failed"] += 1
         state.entry["errors"].append(f"{task_id}: {exc}")
-        append_jsonl(
-            state.task_results_path,
-            {
-                "instance_id": task_id,
-                "bench": task.get("bench"),
-                "status": "error",
-                "error": str(exc),
-            },
-        )
+        row = {
+            "instance_id": task_id,
+            "bench": task.get("bench"),
+            "status": "error",
+            "error": str(exc),
+        }
+        if write:
+            append_jsonl(state.task_results_path, row)
+        return row
 
     def _record_variant_result(
         self,
@@ -1200,6 +1828,17 @@ class RunSuiteRunner:
         task_id: str,
         result: dict[str, object],
     ) -> None:
+        self._record_variant_result_row(state, task, task_id, result, write=True)
+
+    def _record_variant_result_row(
+        self,
+        state: _PreparedVariant,
+        task: dict[str, object],
+        task_id: str,
+        result: dict[str, object],
+        *,
+        write: bool,
+    ) -> dict[str, object]:
         record = result["record"]
         record_status = str(record.get("status") or "")
         counts = state.entry["task_counts"]
@@ -1212,28 +1851,46 @@ class RunSuiteRunner:
         else:
             counts["failed"] += 1
 
-        append_jsonl(
-            state.task_results_path,
-            {
-                "instance_id": task_id,
-                "bench": task.get("bench"),
-                "status": (
-                    "timeout"
-                    if record.get("timeout")
-                    else "failed"
-                    if "ok" in record and not bool(record.get("ok"))
-                    else record_status or "failed"
-                ),
-                "record_path": str(result["record_path"]),
-                "task_dir": record.get("task_dir"),
-                "timeout": bool(record.get("timeout")),
-                "ok": bool(record.get("ok")),
-                "workspace_cleaned": bool(result["workspace_cleaned"]),
-            },
-        )
+        row = {
+            "instance_id": task_id,
+            "bench": task.get("bench"),
+            "status": (
+                "timeout"
+                if record.get("timeout")
+                else "failed"
+                if "ok" in record and not bool(record.get("ok"))
+                else record_status or "failed"
+            ),
+            "record_path": str(result["record_path"]),
+            "task_dir": record.get("task_dir"),
+            "timeout": bool(record.get("timeout")),
+            "ok": bool(record.get("ok")),
+            "workspace_cleaned": bool(result["workspace_cleaned"]),
+        }
+        if write:
+            append_jsonl(state.task_results_path, row)
         cleanup_error = result.get("cleanup_error")
         if cleanup_error:
             state.entry["errors"].append(f"{task_id}: workspace cleanup failed: {cleanup_error}")
+        return row
+
+    @staticmethod
+    def _write_task_result_rows(path: Path, rows: list[tuple[int, dict[str, object]]]) -> None:
+        ensure_dir(path.parent)
+        ordered_rows = [row for _index, row in sorted(rows, key=lambda item: item[0])]
+        tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                for row in ordered_rows:
+                    handle.write(json.dumps(row, ensure_ascii=False))
+                    handle.write("\n")
+            os.replace(tmp_path, path)
+        finally:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
 
     def _recalculate_task_counts(self, state: _PreparedVariant, tasks: list[dict[str, object]]) -> dict[str, int]:
         counts = {
@@ -1381,6 +2038,8 @@ class RunSuiteRunner:
                 "harness_args": self.config.postprocess.resolve_harness_args,
                 "swebench_timeout": self.config.postprocess.swebench_timeout,
                 "resolve_workers": self.config.postprocess.resolve_workers,
+                "prebuild_resolution_images": self.config.postprocess.prebuild_resolution_images,
+                "prebuild_resolution_workers": self.config.postprocess.prebuild_resolution_workers,
                 "env_file": str(env_file.resolve()) if env_file else None,
                 "env_file_sha256": self._file_sha256(env_file) if env_file else None,
             }
@@ -1512,6 +2171,8 @@ class RunSuiteRunner:
                 variant_name=state.variant.name,
                 work_dir=state.pred_path.parent,
                 max_workers=self.config.postprocess.resolve_workers,
+                prebuild_images=self.config.postprocess.prebuild_resolution_images,
+                prebuild_workers=self.config.postprocess.prebuild_resolution_workers,
                 harness_args=self.config.postprocess.resolve_harness_args,
                 env=read_env_file(self.config.postprocess.env_file),
                 swebench_timeout=self.config.postprocess.swebench_timeout,
@@ -1716,6 +2377,176 @@ class RunSuiteRunner:
             }
         )
 
+    def _run_agent_phase_per_task(
+        self,
+        *,
+        tasks: list[dict[str, object]],
+        states: list[_PreparedVariant],
+        started_at: str,
+        task_set: dict[str, object],
+        variant_entries: list[dict[str, object]],
+    ) -> None:
+        for index, task in enumerate(tasks, start=1):
+            task_id = task_key(task) or f"task-{index}"
+            bench = str(task.get("bench") or "Verified")
+            runnable_states = states
+            if self.resume:
+                runnable_states = [
+                    state for state in states if not self._variant_task_is_resume_complete(state, task)
+                ]
+                runnable_state_ids = {id(state) for state in runnable_states}
+                skipped_states = [state for state in states if id(state) not in runnable_state_ids]
+                if not runnable_states:
+                    print(f"[task {index}/{len(tasks)}] skip {bench} | {task_id}", flush=True)
+                    for state in states:
+                        self._record_skipped_task(state, task, task_id)
+                    self._write_manifest(
+                        started_at=started_at,
+                        completed_at=None,
+                        task_set=task_set,
+                        variant_entries=variant_entries,
+                    )
+                    continue
+                for state in skipped_states:
+                    self._record_skipped_task(state, task, task_id)
+
+            print(f"[task {index}/{len(tasks)}] run {bench} | {task_id}", flush=True)
+            for state in runnable_states:
+                self._clear_task_outputs(state, task)
+
+            future_map = {}
+            with ThreadPoolExecutor(max_workers=min(self.max_workers, len(runnable_states))) as executor:
+                for state in runnable_states:
+                    future = executor.submit(self._run_variant_task, state, task)
+                    future_map[future] = state
+
+                for future in as_completed(future_map):
+                    state = future_map[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        self._record_variant_exception(state, task, task_id, exc)
+                    else:
+                        self._record_variant_result(state, task, task_id, result)
+
+            self._write_manifest(
+                started_at=started_at,
+                completed_at=None,
+                task_set=task_set,
+                variant_entries=variant_entries,
+            )
+
+    def _run_agent_phase_global(
+        self,
+        *,
+        tasks: list[dict[str, object]],
+        states: list[_PreparedVariant],
+        started_at: str,
+        task_set: dict[str, object],
+        variant_entries: list[dict[str, object]],
+    ) -> None:
+        task_result_rows: dict[str, list[tuple[int, dict[str, object]]]] = {
+            state.variant.slug: [] for state in states
+        }
+        jobs: list[tuple[int, int, _PreparedVariant, dict[str, object], str, str]] = []
+        for task_index, task in enumerate(tasks, start=1):
+            task_id = task_key(task) or f"task-{task_index}"
+            bench = str(task.get("bench") or "Verified")
+            runnable_for_task: list[_PreparedVariant] = []
+            for state_index, state in enumerate(states):
+                row_order = (task_index - 1) * len(states) + state_index
+                if self.resume and self._variant_task_is_resume_complete(state, task):
+                    row = self._record_skipped_task_row(state, task, task_id, write=False)
+                    task_result_rows[state.variant.slug].append((row_order, row))
+                    continue
+                runnable_for_task.append(state)
+                self._clear_task_outputs(state, task)
+                jobs.append((row_order, state_index, state, task, task_id, bench))
+            if not runnable_for_task:
+                print(f"[task {task_index}/{len(tasks)}] skip {bench} | {task_id}", flush=True)
+
+        for state in states:
+            self._write_task_result_rows(state.task_results_path, task_result_rows[state.variant.slug])
+
+        if not jobs:
+            self._write_manifest(
+                started_at=started_at,
+                completed_at=None,
+                task_set=task_set,
+                variant_entries=variant_entries,
+            )
+            return
+
+        worker_count = max(1, min(self.config.parallelism.agent_workers or self.max_workers, len(jobs)))
+        print(
+            f"[agent-scheduler] running {len(jobs)} task/variant jobs with {worker_count} workers",
+            flush=True,
+        )
+        future_map = {}
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for display_index, (job_order, state_index, state, task, task_id, bench) in enumerate(jobs, start=1):
+                del state_index
+                print(f"[job {display_index}/{len(jobs)}] queue {bench} | {task_id} | {state.variant.name}", flush=True)
+                future = executor.submit(self._run_variant_task, state, task)
+                future_map[future] = (job_order, state, task, task_id)
+
+            completed_jobs = 0
+            for future in as_completed(future_map):
+                job_order, state, task, task_id = future_map[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    row = self._record_variant_exception_row(state, task, task_id, exc, write=False)
+                else:
+                    row = self._record_variant_result_row(state, task, task_id, result, write=False)
+                task_result_rows[state.variant.slug].append((job_order, row))
+                self._write_task_result_rows(state.task_results_path, task_result_rows[state.variant.slug])
+                completed_jobs += 1
+                if completed_jobs == len(jobs) or completed_jobs % max(1, worker_count) == 0:
+                    self._write_manifest(
+                        started_at=started_at,
+                        completed_at=None,
+                        task_set=task_set,
+                        variant_entries=variant_entries,
+                    )
+
+        for state in states:
+            self._write_task_result_rows(state.task_results_path, task_result_rows[state.variant.slug])
+        self._write_manifest(
+            started_at=started_at,
+            completed_at=None,
+            task_set=task_set,
+            variant_entries=variant_entries,
+        )
+
+    def _run_agent_phase(
+        self,
+        *,
+        tasks: list[dict[str, object]],
+        states: list[_PreparedVariant],
+        started_at: str,
+        task_set: dict[str, object],
+        variant_entries: list[dict[str, object]],
+    ) -> None:
+        started = time.monotonic()
+        if self.config.parallelism.scheduler == "per_task":
+            self._run_agent_phase_per_task(
+                tasks=tasks,
+                states=states,
+                started_at=started_at,
+                task_set=task_set,
+                variant_entries=variant_entries,
+            )
+        else:
+            self._run_agent_phase_global(
+                tasks=tasks,
+                states=states,
+                started_at=started_at,
+                task_set=task_set,
+                variant_entries=variant_entries,
+            )
+        self.phase_timings["agent_ms"] = int((time.monotonic() - started) * 1000)
+
     def refresh_rollup_artifacts(self) -> int:
         tasks, task_set = self._load_tasks()
         effective_variants = [
@@ -1815,6 +2646,9 @@ class RunSuiteRunner:
             raise RuntimeError("No enabled variants remain after config filtering")
 
         ensure_dir(self.experiment_dir)
+        self._validate_resolution_runtime_tool_bundles(effective_variants)
+        effective_variants = self._prepare_runtime_prebuilds(effective_variants, tasks)
+        self._prepare_resolution_runtime_images(effective_variants, tasks)
         write_json(
             self.experiment_config_path,
             self._sanitize_experiment_artifact(
@@ -1822,7 +2656,7 @@ class RunSuiteRunner:
                 label=str(self.experiment_config_path),
             ),
         )
-        self._validate_preflight(tasks, effective_variants)
+        self._validate_preflight(tasks, effective_variants, task_set)
         print(
             "[preflight] selected "
             f"{task_set['count']} tasks by bench: {task_set['bench_counts']}",
@@ -1842,64 +2676,30 @@ class RunSuiteRunner:
             variant_entries=variant_entries,
         )
 
-        for index, task in enumerate(tasks, start=1):
-            task_id = task_key(task) or f"task-{index}"
-            bench = str(task.get("bench") or "Verified")
-            runnable_states = states
-            if self.resume:
-                runnable_states = [
-                    state for state in states if not self._variant_task_is_resume_complete(state, task)
-                ]
-                runnable_state_ids = {id(state) for state in runnable_states}
-                skipped_states = [state for state in states if id(state) not in runnable_state_ids]
-                if not runnable_states:
-                    print(f"[task {index}/{len(tasks)}] skip {bench} | {task_id}", flush=True)
-                    for state in states:
-                        self._record_skipped_task(state, task, task_id)
-                    self._write_manifest(
-                        started_at=started_at,
-                        completed_at=None,
-                        task_set=task_set,
-                        variant_entries=variant_entries,
-                    )
-                    continue
-                for state in skipped_states:
-                    self._record_skipped_task(state, task, task_id)
+        self._run_agent_phase(
+            tasks=tasks,
+            states=states,
+            started_at=started_at,
+            task_set=task_set,
+            variant_entries=variant_entries,
+        )
 
-            print(f"[task {index}/{len(tasks)}] run {bench} | {task_id}", flush=True)
-            for state in runnable_states:
-                self._clear_task_outputs(state, task)
-
-            future_map = {}
-            with ThreadPoolExecutor(max_workers=min(self.max_workers, len(runnable_states))) as executor:
-                for state in runnable_states:
-                    future = executor.submit(self._run_variant_task, state, task)
-                    future_map[future] = state
-
-                for future in as_completed(future_map):
-                    state = future_map[future]
-                    try:
-                        result = future.result()
-                    except Exception as exc:
-                        self._record_variant_exception(state, task, task_id, exc)
-                    else:
-                        self._record_variant_result(state, task, task_id, result)
-
-            self._write_manifest(
-                started_at=started_at,
-                completed_at=None,
-                task_set=task_set,
-                variant_entries=variant_entries,
-            )
-
+        started = time.monotonic()
         for state in states:
             self._run_conversion_stage(state, tasks)
+        self.phase_timings["conversion_ms"] = int((time.monotonic() - started) * 1000)
+        started = time.monotonic()
         for state in states:
             self._run_evaluation_stage(state, tasks)
+        self.phase_timings["evaluation_ms"] = int((time.monotonic() - started) * 1000)
+        started = time.monotonic()
         for state in states:
             self._run_resolution_stage(state, tasks)
+        self.phase_timings["resolution_ms"] = int((time.monotonic() - started) * 1000)
+        started = time.monotonic()
         for state in states:
             self._finalize_variant(state, tasks)
+        self.phase_timings["finalize_ms"] = int((time.monotonic() - started) * 1000)
 
         completed_at = utc_now()
         self._write_manifest(

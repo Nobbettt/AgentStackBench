@@ -1,14 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-19 from upstream ContextBench.
+# Summary of changes: capture command executions in coding-agent invocation results.
 
 """Base interfaces for coding-agent adapter registration."""
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from ..coding_agents.types import CommandResult, StructuredOutput, TokenUsage, ToolCall
+from ..coding_agents.types import CommandExecution, CommandResult, StructuredOutput, TokenUsage, ToolCall
 
 if TYPE_CHECKING:
     from .base import BaseCodingAgentParser
@@ -24,6 +28,25 @@ class PreparedCodingAgentRuntime:
     execution_backend: Any | None = None
 
 
+def expose_workspace_bin_on_path(env: dict[str, str], env_overrides: dict[str, str] | None) -> None:
+    """Make repo-native helper entrypoints discoverable without shadowing agent tools."""
+
+    workspace_text = str((env_overrides or {}).get("CONTEXTBENCH_WORKSPACE_PATH") or "").strip()
+    if not workspace_text:
+        return
+    workspace_bin_path = Path(workspace_text) / "bin"
+    workspace_bin = str(workspace_bin_path)
+    path_parts = [part for part in env.get("PATH", "").split(os.pathsep) if part]
+    if not path_parts:
+        if not workspace_bin_path.exists():
+            return
+        path_parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+    if workspace_bin in path_parts:
+        return
+    path_parts.append(workspace_bin)
+    env["PATH"] = os.pathsep.join(path_parts)
+
+
 @dataclass(frozen=True)
 class CodingAgentInvocationResult:
     """Normalized result of one adapter invocation phase."""
@@ -35,6 +58,7 @@ class CodingAgentInvocationResult:
     structured_output: StructuredOutput | None
     token_usage: TokenUsage | None
     tool_calls: list[ToolCall]
+    command_executions: list[CommandExecution]
     available_tools: list[str]
     persisted_tool_results: list[dict[str, object]]
     diagnostic_note: str | None

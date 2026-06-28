@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Fork note: Modified by Norbert Laszlo on 2026-06-09 from upstream ContextBench.
-# Summary of changes: keep Claude trace inference conservative for grep-derived context.
+# Summary of changes: keep Claude trace inference conservative and extract command executions.
 
 """Claude-specific parsing for wrapper-produced records and raw responses."""
 
@@ -18,7 +18,15 @@ from ...coding_agents.trace_inference import (
     tool_result_text_from_value,
     trajectory_from_steps,
 )
-from ...coding_agents.types import ClaudeRawResponse, StructuredOutput, TokenUsage, ToolCall, TraceInferenceMeta, TrajectoryData
+from ...coding_agents.types import (
+    ClaudeRawResponse,
+    CommandExecution,
+    StructuredOutput,
+    TokenUsage,
+    ToolCall,
+    TraceInferenceMeta,
+    TrajectoryData,
+)
 
 
 _NON_RETRIEVAL_TOOLS = frozenset(
@@ -222,6 +230,68 @@ class ClaudeAgentParser(BaseCodingAgentParser):
                     tools.append(name)
                     seen.add(name)
         return tools
+
+    def extract_command_executions(self, raw_response: ClaudeRawResponse) -> list[CommandExecution]:
+        if not isinstance(raw_response, dict):
+            return []
+        response = raw_response.get("response")
+        if not isinstance(response, list):
+            return []
+        pending: dict[str, dict[str, object]] = {}
+        executions: list[CommandExecution] = []
+        for item in response:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "assistant":
+                message = item.get("message")
+                if not isinstance(message, dict):
+                    continue
+                for content in message.get("content", []):
+                    if not isinstance(content, dict) or content.get("type") != "tool_use":
+                        continue
+                    if str(content.get("name") or "") != "Bash":
+                        continue
+                    tool_input = content.get("input") if isinstance(content.get("input"), dict) else {}
+                    command = str(tool_input.get("command") or "").strip()
+                    tool_id = str(content.get("id") or "").strip()
+                    if command and tool_id:
+                        pending[tool_id] = {"command": command, "tool_use": dict(content)}
+                continue
+            if item_type != "user":
+                continue
+            message = item.get("message")
+            if not isinstance(message, dict):
+                continue
+            for content in message.get("content", []):
+                if not isinstance(content, dict) or content.get("type") != "tool_result":
+                    continue
+                tool_id = str(content.get("tool_use_id") or "").strip()
+                pending_item = pending.pop(tool_id, None)
+                if not pending_item:
+                    continue
+                is_error = bool(content.get("is_error"))
+                payload: dict[str, object] = {
+                    "status": "error" if is_error else "completed",
+                    "is_error": is_error,
+                    "result": content.get("content"),
+                    "tool_use_result": item.get("tool_use_result"),
+                }
+                tool_use_result = item.get("tool_use_result")
+                if isinstance(tool_use_result, dict):
+                    exit_code = tool_use_result.get("exit_code")
+                    if exit_code is None:
+                        exit_code = tool_use_result.get("exitCode")
+                    if exit_code is not None:
+                        payload["exit_code"] = exit_code
+                executions.append(
+                    {
+                        "source": "claude.bash",
+                        "command": str(pending_item["command"]),
+                        "payload": payload,
+                    }
+                )
+        return executions
 
     def infer_trajectory_data(
         self,

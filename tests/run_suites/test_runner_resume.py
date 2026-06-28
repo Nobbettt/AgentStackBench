@@ -598,6 +598,27 @@ def test_run_suite_runner_resume_rejects_model_change(tmp_path, monkeypatch) -> 
         RunSuiteRunner(config_second, resume=True).run()
 
 
+def test_run_suite_runner_resume_allows_redaction_only_config_change() -> None:
+    previous_config = {
+        "name": "baseline",
+        "runtime_env": {
+            "MEMTRACE_LICENSE_KEY": "license-token",
+            "VISIBLE_SETTING": "1",
+        },
+        "limit": 15,
+    }
+    current_config = {
+        "name": "baseline",
+        "runtime_env": {
+            "MEMTRACE_LICENSE_KEY": "<redacted>",
+            "VISIBLE_SETTING": "1",
+        },
+        "limit": 30,
+    }
+
+    assert RunSuiteRunner._resume_compatible_effective_config(previous_config, current_config)
+
+
 @pytest.mark.parametrize(
     ("variant_override", "experiment_name"),
     [

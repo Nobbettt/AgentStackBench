@@ -108,7 +108,7 @@ def test_run_pro_resolution_evaluation_uses_official_local_docker_contract(tmp_p
         captured["cwd"] = cwd
         captured["log_path"] = log_path
         captured["log_prefix"] = log_prefix
-        output_dir = tmp_path / "work" / "evaluation_results"
+        output_dir = Path(command[command.index("--output_dir") + 1])
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "eval_results.json").write_text(
             json.dumps({"instance_repo__repo-1": True}),
@@ -135,9 +135,9 @@ def test_run_pro_resolution_evaluation_uses_official_local_docker_contract(tmp_p
     assert command[command.index("--cache_dir") + 1] == str((tmp_path / "checkpoints" / "pro").resolve())
     assert "--self-clean-resolution-artifacts" in command
     assert command[command.index("--dockerhub_username") + 1] == "jefzda"
-    assert command[command.index("--num_workers") + 1] == "3"
-    assert captured["cwd"] == (tmp_path / "work").resolve()
-    assert captured["log_path"] == (tmp_path / "work" / "resolution-command.log").resolve()
+    assert command[command.index("--num_workers") + 1] == "1"
+    assert captured["cwd"] == (tmp_path / "work" / "instances" / "instance_repo__repo-1").resolve()
+    assert captured["log_path"] == (tmp_path / "work" / "instances" / "instance_repo__repo-1" / "resolution-command.log")
     assert summary["resolved_ids"] == ["instance_repo__repo-1"]
     assert summary["unresolved_ids"] == []
     assert summary["raw_sample_path"].endswith("raw-sample.csv")

@@ -100,6 +100,7 @@ def create_task_runtime(
     task_dir: Path,
     schema_path: Path | None,
     extra_writable_dirs: Sequence[Path] = (),
+    extra_readonly_dirs: Sequence[Path] = (),
 ) -> "BaseTaskRuntime":
     if config.backend == "docker":
         return DockerTaskRuntime(
@@ -108,6 +109,7 @@ def create_task_runtime(
             task_dir=task_dir,
             schema_path=schema_path,
             extra_writable_dirs=tuple(extra_writable_dirs),
+            extra_readonly_dirs=tuple(extra_readonly_dirs),
         )
     return HostTaskRuntime(config=config)
 
@@ -193,6 +195,7 @@ class DockerTaskRuntime(BaseTaskRuntime):
     task_dir: Path
     schema_path: Path | None
     extra_writable_dirs: tuple[Path, ...] = ()
+    extra_readonly_dirs: tuple[Path, ...] = ()
     container_name: str | None = None
     _started: bool = False
     _timed_out: bool = False
@@ -298,6 +301,13 @@ class DockerTaskRuntime(BaseTaskRuntime):
                     "timeout": True,
                 }
         timed_out = process.returncode in {124, 137}
+        if timed_out and not self._container_is_running():
+            return {
+                "ok": False,
+                "exit_code": process.returncode,
+                "signal": None,
+                "timeout": False,
+            }
         if timed_out:
             self._timed_out = True
         return {
@@ -339,6 +349,17 @@ class DockerTaskRuntime(BaseTaskRuntime):
             "user": self._exec_user,
         }
 
+    def _container_is_running(self) -> bool:
+        if not self.container_name:
+            return False
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.Running}}", self.container_name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.returncode == 0 and result.stdout.strip().lower() == "true"
+
     def _container_name(self) -> str:
         seed = f"{self.task_dir.resolve()}:{time.time_ns()}"
         digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
@@ -350,6 +371,7 @@ class DockerTaskRuntime(BaseTaskRuntime):
             (self.task_dir.resolve(), self.task_dir.resolve(), False),
         ]
         mounts.extend((path.resolve(), path.resolve(), False) for path in self.extra_writable_dirs)
+        mounts.extend((path.resolve(), path.resolve(), True) for path in self.extra_readonly_dirs)
         mounts.extend((path, path, readonly) for path, readonly in _git_metadata_mounts(self.workspace_path))
         if self.schema_path is not None:
             schema_parent = self.schema_path.resolve().parent
@@ -417,6 +439,7 @@ if [ -z "$user_name" ]; then
   useradd -m -u {uid} -g "$group_name" -s /bin/bash contextbench
   user_name=contextbench
 fi
+mkdir -p /etc/sudoers.d
 printf '%s ALL=(ALL) NOPASSWD:ALL\\n' "$user_name" > /etc/sudoers.d/contextbench
 chmod 0440 /etc/sudoers.d/contextbench
 while true; do sleep 3600; done

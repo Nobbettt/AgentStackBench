@@ -114,3 +114,50 @@ def test_multibench_wrapper_success_when_final_report_exists(monkeypatch, tmp_pa
 
     assert module.main() == 0
     assert not (output_dir / "evaluation-error.json").exists()
+
+
+def test_multibench_wrapper_prepare_images_only_writes_image_mode_config(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module("contextbench/run_suites_resolution_wrappers/multibench.py", "multi_resolution_wrapper_prepare_images")
+    predictions_path = tmp_path / "predictions.jsonl"
+    dataset_path = tmp_path / "dataset.jsonl"
+    predictions_path.write_text(
+        '{"org":"iamkun","repo":"dayjs","number":734,"fix_patch":"diff"}\n'
+        '{"org":"expressjs","repo":"express","number":1,"fix_patch":"diff"}\n',
+        encoding="utf-8",
+    )
+    dataset_path.write_text(
+        '{"org":"iamkun","repo":"dayjs","number":734,"instance_id":"iamkun__dayjs-734"}\n'
+        '{"org":"expressjs","repo":"express","number":1,"instance_id":"expressjs__express-1"}\n',
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "evaluation_results"
+    commands: list[list[str]] = []
+
+    def fake_run(command, check, cwd):
+        del check
+        commands.append(list(command))
+        assert cwd == str(output_dir.parent.resolve())
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        module,
+        "parse_args",
+        lambda: types.SimpleNamespace(
+            predictions_path=predictions_path,
+            dataset_path=dataset_path,
+            output_dir=output_dir,
+            repo_dir=tmp_path / "repos",
+            log_dir=tmp_path / "logs",
+            max_workers=4,
+            prepare_images_only=True,
+        ),
+    )
+
+    assert module.main() == 0
+    assert commands[0][:3] == [sys.executable, "-m", "multi_swe_bench.harness.run_evaluation"]
+    config = json.loads((output_dir.parent / "multibench-config.json").read_text(encoding="utf-8"))
+    assert config["mode"] == "image"
+    assert config["specifics"] == ["iamkun/dayjs:pr-734", "expressjs/express:pr-1"]
+    assert config["max_workers_build_image"] == 4
+    assert not (output_dir / "evaluation-error.json").exists()

@@ -13,6 +13,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { getComparisonPair } from "@/components/comparison/format";
 import { InstanceResultsSection } from "@/components/comparison/instance-results-section";
 import { ComparisonInstanceDetailPage } from "@/components/comparison/instance-detail-page";
+import { CorrelationSection } from "@/components/comparison/correlation-section";
 import {
   contextRetrievalMetricDefinitions,
   executionMetricDefinitions,
@@ -32,13 +33,13 @@ import {
 } from "@/components/comparison/metric-sections";
 import { getMetricSignificance } from "@/components/comparison/significance";
 import { DeltaIndicator, HelpIcon, MetricDirectionBadge, SignificanceBadge } from "@/components/comparison/shared";
-import { comparisonHasToolUsage, SkillUsageSection, ToolUsageSection } from "@/components/comparison/usage-sections";
+import { comparisonHasMcpUsage, comparisonHasToolUsage, McpUsageSection, SkillUsageSection, ToolUsageSection } from "@/components/comparison/usage-sections";
 import type { ComparisonResultsViewMode, DeltaDisplayMode, MetricDefinition } from "@/components/comparison/types";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 
 export { ComparisonInstanceDetailPage };
 
-export type ComparisonResultsTab = "overview" | "execution" | "resolution" | "context" | "languages" | "resources" | "usage" | "tools" | "issues";
+export type ComparisonResultsTab = "overview" | "execution" | "resolution" | "context" | "correlations" | "languages" | "resources" | "usage" | "mcp" | "tools" | "issues";
 
 export function ComparisonResults({
   comparison,
@@ -74,11 +75,24 @@ export function ComparisonResults({
         {activeTab === "context" ? (
           <ContextRetrievalMetricSection comparison={comparison} viewMode={viewMode} deltaDisplayMode={deltaDisplayMode} />
         ) : null}
+        {activeTab === "correlations" ? (
+          <CorrelationSection comparison={comparison} />
+        ) : null}
         {activeTab === "languages" ? (
           <LanguageMetricsSection comparison={comparison} />
         ) : null}
         {activeTab === "usage" ? (
           <SkillUsageSection comparison={comparison} viewMode={viewMode} deltaDisplayMode={deltaDisplayMode} />
+        ) : null}
+        {activeTab === "mcp" ? (
+          comparisonHasMcpUsage(comparison) ? (
+            <McpUsageSection comparison={comparison} viewMode={viewMode} deltaDisplayMode={deltaDisplayMode} />
+          ) : (
+            <section className="rounded-lg bg-background p-5">
+              <h2 className="text-xl font-semibold tracking-tight">MCP Usage</h2>
+              <p className="mt-3 text-sm text-muted-foreground">No MCP tool-call telemetry was exported for this comparison.</p>
+            </section>
+          )
         ) : null}
         {activeTab === "tools" ? (
           comparisonHasToolUsage(comparison) ? (
@@ -86,7 +100,7 @@ export function ComparisonResults({
           ) : (
             <section className="rounded-lg bg-background p-5">
               <h2 className="text-xl font-semibold tracking-tight">Tool Usage</h2>
-              <p className="mt-3 text-sm text-muted-foreground">No tools were used.</p>
+              <p className="mt-3 text-sm text-muted-foreground">No native, non-MCP tool-call telemetry was exported for this comparison.</p>
             </section>
           )
         ) : null}

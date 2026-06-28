@@ -29,6 +29,7 @@ from ..agents.claude.runtime import (
 )
 from ..agents.codex.runtime import (
     build_command as build_codex_command,
+    codex_tool_bundle_root,
     prepare_runtime_env as prepare_codex_runtime_env,
     run_invocation as _run_codex_invocation,
     runtime_root as codex_runtime_root,
@@ -322,6 +323,52 @@ def missing_required_tool_call_patterns(
     return missing
 
 
+def command_execution_succeeded(execution: dict[str, object]) -> bool:
+    payload = execution.get("payload")
+    if not isinstance(payload, dict):
+        return True
+    status = str(payload.get("status") or "").strip().lower()
+    if status in {"failed", "error", "cancelled", "canceled"}:
+        return False
+    exit_code = payload.get("exit_code")
+    if isinstance(exit_code, int) and exit_code != 0:
+        return False
+    if isinstance(exit_code, str) and exit_code.strip() and exit_code.strip() != "0":
+        return False
+    return True
+
+
+def missing_required_command_patterns(
+    command_executions: Sequence[dict[str, object]] | None,
+    required_command_patterns: Sequence[object] = (),
+) -> list[str]:
+    patterns = [str(pattern).strip() for pattern in required_command_patterns or () if str(pattern).strip()]
+    if not patterns:
+        return []
+    haystacks: list[str] = []
+    for execution in command_executions or ():
+        if not isinstance(execution, dict):
+            continue
+        if not command_execution_succeeded(execution):
+            continue
+        try:
+            payload_text = json.dumps(execution.get("payload") or {}, sort_keys=True)
+        except TypeError:
+            payload_text = str(execution.get("payload") or {})
+        source = str(execution.get("source") or "")
+        command = str(execution.get("command") or "")
+        haystacks.extend((source, command, payload_text, "\n".join((source, command, payload_text))))
+    missing: list[str] = []
+    for pattern in patterns:
+        try:
+            compiled = re.compile(pattern)
+        except re.error as exc:
+            raise usage_error(f"Invalid required command pattern {pattern!r}: {exc}") from exc
+        if not any(compiled.search(haystack) for haystack in haystacks):
+            missing.append(pattern)
+    return missing
+
+
 def missing_required_available_tool_patterns(
     available_tools: Sequence[object] | None,
     required_available_tool_patterns: Sequence[object] = (),
@@ -579,6 +626,7 @@ def run_coding_agent_task(
     runtime_validation_commands: Sequence[object] = (),
     diff_exclude_paths: Sequence[object] = (),
     required_tool_call_patterns: Sequence[object] = (),
+    required_command_patterns: Sequence[object] = (),
     required_available_tool_patterns: Sequence[object] = (),
     runtime_keep_failed: bool = False,
 ) -> TaskRecord:
@@ -605,6 +653,9 @@ def run_coding_agent_task(
     normalized_diff_exclude_paths = tuple(str(path).strip() for path in diff_exclude_paths or () if str(path).strip())
     normalized_required_tool_call_patterns = tuple(
         str(pattern).strip() for pattern in required_tool_call_patterns or () if str(pattern).strip()
+    )
+    normalized_required_command_patterns = tuple(
+        str(pattern).strip() for pattern in required_command_patterns or () if str(pattern).strip()
     )
     normalized_required_available_tool_patterns = tuple(
         str(pattern).strip() for pattern in required_available_tool_patterns or () if str(pattern).strip()
@@ -650,6 +701,7 @@ def run_coding_agent_task(
     task_dir = (output_dir / safe_path_component(task.get("instance_id") or task.get("original_inst_id") or "task")).resolve()
     ensure_dir(task_dir)
     extra_runtime_mounts: list[Path] = []
+    extra_runtime_readonly_mounts: list[Path] = []
     if agent == "codex":
         codex_runtime_dir = codex_runtime_root(task_dir)
         shutil.rmtree(codex_runtime_dir, ignore_errors=True)
@@ -660,6 +712,21 @@ def run_coding_agent_task(
         shutil.rmtree(claude_runtime_dir, ignore_errors=True)
         ensure_dir(claude_runtime_dir)
         extra_runtime_mounts.append(claude_runtime_dir)
+
+    runtime_env_template_env = {
+        **dict(runtime_config.env or {}),
+        "CONTEXTBENCH_WORKSPACE_PATH": str(workspace_path),
+        "CONTEXTBENCH_TASK_DIR": str(task_dir),
+    }
+    expanded_runtime_env = expand_runtime_templates(dict(runtime_config.env or {}), env=runtime_env_template_env)
+    runtime_config = replace(
+        runtime_config,
+        env={str(key): str(value) for key, value in dict(expanded_runtime_env).items()},
+    )
+    if agent == "codex" and runtime_config.backend == "docker":
+        bundle_root = codex_tool_bundle_root(runtime_config.env)
+        if bundle_root is not None:
+            extra_runtime_readonly_mounts.append(bundle_root)
 
     prompt = build_prompt(task, agent)
     if prompt_preamble:
@@ -683,6 +750,7 @@ def run_coding_agent_task(
         task_dir=task_dir,
         schema_path=schema_path,
         extra_writable_dirs=extra_runtime_mounts,
+        extra_readonly_dirs=extra_runtime_readonly_mounts,
     )
     runtime_success = False
     runtime_closed = False
@@ -1055,6 +1123,7 @@ def run_coding_agent_task(
             setup_run=setup_run,
         )
         record["available_tools"] = list(main_result.available_tools)
+        record["command_executions"] = list(main_result.command_executions)
         if main_result.persisted_tool_results:
             record["persisted_tool_results"] = list(main_result.persisted_tool_results)
         record["retry"] = dict(main_result.retry)
@@ -1101,6 +1170,23 @@ def run_coding_agent_task(
                 record["status"] = "failed"
                 record["notes"] = (
                     "Required tool call patterns were not observed: "
+                    + ", ".join(missing_patterns)
+                )
+        if normalized_required_command_patterns:
+            missing_patterns = missing_required_command_patterns(
+                main_result.command_executions,
+                normalized_required_command_patterns,
+            )
+            record["command_requirements"] = {
+                "patterns": list(normalized_required_command_patterns),
+                "missing": missing_patterns,
+                "ok": not missing_patterns,
+            }
+            if missing_patterns and str(record.get("status") or "") not in {"failed", "timeout"}:
+                record["ok"] = False
+                record["status"] = "failed"
+                record["notes"] = (
+                    "Required command patterns were not observed: "
                     + ", ".join(missing_patterns)
                 )
 

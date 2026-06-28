@@ -27,7 +27,7 @@ from contextbench.run_suites_core.postprocess import (
 )
 
 
-from .helpers import _fake_run_coding_agent_task, _make_fake_agent_record, _write_task_inputs
+from .helpers import _fake_run_coding_agent_task, _make_fake_agent_record, _write_task_inputs, write_agent_resolution_record
 
 def test_evaluate_resolution_for_suite_writes_error_summary_for_failed_backend(tmp_path: Path, monkeypatch) -> None:
     variant_dir = tmp_path / "variant"
@@ -99,6 +99,101 @@ def test_evaluate_resolution_for_suite_writes_error_summary_for_failed_backend(t
     assert bench_summary["log_path"].endswith("resolution-command.log")
     assert payload["tail"] == "tail output"
     assert payload["exit_code"] == 1
+
+
+def test_evaluate_resolution_for_suite_fails_after_image_prebuild_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    variant_dir = tmp_path / "variant"
+    source_dir = variant_dir / "agent_runs" / "codex"
+    instance_id = "psf__requests-1000"
+    write_agent_resolution_record(variant_dir=variant_dir, bench="Verified", instance_id=instance_id)
+
+    monkeypatch.setattr("contextbench.run_suites_core.postprocess._docker_available", lambda: True)
+    monkeypatch.setattr("contextbench.run_suites_core.postprocess._docker_image_available", lambda image: True)
+    monkeypatch.setattr(
+        "contextbench.run_suites_core.postprocess._docker_host_socket_path",
+        lambda: Path("/var/run/docker.sock"),
+    )
+
+    def fake_prepare_resolution_images_for_bench(**kwargs):
+        raise ResolutionCommandError(
+            message="prebuild failed",
+            exit_code=1,
+            log_path=str(variant_dir / "resolution-eval" / "verified" / "image-prebuild.log"),
+            tail="prebuild tail",
+        )
+
+    def fake_swebench_run(**kwargs):
+        raise AssertionError("resolution should not run after image prebuild failure")
+
+    monkeypatch.setattr(
+        "contextbench.run_suites_core.postprocess.prepare_resolution_images_for_bench",
+        fake_prepare_resolution_images_for_bench,
+    )
+    monkeypatch.setattr("contextbench.run_suites_core.postprocess.run_resolution_evaluation", fake_swebench_run)
+
+    with pytest.raises(ResolutionCommandError, match="prebuild failed"):
+        evaluate_resolution_for_suite(
+            source_dir=source_dir,
+            expected_agent="codex",
+            suite_name="demo-suite",
+            variant_name="baseline",
+            work_dir=variant_dir,
+            max_workers=2,
+            prebuild_images=True,
+            prebuild_workers=2,
+        )
+
+
+def test_evaluate_resolution_for_suite_skips_backend_for_all_missing_patches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    variant_dir = tmp_path / "variant"
+    source_dir = variant_dir / "agent_runs" / "codex"
+    instance_id = "psf__requests-1000"
+    write_agent_resolution_record(
+        variant_dir=variant_dir,
+        bench="Verified",
+        instance_id=instance_id,
+        model_patch="",
+    )
+
+    monkeypatch.setattr("contextbench.run_suites_core.postprocess._docker_available", lambda: True)
+    monkeypatch.setattr("contextbench.run_suites_core.postprocess._docker_image_available", lambda image: True)
+    monkeypatch.setattr(
+        "contextbench.run_suites_core.postprocess._docker_host_socket_path",
+        lambda: Path("/var/run/docker.sock"),
+    )
+
+    def fail_if_called(**kwargs):
+        raise AssertionError("resolution backend should not run for empty patches")
+
+    monkeypatch.setattr("contextbench.run_suites_core.postprocess.run_resolution_evaluation", fail_if_called)
+
+    summary = evaluate_resolution_for_suite(
+        source_dir=source_dir,
+        expected_agent="codex",
+        suite_name="demo-suite",
+        variant_name="baseline",
+        work_dir=variant_dir,
+        max_workers=2,
+    )
+
+    bench_summary = summary["per_bench"]["Verified"]
+    assert summary["status"] == "completed"
+    assert summary["is_partial"] is False
+    assert summary["evaluated_task_count"] == 1
+    assert summary["resolved_count"] == 0
+    assert summary["pass_at_1"] == 0.0
+    assert bench_summary["status"] == "completed"
+    assert bench_summary["prediction_ids"] == []
+    assert bench_summary["no_patch_ids"] == [instance_id]
+    assert bench_summary["unresolved_ids"] == [instance_id]
+
+
 def test_evaluate_resolution_for_suite_marks_backend_partial_when_error_ids_exist(tmp_path: Path, monkeypatch) -> None:
     variant_dir = tmp_path / "variant"
     source_dir = variant_dir / "agent_runs" / "codex"

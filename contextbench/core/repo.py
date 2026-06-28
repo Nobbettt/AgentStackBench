@@ -10,7 +10,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import hashlib
 from typing import Optional, List, Iterable
+
+_MAX_WORKTREE_KEY_COMPONENT_LENGTH = 80
+_WORKTREE_KEY_HASH_LENGTH = 16
 
 def checkout(
     repo_url: str,
@@ -211,6 +215,15 @@ def _normalize_workspace_key(workspace_key: str | None) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value) or ""
 
 
+def _bounded_workspace_component(workspace_component: str) -> str:
+    if len(workspace_component) <= _MAX_WORKTREE_KEY_COMPONENT_LENGTH:
+        return workspace_component
+    digest = hashlib.sha256(workspace_component.encode("utf-8")).hexdigest()[:_WORKTREE_KEY_HASH_LENGTH]
+    prefix_length = _MAX_WORKTREE_KEY_COMPONENT_LENGTH - _WORKTREE_KEY_HASH_LENGTH - 1
+    prefix = workspace_component[:prefix_length].rstrip("._-") or "workspace"
+    return f"{prefix}-{digest}"
+
+
 def _worktree_dir(worktree_root: str, commit: str, workspace_key: str | None) -> str:
     """Build a collision-safe detached worktree path.
 
@@ -221,7 +234,7 @@ def _worktree_dir(worktree_root: str, commit: str, workspace_key: str | None) ->
       <repo>/<commit>/<workspace_key>
     where the parent commit directory ceases to be a valid git worktree.
     """
-    workspace_component = _normalize_workspace_key(workspace_key)
+    workspace_component = _bounded_workspace_component(_normalize_workspace_key(workspace_key))
     suffix = workspace_component or "default"
     return os.path.join(worktree_root, f"{commit}__{suffix}")
 

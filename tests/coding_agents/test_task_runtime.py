@@ -1,4 +1,8 @@
 
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-22 from upstream ContextBench.
+# Summary of changes: cover coding-agent Docker runtime env template expansion.
+
 from __future__ import annotations
 
 import json
@@ -232,6 +236,128 @@ def test_run_coding_agent_task_claude_docker_uses_default_image_and_runtime_auth
     assert "/usr/local/bin" in captured["envs"][0]["PATH"].split(":")
     assert record["status"] == "completed"
     assert record["runtime"]["image"] == DEFAULT_CLAUDE_RUNTIME_IMAGE
+    assert captured["close_success"] is True
+
+
+def test_run_coding_agent_task_docker_expands_runtime_env_templates(
+    tmp_path,
+    monkeypatch,
+    make_final_output,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    captured: dict[str, object] = {"commands": [], "envs": []}
+
+    class FakeDockerRuntime:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        def start(self) -> None:
+            return None
+
+        def metadata(self) -> dict[str, object]:
+            return {"backend": self.config.backend, "image": self.config.image}
+
+        def run_command(self, command, *, cwd, stdin_text, stdout_path, stderr_path, timeout, env=None, host_runner=None):
+            del cwd, stdin_text, timeout, host_runner
+            merged_env = dict(self.config.env)
+            merged_env.update(dict(env or {}))
+            captured["commands"].append(list(command))
+            captured["envs"].append(merged_env)
+            stdout_path.parent.mkdir(parents=True, exist_ok=True)
+            stderr_path.parent.mkdir(parents=True, exist_ok=True)
+            stderr_path.write_text("", encoding="utf-8")
+            if list(command) == ["codex", "--version"]:
+                stdout_path.write_text("codex 0.0.0\n", encoding="utf-8")
+                return {"ok": True, "exit_code": 0, "signal": None, "timeout": False}
+            if list(command[:2]) == ["/bin/sh", "-c"]:
+                stdout_path.write_text("setup ok\n", encoding="utf-8")
+                return {"ok": True, "exit_code": 0, "signal": None, "timeout": False}
+
+            final_output_path = Path(command[command.index("--output-last-message") + 1])
+            final_output_path.write_text(
+                json.dumps(
+                    make_final_output(
+                        task_id="task-env-templates",
+                        touched_files=["a.py"],
+                        retrieved_context_files=["a.py"],
+                    )
+                ),
+                encoding="utf-8",
+            )
+            stdout_path.write_text(
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 4, "output_tokens": 2}}) + "\n",
+                encoding="utf-8",
+            )
+            return {"ok": True, "exit_code": 0, "signal": None, "timeout": False}
+
+        def close(self, *, success: bool) -> None:
+            captured["close_success"] = success
+
+    def fake_create_task_runtime(config, **kwargs):
+        del kwargs
+        captured["runtime_config"] = config
+        return FakeDockerRuntime(config)
+
+    monkeypatch.setattr("contextbench.coding_agents.runtime.checkout", lambda *args, **kwargs: str(workspace_path))
+    monkeypatch.setattr("contextbench.coding_agents.runtime.reset_workspace", lambda path: None)
+    monkeypatch.setattr("contextbench.coding_agents.runtime.create_task_runtime", fake_create_task_runtime)
+    monkeypatch.setattr("contextbench.coding_agents.runtime.git_workspace_diff", lambda path, **kwargs: "")
+    monkeypatch.setattr("contextbench.coding_agents.runtime.git_untracked_files", lambda path, **kwargs: [])
+    monkeypatch.setattr("contextbench.coding_agents.runtime.workspace_has_nonexcluded_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "contextbench.agents.codex.runtime.prepare_runtime_env",
+        lambda task_dir, **kwargs: {"HOME": str(task_dir / "codex-home"), "PATH": "/usr/local/bin"},
+    )
+
+    record = run_coding_agent_task(
+        task={
+            "bench": "Verified",
+            "instance_id": "task-env-templates",
+            "original_inst_id": "task-env-templates",
+            "repo_url": "https://github.com/example/repo.git",
+            "commit": "abc123",
+            "prompt": "Fix the bug.",
+            "language": "python",
+        },
+        agent="codex",
+        output_dir=Path("results"),
+        cache_dir=Path("cache"),
+        schema_path=CODEX_OUTPUT_SCHEMA_PATH.resolve(),
+        timeout=30,
+        runtime_backend="docker",
+        runtime_image="fake-codex",
+        runtime_env={
+            "MEMTRACE_DATA_DIR": "${CONTEXTBENCH_TASK_DIR}/memtrace-state",
+            "MEMTRACE_MEMDB_DATA_DIR": "${CONTEXTBENCH_TASK_DIR}/memtrace-memdb",
+            "WORKSPACE_REF": "${CONTEXTBENCH_WORKSPACE_PATH}/.agent-state",
+            "HOST_ONLY": "${HOST_ONLY_TEMPLATE_SECRET}",
+        },
+        runtime_setup_commands=[
+            "test -d '${CONTEXTBENCH_WORKSPACE_PATH}' && test -n '${MEMTRACE_DATA_DIR}'",
+        ],
+    )
+
+    task_dir = (Path("results") / "task-env-templates").resolve()
+    runtime_config = captured["runtime_config"]
+    assert runtime_config.env == {
+        "MEMTRACE_DATA_DIR": str(task_dir / "memtrace-state"),
+        "MEMTRACE_MEMDB_DATA_DIR": str(task_dir / "memtrace-memdb"),
+        "WORKSPACE_REF": str(workspace_path / ".agent-state"),
+        "HOST_ONLY": "${HOST_ONLY_TEMPLATE_SECRET}",
+    }
+    assert record["status"] == "completed"
+    assert captured["commands"][1] == [
+        "/bin/sh",
+        "-c",
+        f"test -d '{workspace_path}' && test -n '{task_dir / 'memtrace-state'}'",
+    ]
+    for env in captured["envs"]:
+        assert env["MEMTRACE_DATA_DIR"] == str(task_dir / "memtrace-state")
+        assert env["MEMTRACE_MEMDB_DATA_DIR"] == str(task_dir / "memtrace-memdb")
+        assert env["WORKSPACE_REF"] == str(workspace_path / ".agent-state")
+        assert "${CONTEXTBENCH_TASK_DIR}" not in "\n".join(env.values())
     assert captured["close_success"] is True
 
 
@@ -1096,12 +1222,89 @@ def test_run_coding_agent_task_codex_writes_record_and_diff(tmp_path, monkeypatc
     assert [str(path) for path in captured["writable_dirs"]] == [str(codex_runtime_root(task_dir).resolve())]
     assert Path(record["task_dir"]).is_absolute()
     assert captured["cwd"] == workspace_path
-    assert captured["env"] == {
+    captured_env = dict(captured["env"])
+    captured_path = captured_env.pop("PATH", None)
+    assert captured_env == {
         "HOME": str(task_dir),
         "EXPERIMENT": "1",
         "CONTEXTBENCH_WORKSPACE_PATH": str(workspace_path),
         "CONTEXTBENCH_TASK_DIR": str(task_dir),
     }
+    if captured_path is not None:
+        assert captured_path == str(workspace_path / "bin")
+
+
+def test_run_coding_agent_task_requires_successful_command_execution(tmp_path, monkeypatch, make_final_output) -> None:
+    monkeypatch.chdir(tmp_path)
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("contextbench.coding_agents.runtime.checkout", lambda *args, **kwargs: str(workspace_path))
+    monkeypatch.setattr("contextbench.coding_agents.runtime.reset_workspace", lambda path: None)
+    monkeypatch.setattr("contextbench.coding_agents.runtime.git_diff", lambda path: "diff --git a/a.py b/a.py\n")
+    monkeypatch.setattr(
+        "contextbench.agents.codex.runtime.prepare_runtime_env",
+        lambda task_dir, **kwargs: {"HOME": str(task_dir)},
+    )
+    monkeypatch.setattr(
+        "contextbench.agents.codex.runtime.build_command",
+        lambda **kwargs: (
+            captured.setdefault("final_output_path", kwargs["final_output_path"]) and ["codex", "exec", "-"],
+            "codex-events.jsonl",
+        ),
+    )
+
+    def fake_run_command(command, *, cwd, stdin_text, stdout_path, stderr_path, timeout, env=None):
+        del command, cwd, stdin_text, timeout, env
+        stdout_path.write_text(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "mcp-tool list_indexed_repositories '{}'",
+                        "exit_code": 0,
+                        "status": "completed",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stderr_path.write_text("", encoding="utf-8")
+        final_output_path = captured["final_output_path"]
+        assert isinstance(final_output_path, Path)
+        final_output_path.write_text(
+            json.dumps(make_final_output(task_id="command-required", touched_files=["a.py"])),
+            encoding="utf-8",
+        )
+        return {"ok": True, "exit_code": 0, "signal": None, "timeout": False}
+
+    monkeypatch.setattr("contextbench.agents.codex.runtime.run_command", fake_run_command)
+
+    record = run_coding_agent_task(
+        task={
+            "bench": "Verified",
+            "instance_id": "command-required",
+            "original_inst_id": "command-required",
+            "repo_url": "https://github.com/example/repo.git",
+            "commit": "abc123",
+            "prompt": "Fix the bug.",
+            "language": "python",
+        },
+        agent="codex",
+        output_dir=Path("results"),
+        cache_dir=Path("cache"),
+        schema_path=CODEX_OUTPUT_SCHEMA_PATH.resolve(),
+        timeout=30,
+        runtime_backend="host",
+        required_command_patterns=[r"\bmcp-tool\s+list_indexed_repositories\b"],
+    )
+
+    assert record["status"] == "completed"
+    assert record["command_requirements"]["ok"] is True
+    assert record["command_executions"][0]["command"] == "mcp-tool list_indexed_repositories '{}'"
 
 
 def test_run_coding_agent_task_rejects_schema_invalid_structured_output(tmp_path, monkeypatch) -> None:

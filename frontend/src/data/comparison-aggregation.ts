@@ -347,6 +347,7 @@ function aggregateVariant(
       toolCounts[entry.name] = (toolCounts[entry.name] ?? 0) + entry.count;
     }
   }
+  const mcpUsage = aggregateMcpUsage(filteredInstances);
 
   return {
     ...variant,
@@ -458,8 +459,60 @@ function aggregateVariant(
             averagePerRun: taskCount > 0 ? Number((count / taskCount).toFixed(2)) : 0,
           })),
       },
+      mcp: mcpUsage,
     },
     instances: filteredInstances,
+  };
+}
+
+function aggregateMcpUsage(instances: ComparisonInstance[]): NonNullable<ComparisonCard["variants"][number]["results"]["mcp"]> {
+  const availableTools = new Set<string>();
+  const byTool: Record<string, { calls: number; successfulCalls: number }> = {};
+  const totals = {
+    toolCalls: 0,
+    successfulToolCalls: 0,
+    callsWithResults: 0,
+    meaningfulCalls: 0,
+    callsWithFinalContextOverlap: 0,
+    callsWithPatchOverlap: 0,
+    callsWithFollowupOnReturnedPath: 0,
+    returnedPathCount: 0,
+  };
+  let instancesWithMcpCalls = 0;
+  let instancesWithMeaningfulMcpUse = 0;
+
+  for (const instance of instances) {
+    const mcp = instance.mcp;
+    if (!mcp) continue;
+    for (const tool of mcp.availableTools ?? []) {
+      if (tool.trim()) availableTools.add(tool.trim());
+    }
+    for (const key of Object.keys(totals) as Array<keyof typeof totals>) {
+      totals[key] += mcp[key] ?? 0;
+    }
+    if ((mcp.toolCalls ?? 0) > 0) instancesWithMcpCalls += 1;
+    if ((mcp.meaningfulCalls ?? 0) > 0) instancesWithMeaningfulMcpUse += 1;
+    for (const entry of mcp.byTool ?? []) {
+      if (!entry.name.trim()) continue;
+      const aggregate = byTool[entry.name] ?? { calls: 0, successfulCalls: 0 };
+      aggregate.calls += entry.calls ?? 0;
+      aggregate.successfulCalls += entry.successfulCalls ?? 0;
+      byTool[entry.name] = aggregate;
+    }
+  }
+
+  return {
+    availableTools: Array.from(availableTools).sort((left, right) => left.localeCompare(right)),
+    ...totals,
+    instancesWithMcpCalls,
+    instancesWithMeaningfulMcpUse,
+    byTool: Object.entries(byTool)
+      .sort((left, right) => left[0].localeCompare(right[0]))
+      .map(([name, values]) => ({
+        name,
+        calls: values.calls,
+        successfulCalls: values.successfulCalls,
+      })),
   };
 }
 

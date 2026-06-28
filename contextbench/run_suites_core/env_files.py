@@ -15,6 +15,7 @@ _SENSITIVE_ENV_NAME_PARTS = (
     "API_KEY",
     "ACCESS_KEY",
     "PRIVATE_KEY",
+    "LICENSE",
 )
 
 

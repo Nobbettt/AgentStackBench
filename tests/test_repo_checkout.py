@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import hashlib
 
 from contextbench.core.repo import _worktree_dir, checkout
 
@@ -21,6 +22,20 @@ def test_worktree_dir_uses_sibling_paths_for_default_and_keyed_worktrees(tmp_pat
     assert keyed_dir.endswith(os.path.join("worktrees", "abc123__suite__task__variant"))
     assert keyed_dir != default_dir
     assert not keyed_dir.startswith(default_dir + os.sep)
+
+
+def test_worktree_dir_bounds_long_workspace_keys(tmp_path) -> None:
+    root = str(tmp_path / "worktrees")
+    workspace_key = "suite__" + ("very-long-experiment-name__" * 20) + "__task__with-memtrace-mcp"
+
+    keyed_dir = _worktree_dir(root, "abc123", workspace_key)
+    basename = os.path.basename(keyed_dir)
+    normalized_key = workspace_key.replace("-", "-")
+    digest = hashlib.sha256(normalized_key.encode("utf-8")).hexdigest()[:16]
+
+    assert basename.startswith("abc123__suite__very-long-experiment-name")
+    assert basename.endswith(f"-{digest}")
+    assert len(basename) <= len("abc123__") + 80
 
 
 def test_checkout_retries_after_stale_worktree_directory(tmp_path, monkeypatch) -> None:

@@ -493,6 +493,16 @@ function CompactVariantSummary({
           value={formatEvaluationStatus(instance?.artifacts?.evaluationStatus)}
           note={baselineInstance ? `Baseline: ${formatEvaluationStatus(baselineInstance.artifacts?.evaluationStatus)}` : undefined}
         />
+        <CompactStat
+          label="Verify"
+          value={formatVerificationLevel(instance?.artifacts?.verificationQuality?.strongestVerification)}
+          note={verificationDiagnosticNote(instance)}
+        />
+        <CompactStat
+          label="Added Test"
+          value={formatRegressionTestStatus(instance?.artifacts?.regressionTest)}
+          note={baselineInstance ? `Baseline: ${formatRegressionTestStatus(baselineInstance.artifacts?.regressionTest)}` : undefined}
+        />
       </dl>
     </div>
   );
@@ -536,6 +546,34 @@ function formatNullableTokens(value: number | null | undefined): string {
 function formatEvaluationStatus(status: string | undefined): string {
   if (!status) return "-";
   return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+function formatVerificationLevel(level: string | null | undefined): string {
+  if (!level) return "-";
+  if (level === "repo_tests") return "Tests";
+  if (level === "targeted_runtime") return "Runtime";
+  if (level === "syntax_or_static") return "Static";
+  if (level === "dependency_install") return "Install";
+  if (level === "commands_without_successful_verification") return "Failed";
+  if (level === "no_verification") return "None";
+  return level.replace(/_/g, " ");
+}
+
+function verificationDiagnosticNote(instance: ComparisonInstance | undefined): string | undefined {
+  const quality = instance?.artifacts?.verificationQuality;
+  if (!quality) return undefined;
+  if (quality.environmentLimited) return "Environment limitation mentioned";
+  if (quality.syntaxOnly) return "Syntax/static only";
+  const failed = quality.failedCommandsTotal ?? 0;
+  if (failed > 0) return `${failed} failed command${failed === 1 ? "" : "s"}`;
+  return undefined;
+}
+
+function formatRegressionTestStatus(regression: NonNullable<ComparisonInstance["artifacts"]>["regressionTest"]): string {
+  if (!regression || !regression.addedRegressionTest) return "No";
+  if (regression.regressionTestsRun === true) return "Ran";
+  if (regression.regressionTestsRun === false) return "Not run";
+  return "Added";
 }
 
 function formatNumericDelta(

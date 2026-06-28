@@ -83,6 +83,12 @@ def test_run_resolution_evaluation_reuses_checkpoint_after_eval_dir_cleanup(tmp_
     log_text = (work_dir / "resolution-command.log").read_text(encoding="utf-8")
     assert summary["resolved_ids"] == [instance_id]
     assert checkpoint_summary_path.exists()
+    checkpoint_summary = json.loads(checkpoint_summary_path.read_text(encoding="utf-8"))
+    checkpoint_diagnostics = checkpoint_dir / "resolution-diagnostics.json"
+    assert checkpoint_summary["artifacts_retained"] is False
+    assert checkpoint_summary["diagnostics_path"] == str(checkpoint_diagnostics)
+    assert checkpoint_diagnostics.exists()
+    assert json.loads(checkpoint_diagnostics.read_text(encoding="utf-8"))["artifacts_retained"] is False
     assert not instance_dir.exists()
     assert f"[reuse] {instance_id} -> {checkpoint_summary_path}" in log_text
     assert "[cleanup] removed checkpointed resolution artifacts" in log_text
@@ -119,9 +125,16 @@ def test_run_resolution_evaluation_cleans_checkpointed_instance_artifacts(tmp_pa
     )
 
     checkpoint_summary = cache_dir / "instances" / safe_path_component(instance_id) / "resolution-result.json"
+    checkpoint_diagnostics = cache_dir / "instances" / safe_path_component(instance_id) / "resolution-diagnostics.json"
     instance_dir = work_dir / "instances" / safe_path_component(instance_id)
     assert summary["resolved_ids"] == [instance_id]
     assert checkpoint_summary.exists()
+    checkpoint_payload = json.loads(checkpoint_summary.read_text(encoding="utf-8"))
+    diagnostics_payload = json.loads(checkpoint_diagnostics.read_text(encoding="utf-8"))
+    assert checkpoint_payload["artifacts_retained"] is False
+    assert checkpoint_payload["diagnostics_path"] == str(checkpoint_diagnostics)
+    assert diagnostics_payload["artifacts_retained"] is False
+    assert diagnostics_payload["log_tail"].strip() == "ok"
     assert not instance_dir.exists()
     assert "[cleanup] removed checkpointed resolution artifacts" in (work_dir / "resolution-command.log").read_text(
         encoding="utf-8"
@@ -160,9 +173,12 @@ def test_run_resolution_evaluation_can_keep_checkpointed_instance_artifacts(tmp_
     )
 
     checkpoint_summary = cache_dir / "instances" / safe_path_component(instance_id) / "resolution-result.json"
+    checkpoint_diagnostics = cache_dir / "instances" / safe_path_component(instance_id) / "resolution-diagnostics.json"
     instance_dir = work_dir / "instances" / safe_path_component(instance_id)
     assert summary["resolved_ids"] == [instance_id]
     assert checkpoint_summary.exists()
+    assert checkpoint_diagnostics.exists()
+    assert json.loads(checkpoint_summary.read_text(encoding="utf-8"))["artifacts_retained"] is True
     assert (instance_dir / "large-workspace" / "artifact.bin").exists()
     assert "[cleanup] removed checkpointed resolution artifacts" not in (work_dir / "resolution-command.log").read_text(
         encoding="utf-8"

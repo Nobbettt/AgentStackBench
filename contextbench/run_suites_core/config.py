@@ -1,4 +1,8 @@
 
+# SPDX-License-Identifier: Apache-2.0
+# Fork note: Modified by Norbert Laszlo on 2026-06-16 from upstream ContextBench.
+# Summary of changes: add fork run-suite runtime prebuild configuration merging.
+
 """Config loading and effective-variant expansion for run suites."""
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from .env_files import read_env_file
 from .helpers import deep_merge
 from .types import (
     EffectiveVariantConfig,
+    RuntimePrebuildConfig,
     RunSuiteConfig,
     VariantConfig,
     VariantSetupConfig,
@@ -48,6 +53,15 @@ def merge_setup_config(base: VariantSetupConfig, override: VariantSetupConfig) -
     )
 
 
+def merge_runtime_prebuild_config(
+    base: RuntimePrebuildConfig,
+    override: RuntimePrebuildConfig | None,
+) -> RuntimePrebuildConfig:
+    if override is None:
+        return base
+    return override
+
+
 def build_run_suite_variant(
     run_suite: RunSuiteConfig,
     variant: VariantConfig,
@@ -59,12 +73,36 @@ def build_run_suite_variant(
     ]
     env = dict(variant.env_replace) if variant.env_replace is not None else {**base.env, **variant.env_add}
     runtime_backend = variant.runtime_backend if variant.runtime_backend is not None else base.runtime_backend
+    runtime_image_source = (
+        variant.runtime_image_source
+        if variant.runtime_image_source is not None
+        else base.runtime_image_source
+    )
     runtime_image = variant.runtime_image if variant.runtime_image is not None else base.runtime_image
+    runtime_images_by_bench = (
+        dict(variant.runtime_images_by_bench_replace)
+        if variant.runtime_images_by_bench_replace is not None
+        else {
+            **base.runtime_images_by_bench,
+            **variant.runtime_images_by_bench_add,
+        }
+    )
+    runtime_images_by_python = (
+        dict(variant.runtime_images_by_python_replace)
+        if variant.runtime_images_by_python_replace is not None
+        else {
+            **base.runtime_images_by_python,
+            **variant.runtime_images_by_python_add,
+        }
+    )
     runtime_platform = variant.runtime_platform if variant.runtime_platform is not None else base.runtime_platform
-    if runtime_backend == "docker" and runtime_image is None:
+    if runtime_backend == "docker" and runtime_image_source == "configured" and runtime_image is None:
         runtime_image = DEFAULT_AGENT_RUNTIME_IMAGES.get(run_suite.agent)
     if runtime_backend == "host" and variant.runtime_backend == "host" and variant.runtime_image is None:
+        runtime_image_source = "configured"
         runtime_image = None
+        runtime_images_by_bench = {}
+        runtime_images_by_python = {}
         runtime_platform = None
     base_runtime_env = {**read_env_file(base.runtime_env_file), **base.runtime_env}
     runtime_env = (
@@ -96,12 +134,18 @@ def build_run_suite_variant(
         if variant.required_tool_call_patterns_replace is not None
         else [*base.required_tool_call_patterns, *variant.required_tool_call_patterns_add]
     )
+    required_command_patterns = (
+        list(variant.required_command_patterns_replace)
+        if variant.required_command_patterns_replace is not None
+        else [*base.required_command_patterns, *variant.required_command_patterns_add]
+    )
     required_available_tool_patterns = (
         list(variant.required_available_tool_patterns_replace)
         if variant.required_available_tool_patterns_replace is not None
         else [*base.required_available_tool_patterns, *variant.required_available_tool_patterns_add]
     )
     setup = merge_setup_config(base.setup, variant.setup)
+    runtime_prebuild = merge_runtime_prebuild_config(base.runtime_prebuild, variant.runtime_prebuild)
     return EffectiveVariantConfig(
         name=variant.name,
         slug=safe_path_component(variant.name),
@@ -128,7 +172,10 @@ def build_run_suite_variant(
         agent_args=agent_args,
         setup=setup,
         runtime_backend=runtime_backend,
+        runtime_image_source=runtime_image_source,
         runtime_image=runtime_image,
+        runtime_images_by_bench=runtime_images_by_bench,
+        runtime_images_by_python=runtime_images_by_python,
         runtime_platform=runtime_platform,
         runtime_env=runtime_env,
         runtime_setup_timeout=(
@@ -151,10 +198,12 @@ def build_run_suite_variant(
             if variant.runtime_setup_cache_dir is not None
             else base.runtime_setup_cache_dir
         ),
+        runtime_prebuild=runtime_prebuild,
         runtime_setup_commands=runtime_setup_commands,
         runtime_validation_commands=runtime_validation_commands,
         diff_exclude_paths=diff_exclude_paths,
         required_tool_call_patterns=required_tool_call_patterns,
+        required_command_patterns=required_command_patterns,
         required_available_tool_patterns=required_available_tool_patterns,
         runtime_keep_failed=(
             variant.runtime_keep_failed

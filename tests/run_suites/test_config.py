@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -35,6 +36,31 @@ from contextbench.coding_agents.task_data import load_tasks
 
 from .helpers import _fake_run_coding_agent_task, _make_fake_agent_record, _write_task_inputs
 
+
+_PYTHON_SOURCE_BOOTSTRAP_DIFF_EXCLUDES = [
+    ".venv/**",
+    ".codex-venv/**",
+    ".pytest_cache/**",
+    ".mypy_cache/**",
+    ".ruff_cache/**",
+    "**/__pycache__/**",
+    "build/**",
+    "dist/**",
+    "*.egg-info/**",
+    ".eggs/**",
+    "**/*.so",
+    "**/*.pyd",
+    "**/*.dylib",
+    "**/*.dll",
+    "**/*.o",
+    "**/*.a",
+]
+
+def _assert_no_base_python_source_bootstrap(config) -> None:
+    assert config.base_run.diff_exclude_paths == _PYTHON_SOURCE_BOOTSTRAP_DIFF_EXCLUDES
+    assert config.base_run.runtime_setup_timeout is None
+    assert config.base_run.runtime_setup_commands == []
+    assert config.base_run.setup.copy_paths == []
 
 def test_run_suite_cli_rejects_partial_postprocess_escape_hatch(tmp_path) -> None:
     config_path = tmp_path / "suite.yaml"
@@ -215,6 +241,7 @@ def test_build_run_suite_variant_merges_base_and_variant_overrides(tmp_path) -> 
                 "runtime_validation_commands": ["base-validation"],
                 "diff_exclude_paths": [".base-cache/**"],
                 "required_tool_call_patterns": ["^base_tool$"],
+                "required_command_patterns": ["^base_command$"],
                 "required_available_tool_patterns": ["^base_available_tool$"],
                 "setup": {
                     "copy_paths": [
@@ -240,6 +267,7 @@ def test_build_run_suite_variant_merges_base_and_variant_overrides(tmp_path) -> 
                     "runtime_validation_commands_add": ["plugin-validation"],
                     "diff_exclude_paths_add": [".plugin-cache/**"],
                     "required_tool_call_patterns_add": ["^plugin_tool$"],
+                    "required_command_patterns_add": ["^plugin_command$"],
                     "required_available_tool_patterns_add": ["^plugin_available_tool$"],
                     "setup": {
                         "prompt_preamble": "Enable plugin",
@@ -279,6 +307,7 @@ def test_build_run_suite_variant_merges_base_and_variant_overrides(tmp_path) -> 
     assert effective.runtime_validation_commands == ["base-validation", "plugin-validation"]
     assert effective.diff_exclude_paths == [".base-cache/**", ".plugin-cache/**"]
     assert effective.required_tool_call_patterns == ["^base_tool$", "^plugin_tool$"]
+    assert effective.required_command_patterns == ["^base_command$", "^plugin_command$"]
     assert effective.required_available_tool_patterns == ["^base_available_tool$", "^plugin_available_tool$"]
 
 
@@ -312,9 +341,25 @@ def test_run_suite_selection_kind_only_marks_default_csv_as_representative(tmp_p
             "postprocess": {"convert": False, "evaluate": False},
         }
     )
+    filtered_config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "filtered-subset",
+            "agent": "codex",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(DEFAULT_SUBSET_CSV),
+                "instances": ["psf__requests-1000"],
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+            },
+            "variants": [{"name": "baseline"}],
+            "postprocess": {"convert": False, "evaluate": False},
+        }
+    )
 
     assert RunSuiteRunner(custom_config)._task_selection_kind(source_count=1136, selected_count=500) == "configured_subset"
     assert RunSuiteRunner(default_config)._task_selection_kind(source_count=1136, selected_count=500) == "representative_subset"
+    assert RunSuiteRunner(filtered_config)._task_selection_kind(source_count=1136, selected_count=1) == "filtered_selection"
 
 
 def test_build_run_suite_variant_uses_pinned_runtime_and_merges_runtime_env(tmp_path) -> None:
@@ -348,6 +393,138 @@ def test_build_run_suite_variant_uses_pinned_runtime_and_merges_runtime_env(tmp_
     assert effective.runtime_backend == "docker"
     assert effective.runtime_image == DEFAULT_CODEX_RUNTIME_IMAGE
     assert effective.runtime_env == {"HF_TOKEN": "secret-token", "BASE": "1", "PLUGIN": "1"}
+
+
+def test_build_run_suite_variant_replaces_runtime_prebuild_config(tmp_path) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "runtime-prebuild-config",
+            "agent": "codex",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "runtime_backend": "docker",
+                "runtime_image": "base-runtime:1.0",
+                "runtime_prebuild": {
+                    "enabled": True,
+                    "commands": ["base setup"],
+                    "env": {"BASE_TOOL": "1"},
+                    "image_tag": "base-prebuilt:latest",
+                },
+            },
+            "variants": [
+                {
+                    "name": "variant-prebuild",
+                    "runtime_prebuild": {
+                        "enabled": True,
+                        "commands": ["variant setup"],
+                        "env": {"VARIANT_TOOL": "1"},
+                        "pull_base_image": True,
+                    },
+                }
+            ],
+            "parallelism": {"max_workers": 4, "agent_workers": 3, "scheduler": "global"},
+            "postprocess": {
+                "convert": False,
+                "evaluate": False,
+                "prebuild_resolution_images": True,
+                "prebuild_resolution_workers": 2,
+            },
+        }
+    )
+
+    effective = build_run_suite_variant(config, config.variants[0])
+
+    assert config.parallelism.agent_workers == 3
+    assert config.parallelism.scheduler == "global"
+    assert config.postprocess.prebuild_resolution_images is True
+    assert config.postprocess.prebuild_resolution_workers == 2
+    assert effective.runtime_prebuild.enabled is True
+    assert effective.runtime_prebuild.commands == ["variant setup"]
+    assert effective.runtime_prebuild.env == {"VARIANT_TOOL": "1"}
+    assert effective.runtime_prebuild.image_tag is None
+    assert effective.runtime_prebuild.pull_base_image is True
+
+
+def test_build_run_suite_variant_accepts_resolution_runtime_image_source(tmp_path) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "resolution-runtime-source",
+            "agent": "codex",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "runtime_backend": "docker",
+                "runtime_image_source": "resolution",
+                "runtime_platform": "linux/amd64",
+            },
+            "variants": [{"name": "baseline"}],
+            "postprocess": {"convert": False, "evaluate": False},
+        }
+    )
+
+    effective = build_run_suite_variant(config, config.variants[0])
+
+    assert effective.runtime_image_source == "resolution"
+    assert effective.runtime_image is None
+    assert effective.runtime_platform == "linux/amd64"
+
+
+def test_run_suite_config_rejects_runtime_prebuild_with_resolution_runtime_source(tmp_path) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+
+    with pytest.raises(ValueError, match="runtime_prebuild requires runtime_image_source='configured'"):
+        RunSuiteConfig.model_validate(
+            {
+                "experiment_name": "resolution-runtime-prebuild",
+                "agent": "codex",
+                "base_run": {
+                    "task_data": str(task_data),
+                    "task_csv": str(task_csv),
+                    "output_root": str(tmp_path / "results"),
+                    "repo_cache": str(tmp_path / "cache"),
+                    "runtime_backend": "docker",
+                    "runtime_image_source": "resolution",
+                    "runtime_prebuild": {
+                        "enabled": True,
+                        "commands": ["echo setup"],
+                    },
+                },
+                "variants": [{"name": "baseline"}],
+                "postprocess": {"convert": False, "evaluate": False},
+            }
+        )
+
+
+def test_run_suite_config_rejects_runtime_prebuild_for_host_runtime(tmp_path) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+
+    with pytest.raises(ValueError, match="runtime_prebuild requires runtime_backend='docker'"):
+        RunSuiteConfig.model_validate(
+            {
+                "experiment_name": "host-runtime-prebuild",
+                "agent": "codex",
+                "base_run": {
+                    "task_data": str(task_data),
+                    "task_csv": str(task_csv),
+                    "output_root": str(tmp_path / "results"),
+                    "repo_cache": str(tmp_path / "cache"),
+                    "runtime_backend": "host",
+                    "runtime_prebuild": {
+                        "enabled": True,
+                        "commands": ["echo shared setup"],
+                    },
+                },
+                "variants": [{"name": "baseline"}],
+                "postprocess": {"convert": False, "evaluate": False},
+            }
+        )
 
 
 def test_run_suite_config_rejects_host_runtime_with_image(tmp_path) -> None:
@@ -430,6 +607,55 @@ def test_setup_claude_runtime_image_uses_pinned_claude_code_version(monkeypatch)
             "platform": None,
         }
     ]
+
+
+def test_setup_codex_tool_bundle_extracts_from_pinned_runtime_image(tmp_path, monkeypatch) -> None:
+    bundle_root = tmp_path / "agent-tool-bundles" / "codex"
+    bundle_dir = bundle_root / f"codex-cli-{run_suites_setup.CODEX_CLI_VERSION}"
+    current = bundle_root / "current"
+    run_calls: list[list[str]] = []
+    subprocess_calls: list[list[str]] = []
+
+    def fake_run_command(command: list[str]) -> None:
+        run_calls.append(list(command))
+        target = Path(command[-1])
+        target.mkdir(parents=True, exist_ok=True)
+
+    def fake_subprocess_run(command, capture_output, text, check):
+        del capture_output, text, check
+        subprocess_calls.append(list(command))
+        if command[:2] == ["docker", "create"]:
+            return subprocess.CompletedProcess(command, 0, stdout="container-1\n", stderr="")
+        if command[:2] == ["docker", "rm"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(run_suites_setup, "CODEX_TOOL_BUNDLE_ROOT", bundle_root)
+    monkeypatch.setattr(run_suites_setup, "CODEX_TOOL_BUNDLE_DIR", bundle_dir)
+    monkeypatch.setattr(run_suites_setup, "CODEX_TOOL_BUNDLE_CURRENT", current)
+    monkeypatch.setattr(run_suites_setup, "_docker_image_exists", lambda image: True)
+    monkeypatch.setattr(run_suites_setup, "_run", fake_run_command)
+    monkeypatch.setattr(run_suites_setup.subprocess, "run", fake_subprocess_run)
+
+    assert run_suites_setup.setup_codex_tool_bundle(image="contextbench-codex-runtime:test") == 0
+
+    tmp_bundle_dir = bundle_dir.with_name(f".{bundle_dir.name}.tmp")
+    assert subprocess_calls[0] == ["docker", "create", "contextbench-codex-runtime:test"]
+    assert run_calls == [
+        ["docker", "cp", "container-1:/usr/local/bin", str(tmp_bundle_dir / "usr-local" / "bin")],
+        [
+            "docker",
+            "cp",
+            "container-1:/usr/local/lib/node_modules",
+            str(tmp_bundle_dir / "usr-local" / "lib" / "node_modules"),
+        ],
+    ]
+    assert current.is_symlink()
+    assert current.readlink() == Path(bundle_dir.name)
+    assert json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8")) == {
+        "codex_cli_version": run_suites_setup.CODEX_CLI_VERSION,
+        "source_image": "contextbench-codex-runtime:test",
+    }
 
 
 def test_setup_claude_runtime_image_accepts_explicit_platform_and_image(monkeypatch) -> None:

@@ -4,7 +4,10 @@ from __future__ import annotations
 import csv
 import json
 import os
+import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -109,6 +112,242 @@ def test_run_suite_runner_writes_manifest_and_variant_outputs(tmp_path, monkeypa
     assert [row["variant"] for row in rows] == ["baseline", "with-plugin"]
 
 
+def test_run_suite_runner_global_scheduler_runs_across_instances(tmp_path, monkeypatch) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=3)
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+    call_log: list[dict[str, object]] = []
+
+    def fake_run(
+        *,
+        task,
+        agent,
+        output_dir,
+        workspace_key=None,
+        **kwargs,
+    ):
+        nonlocal active, max_active
+        del kwargs
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.05)
+            task_id = safe_path_component(task.get("instance_id") or "task")
+            task_dir = output_dir / task_id
+            task_dir.mkdir(parents=True, exist_ok=True)
+            workspace_path = task_dir / "workspaces" / safe_path_component(workspace_key or task_id)
+            workspace_path.mkdir(parents=True, exist_ok=True)
+            record = _make_fake_agent_record(
+                task=task,
+                agent=agent,
+                task_dir=task_dir,
+                workspace_path=workspace_path,
+            )
+            record_path = task_dir / f"{task_id}.{agent}-record.json"
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+            with lock:
+                call_log.append({"task_id": task.get("instance_id"), "workspace_key": workspace_key})
+            return record
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", fake_run)
+    monkeypatch.setattr("contextbench.run_suites_core.runner.remove_worktree", lambda *args, **kwargs: None)
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "global-scheduler",
+            "agent": "codex",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "timeout": 30,
+            },
+            "variants": [{"name": "baseline"}, {"name": "plugin"}],
+            "parallelism": {"max_workers": 2, "agent_workers": 3, "scheduler": "global"},
+            "postprocess": {"convert": True, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    rc = RunSuiteRunner(config).run()
+
+    experiment_dir = tmp_path / "results" / "global-scheduler"
+    manifest = json.loads((experiment_dir / "manifest.json").read_text(encoding="utf-8"))
+    baseline_rows = [
+        json.loads(line)
+        for line in (experiment_dir / "variants" / "baseline" / "task-results.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    plugin_rows = [
+        json.loads(line)
+        for line in (experiment_dir / "variants" / "plugin" / "task-results.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert rc == 0
+    assert len(call_log) == 6
+    assert max_active == 3
+    assert manifest["scheduler"] == {"mode": "global", "agent_workers": 3, "max_workers": 2}
+    assert "agent_ms" in manifest["phase_timings"]
+    assert [row["instance_id"] for row in baseline_rows] == [
+        "psf__requests-1000",
+        "psf__requests-1001",
+        "psf__requests-1002",
+    ]
+    assert [row["instance_id"] for row in plugin_rows] == [
+        "psf__requests-1000",
+        "psf__requests-1001",
+        "psf__requests-1002",
+    ]
+
+
+def test_run_suite_runner_prebuilds_runtime_image_generically(tmp_path, monkeypatch) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=1)
+    call_log: list[dict[str, object]] = []
+    images = {"base-runtime:1.0"}
+    docker_commands: list[list[str]] = []
+
+    def fake_image_available(image: str) -> bool:
+        return image in images
+
+    def fake_run(command, capture_output, text, check):
+        del capture_output, text, check
+        docker_commands.append(list(command))
+        if command[:2] == ["docker", "build"]:
+            tag = command[command.index("--tag") + 1]
+            images.add(tag)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_available", fake_image_available)
+    monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_id", lambda image: f"sha256:{safe_path_component(image)}")
+    monkeypatch.setattr("contextbench.run_suites_core.runner.subprocess.run", fake_run)
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task(call_log))
+    monkeypatch.setattr("contextbench.run_suites_core.runner.remove_worktree", lambda *args, **kwargs: None)
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "runtime-prebuild",
+            "agent": "codex",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "runtime_backend": "docker",
+                "runtime_image": "base-runtime:1.0",
+                "runtime_prebuild": {
+                    "enabled": True,
+                    "commands": ["printf tool-ready"],
+                    "env": {"TOOL_HOME": "/opt/tool"},
+                },
+            },
+            "variants": [{"name": "baseline"}],
+            "postprocess": {"convert": True, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    rc = RunSuiteRunner(config).run()
+
+    experiment_dir = tmp_path / "results" / "runtime-prebuild"
+    manifest = json.loads((experiment_dir / "manifest.json").read_text(encoding="utf-8"))
+    dockerfile = experiment_dir / "runtime-prebuild" / "baseline" / "Dockerfile"
+
+    assert rc == 0
+    assert docker_commands[0][:4] == ["docker", "build", "--tag", call_log[0]["runtime_image"]]
+    assert call_log[0]["runtime_image"].startswith("contextbench-runtime-prebuild:runtime-prebuild-baseline-")
+    assert manifest["runtime_prebuilds"][0]["status"] == "built"
+    assert manifest["runtime_prebuilds"][0]["base_image"] == "base-runtime:1.0"
+    assert dockerfile.read_text(encoding="utf-8").splitlines() == [
+        "FROM base-runtime:1.0",
+        'SHELL ["/bin/sh", "-lc"]',
+        'ENV TOOL_HOME="/opt/tool"',
+        "RUN printf tool-ready",
+    ]
+
+
+def test_run_suite_runner_uses_resolution_images_as_agent_runtime(tmp_path, monkeypatch) -> None:
+    task_data, task_csv = _write_task_inputs(tmp_path, count=2)
+    call_log: list[dict[str, object]] = []
+    prepared: dict[str, object] = {}
+    bundle_root = tmp_path / "codex-bundle"
+    bundle_root.mkdir()
+
+    def fake_prepare_resolution_images_for_tasks(**kwargs):
+        prepared.update(kwargs)
+        return {
+            "status": "completed",
+            "scope": "resolution_runtime_images",
+            "task_count": len(kwargs["tasks"]),
+            "bench_count": 1,
+            "max_workers": kwargs["max_workers"],
+            "benches": {},
+            "images": [
+                {
+                    "bench": "Verified",
+                    "instance_id": "psf__requests-1000",
+                    "image": "sweb.eval.x86_64.psf__requests-1000:latest",
+                }
+            ],
+        }
+
+    def fake_image_available(image: str) -> bool:
+        return str(image).startswith("sweb.eval.x86_64.psf__requests-")
+
+    monkeypatch.setattr("contextbench.run_suites_core.runner.codex_tool_bundle_root", lambda runtime_env=None: bundle_root)
+    monkeypatch.setattr("contextbench.run_suites_core.runner._docker_available", lambda: True)
+    monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_available", fake_image_available)
+    monkeypatch.setattr("contextbench.run_suites_core.runner._docker_image_platform", lambda image: "linux/amd64")
+    monkeypatch.setattr(
+        "contextbench.run_suites_core.runner.prepare_resolution_images_for_tasks",
+        fake_prepare_resolution_images_for_tasks,
+    )
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task(call_log))
+    monkeypatch.setattr("contextbench.run_suites_core.runner.remove_worktree", lambda *args, **kwargs: None)
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "resolution-runtime-agent",
+            "agent": "codex",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": str(task_csv),
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "timeout": 30,
+                "runtime_backend": "docker",
+                "runtime_image_source": "resolution",
+                "runtime_platform": "linux/amd64",
+            },
+            "variants": [{"name": "baseline"}],
+            "parallelism": {"max_workers": 1},
+            "postprocess": {
+                "convert": True,
+                "evaluate": False,
+                "runtime_backend": "host",
+                "prebuild_resolution_workers": 3,
+            },
+        }
+    )
+
+    rc = RunSuiteRunner(config).run()
+
+    experiment_dir = tmp_path / "results" / "resolution-runtime-agent"
+    manifest = json.loads((experiment_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert rc == 0
+    assert prepared["max_workers"] == 3
+    assert Path(prepared["work_dir"]) == experiment_dir / "runtime-resolution-images"
+    assert [call["runtime_image"] for call in call_log] == [
+        "sweb.eval.x86_64.psf__requests-1000:latest",
+        "sweb.eval.x86_64.psf__requests-1001:latest",
+    ]
+    assert manifest["runtime_resolution_images"]["status"] == "completed"
+    assert manifest["runtime_resolution_images"]["source"] == "resolution"
+
+
 def test_run_suite_runner_fails_fast_when_evaluation_dependencies_missing(tmp_path, monkeypatch) -> None:
     task_data, task_csv = _write_task_inputs(tmp_path, count=1)
     monkeypatch.setattr("contextbench.run_suites_core.runner.treesitter_available", lambda: False)
@@ -189,6 +428,42 @@ def test_run_suite_runner_preflight_rejects_selected_full_dataset_assertion(tmp_
     proof = json.loads((tmp_path / "results" / "codex-full-suite" / "preflight.failure.json").read_text(encoding="utf-8"))
     assert proof["failures"][0]["kind"] == "selected_full_dataset_assertion"
     assert proof["failures"][0]["selectors"]["task_csv"] == str(task_csv)
+
+
+def test_run_suite_runner_preflight_rejects_full_dataset_configured_selection_assertion(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    task_data, _task_csv = _write_task_inputs(tmp_path, count=1)
+    monkeypatch.setattr("contextbench.run_suites_core.runner.run_coding_agent_task", _fake_run_coding_agent_task([]))
+
+    config = RunSuiteConfig.model_validate(
+        {
+            "experiment_name": "codex-configured-selection-assertion",
+            "agent": "codex",
+            "base_run": {
+                "task_data": str(task_data),
+                "task_csv": None,
+                "selection_assertion": "configured_selection",
+                "output_root": str(tmp_path / "results"),
+                "repo_cache": str(tmp_path / "cache"),
+                "limit": 0,
+                "runtime_backend": "host",
+            },
+            "variants": [{"name": "baseline", "runtime_backend": "host"}],
+            "postprocess": {"convert": True, "evaluate": False, "runtime_backend": "host"},
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="Run-suite preflight failed"):
+        RunSuiteRunner(config).run()
+
+    proof = json.loads(
+        (tmp_path / "results" / "codex-configured-selection-assertion" / "preflight.failure.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert proof["failures"][0]["kind"] == "configured_selection_assertion"
 
 
 def test_run_suite_runner_does_not_infer_full_dataset_from_prose(tmp_path, monkeypatch) -> None:
@@ -369,8 +644,8 @@ def test_run_suite_runner_preflight_accepts_claude_docker_portable_auth_from_run
     )
 
     runner = RunSuiteRunner(config)
-    tasks, _task_set = runner._load_tasks()
-    runner._validate_preflight(tasks, [build_run_suite_variant(config, config.variants[0])])
+    tasks, task_set = runner._load_tasks()
+    runner._validate_preflight(tasks, [build_run_suite_variant(config, config.variants[0])], task_set)
 
 
 def test_run_suite_runner_preflight_rejects_runtime_platform_mismatch(tmp_path, monkeypatch) -> None:
@@ -435,8 +710,8 @@ def test_run_suite_runner_does_not_fail_fast_when_resolution_harness_missing(tmp
     )
 
     runner = RunSuiteRunner(config)
-    tasks, _task_set = runner._load_tasks()
-    runner._validate_preflight(tasks, [build_run_suite_variant(config, config.variants[0])])
+    tasks, task_set = runner._load_tasks()
+    runner._validate_preflight(tasks, [build_run_suite_variant(config, config.variants[0])], task_set)
 
     assert resolution_preflight_calls == []
 
@@ -472,6 +747,7 @@ def test_run_suite_runner_cleans_successful_worktrees_but_keeps_failed_runs(tmp_
         runtime_validation_commands=(),
         diff_exclude_paths=(),
         required_tool_call_patterns=(),
+        required_command_patterns=(),
         required_available_tool_patterns=(),
         runtime_keep_failed=False,
     ):
@@ -497,6 +773,7 @@ def test_run_suite_runner_cleans_successful_worktrees_but_keeps_failed_runs(tmp_
             runtime_validation_commands,
             diff_exclude_paths,
             required_tool_call_patterns,
+            required_command_patterns,
             required_available_tool_patterns,
             runtime_keep_failed,
         )

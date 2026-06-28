@@ -60,6 +60,7 @@ def test_run_suite_runner_marks_partial_postprocess_when_conversion_and_evaluati
         runtime_validation_commands=(),
         diff_exclude_paths=(),
         required_tool_call_patterns=(),
+        required_command_patterns=(),
         required_available_tool_patterns=(),
         runtime_keep_failed=False,
     ):
@@ -85,6 +86,7 @@ def test_run_suite_runner_marks_partial_postprocess_when_conversion_and_evaluati
             runtime_validation_commands,
             diff_exclude_paths,
             required_tool_call_patterns,
+            required_command_patterns,
             required_available_tool_patterns,
             runtime_keep_failed,
         )
